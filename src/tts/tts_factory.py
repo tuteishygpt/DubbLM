@@ -5,12 +5,14 @@ from .tts_interface import TTSInterface
 from .f5_tts_wrapper import F5TTSWrapper
 from .openai_tts_wrapper import OpenAITTSWrapper
 from .gemini_tts_wrapper import GeminiTTSWrapper
+from .bextts_wrapper import BexTTSWrapper
 
 # Define available TTS providers
 TTS_PROVIDERS: Dict[str, Type[TTSInterface]] = {
     "f5": F5TTSWrapper,
     "openai": OpenAITTSWrapper,
     "gemini": GeminiTTSWrapper,
+    "bextts": BexTTSWrapper,
 }
 
 class TTSConfig:

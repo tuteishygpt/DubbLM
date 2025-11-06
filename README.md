@@ -16,7 +16,7 @@ The DubbLM process consists of several AI-powered stages:
 2. **Transcription** - Converts speech to text using advanced models (Whisper, OpenAI, AssemblyAI)
 3. **Context-Aware Translation** - Uses LLM to translate with full context understanding
 4. **Translation Refinement** - Applies persona-specific refinement for natural speech patterns
-5. **Voice Synthesis** - Generates dubbed audio using TTS systems (OpenAI, Gemini, Coqui)
+5. **Voice Synthesis** - Generates dubbed audio using TTS systems (OpenAI, Gemini, Coqui, BexTTS)
 6. **Audio/Video Integration** - Combines translated audio with original video
 
 ## Why LLM Translation is Superior
@@ -52,6 +52,12 @@ The `refinement_persona` feature adapts translations for specific audiences:
 - **Speed**: ~0.5x video speed (moderate processing)
 - **Cost**: More affordable
 - **Best for**: Balanced quality/cost projects
+
+### BexTTS (Hugging Face Space)
+- **Quality**: Belarusian-focused voices with optional voice cloning via reference audio
+- **Speed**: Depends on queue length of the public space (typically slower than hosted APIs)
+- **Cost**: Free, but requires Hugging Face authentication for higher rate limits
+- **Best for**: Community-driven Belarusian voice synthesis or experiments with speaker cloning
 
 ### Voice Selection
 - **Automatic**: AI matches most similar voices to speaker characteristics from existing TTS voice set
@@ -117,6 +123,7 @@ Different features require different API keys. Add these to your `.env` file:
 *For Text-to-Speech:*
 - `OPENAI_API_KEY` - If using `tts_system: "openai"`
 - `GOOGLE_API_KEY` - If using `tts_system: "gemini"`
+- `HF_TOKEN` - Recommended when using `tts_system: "bextts"` to authenticate against the Hugging Face Space
 - No API key needed for `tts_system: "coqui"` (local TTS)
 
 **Example .env file:**
