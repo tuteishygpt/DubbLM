@@ -23,6 +23,7 @@ use_two_pass_encoding: true  # Use two-pass encoding for better video quality (s
 # Text-to-Speech settings
 tts_system: "gemini"  # TTS engine: coqui, openai, gemini, f5_tts
 tts_prompt_prefix: ""  # Global voice instruction prefix for all speakers
+segment_reference_min_duration: 2.0  # Minimum segment length (seconds) to export a dedicated reference clip
 
 # Transcription settings
 transcription_system: "assemblyai"  # Speech-to-text: whisper, openai, whisperx, assemblyai

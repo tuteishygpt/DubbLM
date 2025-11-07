@@ -74,7 +74,8 @@ class DubbingConfig:
             'keyframe_buffer': 0.2,
             'dubbed_volume': 1.0,
             'background_volume': 0.562341,
-            'group_overflow_tolerance': 1.0
+            'group_overflow_tolerance': 1.0,
+            'segment_reference_min_duration': 2.0
         }
         
         # Required parameters that must come from CLI
@@ -203,6 +204,22 @@ class DubbingConfig:
         except Exception:
             logger.warning("Warning: Invalid group_overflow_tolerance value. Falling back to 1.0.")
             self.config['group_overflow_tolerance'] = 1.0
+
+        # Validate segment_reference_min_duration
+        ref_min_duration = self.config.get('segment_reference_min_duration')
+        try:
+            ref_min_duration_f = float(0.0 if ref_min_duration is None else ref_min_duration)
+            if ref_min_duration_f < 0.0:
+                logger.warning("Warning: segment_reference_min_duration cannot be negative. Using 0 seconds.")
+                ref_min_duration_f = 0.0
+            self.config['segment_reference_min_duration'] = ref_min_duration_f
+        except (TypeError, ValueError):
+            default_ref_duration = self.defaults['segment_reference_min_duration']
+            logger.warning(
+                "Warning: Invalid segment_reference_min_duration value. Falling back to default of %.2f seconds.",
+                default_ref_duration
+            )
+            self.config['segment_reference_min_duration'] = default_ref_duration
     
     def get(self, key: str, default: Any = None) -> Any:
         """Get configuration value."""
@@ -270,7 +287,8 @@ class DubbingConfig:
         parser.add_argument('--dubbed_volume', type=float, help='Gain multiplier for translated track (e.g., 1.2 for +1.6 dB)')
         parser.add_argument('--background_volume', type=float, help='Gain multiplier for background track when keep_background=true (e.g., 0.56 ≈ -5 dB)')
         parser.add_argument('--group_overflow_tolerance', type=float, help='Allowed overflow beyond group timeframe when combining segments (0..1, default 1.0)')
-        
+        parser.add_argument('--segment_reference_min_duration', type=float, help='Minimum segment length in seconds required to export dedicated reference audio clips')
+
         return parser
 
 
