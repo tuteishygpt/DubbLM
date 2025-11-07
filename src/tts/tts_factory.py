@@ -6,9 +6,12 @@ from .f5_tts_wrapper import F5TTSWrapper
 from .openai_tts_wrapper import OpenAITTSWrapper
 from .gemini_tts_wrapper import GeminiTTSWrapper
 from .bextts_wrapper import BexTTSWrapper
+from .xtts_local_wrapper import XTTSLocalWrapper
 
 # Define available TTS providers
 TTS_PROVIDERS: Dict[str, Type[TTSInterface]] = {
+    "coqui": XTTSLocalWrapper,
+    "xtts": XTTSLocalWrapper,
     "f5": F5TTSWrapper,
     "openai": OpenAITTSWrapper,
     "gemini": GeminiTTSWrapper,
@@ -51,7 +54,7 @@ class TTSFactory:
         Create and return a TTS object based on the specified system.
         
         Args:
-            tts_system: TTS system to use ("coqui", "openai", "f5_tts", "gemini")
+            tts_system: TTS system to use ("coqui", "xtts", "openai", "f5_tts", "gemini", "bextts")
             device: Computing device to use ("cuda" or "cpu")
             voice_config: Voice configuration:
                 - For OpenAI/Gemini TTS: Either a single voice name (str) to be used as default_voice,
@@ -88,8 +91,7 @@ class TTSFactory:
             config_args["voice_mapping"] = voice_config
         
         # For providers that use 'device' (Coqui, F5), add it to kwargs for TTSConfig
-        if provider_name_lower in ["coqui", "f5"]: # F5TTSWrapper uses f5 not f5_tts as key in current factory
-             # Correcting based on TTS_PROVIDERS keys: "f5" is F5TTSWrapper
+        if provider_name_lower in ["coqui", "xtts", "f5"]: # Local providers can leverage the device argument
             config_args.setdefault("kwargs", {})["device"] = device
 
 
