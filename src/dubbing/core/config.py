@@ -246,7 +246,7 @@ class DubbingConfig:
         parser.add_argument('--start_time', type=float, help='Start time in seconds to begin processing')
         parser.add_argument('--duration', type=float, help='Duration in seconds to process')
         parser.add_argument('--no_cache', action='store_true', default=argparse.SUPPRESS, help='Disable caching of pipeline steps')
-        parser.add_argument('--tts_system', type=str, choices=['coqui', 'openai', 'f5_tts', 'gemini'], help='Text-to-speech system to use')
+        parser.add_argument('--tts_system', type=str, choices=['coqui', 'xtts', 'openai', 'f5_tts', 'gemini', 'bextts'], help='Text-to-speech system to use')
         parser.add_argument('--tts_model', type=str, help='Model name for the selected TTS provider')
         parser.add_argument('--tts_fallback_model', type=str, help='Fallback model name for the TTS provider (used by Gemini)')
         parser.add_argument('--transcription_system', type=str, choices=['openai', 'whisperx'], help='Transcription system to use')

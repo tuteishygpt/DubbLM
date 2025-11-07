@@ -124,7 +124,7 @@ Different features require different API keys. Add these to your `.env` file:
 - `OPENAI_API_KEY` - If using `tts_system: "openai"`
 - `GOOGLE_API_KEY` - If using `tts_system: "gemini"`
 - `HF_TOKEN` - Recommended when using `tts_system: "bextts"` to authenticate against the Hugging Face Space
-- No API key needed for `tts_system: "coqui"` (local TTS)
+- No API key needed for `tts_system: "coqui"` or `"xtts"` (local XTTS voice cloning)
 
 **Example .env file:**
 ```env
@@ -216,6 +216,24 @@ tts_system_mapping:
 ```
 
 ## Output Files
+
+### Local XTTS voice cloning
+
+Set `tts_system` to `"coqui"` (or the alias `"xtts"`) to synthesize speech locally using the
+Coqui XTTS v2 voice-cloning model. The first run downloads the model weights; ensure the
+`coqui-tts` package is installed (already included in `requirements.txt`).
+
+- **Reference voices:**
+  - Provide a single default clip via `voice_name: "/path/to/voice.wav"`, or
+  - Map individual speakers to reference clips with a YAML dictionary.
+  - The pipeline automatically falls back to generated samples in `artifacts/speakers_audio/`
+    when they exist for a speaker.
+- **Style prompts:** Optional `voice_prompt` entries are prefixed to the synthesized text.
+- **Output:** Each segment is saved to the requested `output_path`; leading and trailing silence
+  is trimmed automatically to mirror the reference implementation supplied with the task.
+
+> 💡 Tip: Voice references should be short (5–15 seconds) and free of background noise for
+> the best cloning quality.
 
 The tool generates:
 - `{input}_{target_lang}.mp4` - Dubbed video
