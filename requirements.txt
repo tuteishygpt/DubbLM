@@ -213,7 +213,7 @@ nvidia-nvjitlink-cu12==12.4.127
 nvidia-nvtx-cu12==12.4.127
 omegaconf==2.3.0
 onnx==1.17.0
-onnx-weekly==1.19.0.dev20250419
+#onnx-weekly==1.19.0.dev20250419
 onnx2torch==1.5.15
 onnx2torch-py313==1.6.0
 onnxruntime==1.21.1
