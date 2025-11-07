@@ -649,7 +649,25 @@ class SmartDubbing:
         # Define comfort ratio constants
         COMFORT_MIN_ADJUSTMENT_RATIO = 0.75
         COMFORT_MAX_ADJUSTMENT_RATIO = 1.15
-        
+
+        # Lazily-loaded original audio for creating segment-specific reference clips
+        original_audio_segment = None
+
+        # Minimum duration threshold for exporting segment reference audio
+        segment_reference_min_duration = self.config.get('segment_reference_min_duration', 2.0)
+        try:
+            segment_reference_min_duration = float(segment_reference_min_duration)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid segment_reference_min_duration value '%s'. Falling back to 2.0 seconds.",
+                segment_reference_min_duration
+            )
+            segment_reference_min_duration = 2.0
+        if segment_reference_min_duration < 0.0:
+            logger.warning("segment_reference_min_duration cannot be negative. Using 0 seconds instead.")
+            segment_reference_min_duration = 0.0
+        segment_reference_min_duration_ms = max(int(segment_reference_min_duration * 1000), 0)
+
         # Group segments by TTS system for batch processing
         segments_by_tts_system = {}
         segment_to_tts_mapping = {}
@@ -753,7 +771,31 @@ class SmartDubbing:
                 potential_ref_audio_for_speaker = f"artifacts/speakers_audio/{speaker}.wav"
                 if os.path.exists(potential_ref_audio_for_speaker):
                     tts_segment_data_args["reference_audio_path"] = potential_ref_audio_for_speaker
-                
+
+                # Attempt to create a segment-specific reference audio clip when possible
+                segment_duration = segment_dict["end"] - segment_dict["start"]
+                if segment_reference_min_duration <= 0.0 or segment_duration >= segment_reference_min_duration:
+                    try:
+                        if original_audio_segment is None:
+                            original_audio_segment = AudioSegment.from_file(audio_file)
+
+                        start_ms = max(int(segment_dict["start"] * 1000), 0)
+                        end_ms = min(int(segment_dict["end"] * 1000), len(original_audio_segment))
+
+                        if end_ms > start_ms:
+                            segment_audio = original_audio_segment[start_ms:end_ms]
+
+                            if segment_reference_min_duration_ms == 0 or len(segment_audio) >= segment_reference_min_duration_ms:
+                                segment_ref_dir = Path("artifacts/speakers_audio/segments")
+                                segment_ref_dir.mkdir(parents=True, exist_ok=True)
+                                segment_ref_path = segment_ref_dir / f"{speaker}_{i}.wav"
+                                segment_audio.export(segment_ref_path, format="wav")
+                                tts_segment_data_args["reference_audio_path"] = str(segment_ref_path)
+                    except Exception as exc:
+                        logger.warning(
+                            f"Failed to create segment reference audio for segment {i+1} ({speaker}): {exc}"
+                        )
+
                 # Calculate original duration and estimate current translation
                 original_duration = segment_dict["end"] - segment_dict["start"]
                 
