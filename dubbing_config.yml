@@ -4,7 +4,7 @@
 
 # Required parameters (input must be provided via CLI --input)
 source_language: "en"  # Source video language code (e.g., 'en', 'ru', 'de')
-target_language: "ru"  # Target dubbing language code (e.g., 'ru', 'en', 'fr')
+target_language: "be"  # Target dubbing language code (e.g., 'ru', 'en', 'fr')
 
 # Debug options
 debug_info: false  # Generate debug video with speaker labels and timing info
@@ -21,7 +21,7 @@ dubbed_volume: 2.0  # Gain multiplier for the translated track (e.g., 1.2 for +1
 use_two_pass_encoding: true  # Use two-pass encoding for better video quality (slower but higher quality)
 
 # Text-to-Speech settings
-tts_system: "gemini"  # TTS engine: coqui, openai, gemini, f5_tts
+tts_system: "bextts"  # TTS engine: coqui, openai, gemini, f5_tts, bextts
 tts_prompt_prefix: ""  # Global voice instruction prefix for all speakers
 segment_reference_min_duration: 2.0  # Minimum segment length (seconds) to export a dedicated reference clip
 
