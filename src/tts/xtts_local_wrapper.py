@@ -1,4 +1,4 @@
-"""Local XTTS wrapper for speaker-conditioned text-to-speech."""
+"""Local XTTS wrapper for speaker-conditioned text-to-speech (HF BE_XTTS_V2)."""
 
 from __future__ import annotations
 
@@ -13,25 +13,37 @@ from src.dubbing.core.log_config import get_logger
 from .models import DiarizationSegment, SegmentAlignment, TTSSegmentData
 from .tts_interface import TTSInterface
 
+# ---------------------------------------------------------------------
+# Optional deps
+# ---------------------------------------------------------------------
 try:  # Optional dependency used for writing WAV files
     from scipy.io.wavfile import write as write_wav
+
     SCIPY_AVAILABLE = True
-except ImportError:  # pragma: no cover - dependency may be missing at runtime
+except ImportError:  # pragma: no cover
     SCIPY_AVAILABLE = False
 
 try:  # Torch is optional but enables GPU execution and context managers
     import torch
 
     TORCH_AVAILABLE = True
-except ImportError:  # pragma: no cover - torch might not be installed in minimal setups
+except ImportError:  # pragma: no cover
     TORCH_AVAILABLE = False
 
-try:  # Coqui TTS provides the XTTS model implementation
-    from TTS.api import TTS as CoquiTTS
+try:
+    from huggingface_hub import hf_hub_download
 
-    COQUI_TTS_AVAILABLE = True
-except ImportError:  # pragma: no cover - handled gracefully during initialization
-    COQUI_TTS_AVAILABLE = False
+    HF_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    HF_AVAILABLE = False
+
+try:
+    from TTS.tts.configs.xtts_config import XttsConfig
+    from TTS.tts.models.xtts import Xtts
+
+    XTTS_DEPS_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    XTTS_DEPS_AVAILABLE = False
 
 logger = get_logger(__name__)
 
@@ -45,17 +57,18 @@ class _ConditioningLatents:
 
 
 class XTTSLocalWrapper(TTSInterface):
-    """Text-to-speech wrapper that runs the XTTS model locally.
+    """Text-to-speech wrapper that runs the BE_XTTS_V2 model locally.
 
-    The wrapper supports voice cloning by providing reference audio either per
-    segment or via the global voice mapping. The implementation closely mirrors
-    the reference notebook supplied with the task by caching conditioning
-    latents and trimming leading/trailing silence from the generated waveform.
+    Реалізацыя цалкам перапісана пад нізкаўзроўневы прыклад:
+    - XttsConfig + Xtts з TTS.tts.models.xtts
+    - загрузка ваг з Hugging Face праз hf_hub_download
+    - get_conditioning_latents(...) + inference(...)
     """
 
     def __init__(
         self,
-        model: str = "tts_models/multilingual/multi-dataset/xtts_v2",
+        repo_id: str = "archivartaunik/BE_XTTS_V2_10ep250k",
+        model_dir: str = "./be_xtts_model",
         default_voice: Optional[str] = None,
         device: str = "auto",
         silence_threshold: float = 0.005,
@@ -69,18 +82,28 @@ class XTTSLocalWrapper(TTSInterface):
         prompt_prefix: Optional[str] = None,
         **_: Any,
     ) -> None:
-        if not COQUI_TTS_AVAILABLE:
+        if not XTTS_DEPS_AVAILABLE:
             raise ImportError(
-                "coqui-tts package is required for local XTTS synthesis. "
-                "Install it with 'pip install TTS==0.22.0 coqui-tts'."
+                "TTS (XTTS) пакет абавязковы для лакальнага XTTS. "
+                "Усталяваць: 'pip install TTS==0.22.0 coqui-tts'."
+            )
+        if not HF_AVAILABLE:
+            raise ImportError(
+                "huggingface_hub неабходны для спампоўкі ваг. "
+                "Усталяваць: 'pip install huggingface_hub'."
             )
 
-        self.model_name = model
-        self.default_voice_path = default_voice
+        # Прымаем ліцэнзію Coqui (аналаг вашага прыкладу)
+        os.environ["COQUI_TOS_AGREED"] = "1"
+
+        self.repo_id = repo_id
+        self.model_dir = model_dir
+
+        self.default_voice_path = default_voice  # калі None — возьмем voice.wav з мадэлі
         self.requested_device = device
         self.prompt_prefix = prompt_prefix
 
-        # XTTS sampling configuration parameters (mirrors reference snippet)
+        # XTTS sampling configuration (як у прыкладзе)
         self.temperature = temperature
         self.length_penalty = length_penalty
         self.repetition_penalty = repetition_penalty
@@ -92,10 +115,9 @@ class XTTSLocalWrapper(TTSInterface):
         self.margin_start_sec = margin_start_sec
         self.margin_end_sec = margin_end_sec
 
-        # Runtime attributes initialised during ``initialize``
-        self._tts: Optional[CoquiTTS] = None
-        self._synthesizer: Any = None
-        self._xtts_model: Any = None
+        # Runtime attributes
+        self._xtts_model: Optional[Xtts] = None
+        self._config: Optional[XttsConfig] = None
         self._sample_rate: int = 24000
         self._conditioning_cache: Dict[str, _ConditioningLatents] = {}
 
@@ -106,70 +128,102 @@ class XTTSLocalWrapper(TTSInterface):
     # Interface plumbing
     # ------------------------------------------------------------------
     def set_voice_mapping(self, mapping: Dict[str, str]) -> None:
-        """Store mapping between speaker identifiers and reference audio paths."""
-
         self.voice_mapping = mapping or {}
 
     def set_voice_prompt_mapping(self, mapping: Dict[str, str]) -> None:
-        """Store optional style prompts that are prefixed to the synthesized text."""
-
         self.voice_prompt_mapping = mapping or {}
 
     # ------------------------------------------------------------------
     # Initialisation / cleanup
     # ------------------------------------------------------------------
-    def initialize(self) -> None:
-        """Load the XTTS model and prepare runtime helpers."""
+    def _ensure_model_files(self) -> None:
+        os.makedirs(self.model_dir, exist_ok=True)
 
+        checkpoint_file = os.path.join(self.model_dir, "model.pth")
+        config_file = os.path.join(self.model_dir, "config.json")
+        vocab_file = os.path.join(self.model_dir, "vocab.json")
+        default_voice_file = os.path.join(self.model_dir, "voice.wav")
+
+        if not os.path.exists(checkpoint_file):
+            hf_hub_download(self.repo_id, filename="model.pth", local_dir=self.model_dir)
+
+        if not os.path.exists(config_file):
+            hf_hub_download(self.repo_id, filename="config.json", local_dir=self.model_dir)
+
+        if not os.path.exists(vocab_file):
+            hf_hub_download(self.repo_id, filename="vocab.json", local_dir=self.model_dir)
+
+        if not os.path.exists(default_voice_file):
+            hf_hub_download(self.repo_id, filename="voice.wav", local_dir=self.model_dir)
+
+        # Калі default_voice не зададзены звонку — выкарыстоўваем voice.wav мадэлі
+        if self.default_voice_path is None:
+            self.default_voice_path = default_voice_file
+
+        self._checkpoint_file = checkpoint_file
+        self._config_file = config_file
+        self._vocab_file = vocab_file
+
+    def initialize(self) -> None:
+        """Load the BE_XTTS_V2 model and prepare runtime helpers."""
+
+        self._ensure_model_files()
+
+        # 1) канфіг
+        config = XttsConfig()
+        config.load_json(self._config_file)
+
+        # 2) ініцыялізацыя мадэлі
+        model = Xtts.init_from_config(config)
+
+        # 3) загрузка ваг і vocab
+        model.load_checkpoint(
+            config,
+            checkpoint_path=self._checkpoint_file,
+            vocab_path=self._vocab_file,
+            use_deepspeed=False,
+        )
+
+        # 4) перадача на GPU / CPU
         use_gpu = False
+        device_str = "cpu"
         if TORCH_AVAILABLE and self.requested_device:
             if self.requested_device.lower() == "cuda" and torch.cuda.is_available():
                 use_gpu = True
-            elif self.requested_device.lower() in {"auto", "gpu"}:
-                use_gpu = torch.cuda.is_available()
+                device_str = "cuda:0"
+            elif self.requested_device.lower() in {"auto", "gpu"} and torch.cuda.is_available():
+                use_gpu = True
+                device_str = "cuda:0"
+
+        if TORCH_AVAILABLE:
+            model.to(device_str)
+
+        self._xtts_model = model
+        self._config = config
+
+        # sample_rate бярэм з config, калі ёсць
+        try:
+            self._sample_rate = int(config.audio.sample_rate)
+        except Exception:  # pragma: no cover
+            self._sample_rate = 24000
 
         logger.info(
-            "Loading XTTS model '%s' on %s...",
-            self.model_name,
-            "GPU" if use_gpu else "CPU",
+            "✅ BE_XTTS_V2 мадэль загружана і гатовая. Прылада: %s, sample_rate=%d, файлы ў '%s'",
+            device_str,
+            self._sample_rate,
+            self.model_dir,
         )
 
-        try:
-            self._tts = CoquiTTS(model_name=self.model_name, progress_bar=False, gpu=use_gpu)
-        except Exception as exc:  # pragma: no cover - model loading issues are environment specific
-            raise RuntimeError(f"Failed to load XTTS model '{self.model_name}': {exc}") from exc
-
-        # Extract synthesizer internals to access conditioning helpers and sample rate
-        self._synthesizer = getattr(self._tts, "synthesizer", None)
-        self._xtts_model = None
-        if self._synthesizer is not None:
-            self._xtts_model = getattr(self._synthesizer, "tts_model", None)
-            if self._xtts_model is None:
-                # Older releases expose the model under ``model``
-                self._xtts_model = getattr(self._synthesizer, "model", None)
-
-            if hasattr(self._synthesizer, "output_sample_rate"):
-                self._sample_rate = int(self._synthesizer.output_sample_rate)
-            elif hasattr(self._synthesizer, "tts_config") and hasattr(
-                self._synthesizer.tts_config, "audio"
-            ):
-                self._sample_rate = int(getattr(self._synthesizer.tts_config.audio, "sample_rate", 24000))
-
-        logger.info("XTTS ready (sample rate: %d Hz)", self._sample_rate)
-
     def cleanup(self) -> None:
-        """Release references to the model to free memory."""
-
         self._conditioning_cache.clear()
         self._xtts_model = None
-        self._synthesizer = None
-        self._tts = None
+        self._config = None
 
     # ------------------------------------------------------------------
     # Capability reporting
     # ------------------------------------------------------------------
     def is_available(self) -> bool:
-        return self._tts is not None
+        return self._xtts_model is not None
 
     # ------------------------------------------------------------------
     # Core synthesis helpers
@@ -177,7 +231,9 @@ class XTTSLocalWrapper(TTSInterface):
     def _apply_prompt_prefix(self, text: str, speaker_id: Optional[str]) -> str:
         prefix = self.prompt_prefix or ""
         speaker_prompt = (
-            self.voice_prompt_mapping.get(speaker_id, "") if speaker_id and self.voice_prompt_mapping else ""
+            self.voice_prompt_mapping.get(speaker_id, "")
+            if speaker_id and self.voice_prompt_mapping
+            else ""
         )
 
         final_prefix_parts = [p.strip() for p in (prefix, speaker_prompt) if p and p.strip()]
@@ -205,7 +261,8 @@ class XTTSLocalWrapper(TTSInterface):
         return None
 
     def _get_conditioning_latents(self, reference_audio: str) -> Optional[_ConditioningLatents]:
-        if not reference_audio or not self._xtts_model:
+        """Поўны аналаг прыкладу get_conditioning_latents(...)."""
+        if not reference_audio or not self._xtts_model or not self._config:
             return None
 
         if reference_audio in self._conditioning_cache:
@@ -214,24 +271,25 @@ class XTTSLocalWrapper(TTSInterface):
         if not hasattr(self._xtts_model, "get_conditioning_latents"):
             return None
 
-        model_config = getattr(self._xtts_model, "config", None)
-        kwargs: Dict[str, Any] = {"audio_path": reference_audio}
+        kwargs: Dict[str, Any] = {
+            "audio_path": reference_audio,
+            "gpt_cond_len": self._config.gpt_cond_len,
+            "max_ref_length": self._config.max_ref_len,
+            "sound_norm_refs": self._config.sound_norm_refs,
+        }
 
-        # Mirror the reference code when the configuration exposes these fields
-        for attr in ("gpt_cond_len", "max_ref_len", "sound_norm_refs"):
-            if model_config is not None and hasattr(model_config, attr):
-                kwargs[attr if attr != "gpt_cond_len" else "gpt_cond_len"] = getattr(model_config, attr)
-
+        no_grad_ctx = torch.no_grad() if TORCH_AVAILABLE else contextlib.nullcontext()
         try:
-            latents = self._xtts_model.get_conditioning_latents(**kwargs)
-        except Exception as exc:  # pragma: no cover - runtime audio failures depend on environment
+            with no_grad_ctx:  # type: ignore[attr-defined]
+                gpt_cond_latent, speaker_embedding = self._xtts_model.get_conditioning_latents(**kwargs)
+        except Exception as exc:  # pragma: no cover
             logger.warning("XTTS: failed to compute conditioning latents: %s", exc)
             return None
 
-        if not isinstance(latents, (tuple, list)) or len(latents) != 2:
-            return None
-
-        cached = _ConditioningLatents(gpt_cond_latent=latents[0], speaker_embedding=latents[1])
+        cached = _ConditioningLatents(
+            gpt_cond_latent=gpt_cond_latent,
+            speaker_embedding=speaker_embedding,
+        )
         self._conditioning_cache[reference_audio] = cached
         return cached
 
@@ -241,42 +299,48 @@ class XTTSLocalWrapper(TTSInterface):
         language: str,
         reference_audio: Optional[str],
     ) -> np.ndarray:
-        if not self._tts:
+        if not self._xtts_model:
             raise RuntimeError("XTTS model not initialised. Call initialize() first.")
+
+        # Выкарыстоўваем мову як ёсць, без падмены "be" -> "en"
+        model_language = language
 
         text_to_speak = text or ""
 
         conditioning = self._get_conditioning_latents(reference_audio) if reference_audio else None
 
-        if conditioning and self._xtts_model and hasattr(self._xtts_model, "inference"):
-            inference_kwargs = {
-                "text": text_to_speak,
-                "language": language,
-                "gpt_cond_latent": conditioning.gpt_cond_latent,
-                "speaker_embedding": conditioning.speaker_embedding,
-                "temperature": self.temperature,
-                "length_penalty": self.length_penalty,
-                "repetition_penalty": self.repetition_penalty,
-                "top_k": self.top_k,
-                "top_p": self.top_p,
-            }
+        if conditioning is None:
+            logger.warning(
+                "XTTS: no conditioning latents for '%s', голас можа быць не тым, што чакалася.",
+                reference_audio,
+            )
 
-            no_grad_ctx = torch.no_grad() if TORCH_AVAILABLE else contextlib.nullcontext()
-            with no_grad_ctx:  # type: ignore[attr-defined]
-                output = self._xtts_model.inference(**inference_kwargs)
+        inference_kwargs = {
+            "text": text_to_speak,
+            "language": model_language,
+            "gpt_cond_latent": conditioning.gpt_cond_latent if conditioning else None,
+            "speaker_embedding": conditioning.speaker_embedding if conditioning else None,
+            "temperature": self.temperature,
+            "length_penalty": self.length_penalty,
+            "repetition_penalty": self.repetition_penalty,
+            "top_k": self.top_k,
+            "top_p": self.top_p,
+        }
 
-            wav = output["wav"] if isinstance(output, dict) and "wav" in output else output
-        else:
-            synthesis_kwargs = {"text": text_to_speak, "language": language}
-            if reference_audio:
-                synthesis_kwargs["speaker_wav"] = reference_audio
-            wav = self._tts.tts(**synthesis_kwargs)
+        # Прыбіраем None, каб не ламаць подпіс функцыі
+        inference_kwargs = {k: v for k, v in inference_kwargs.items() if v is not None}
+
+        no_grad_ctx = torch.no_grad() if TORCH_AVAILABLE else contextlib.nullcontext()
+        with no_grad_ctx:  # type: ignore[attr-defined]
+            out = self._xtts_model.inference(**inference_kwargs)
+
+        wav = out["wav"] if isinstance(out, dict) and "wav" in out else out
+
+        if TORCH_AVAILABLE and isinstance(wav, torch.Tensor):  # pragma: no cover
+            wav = wav.detach().cpu().numpy()
 
         if isinstance(wav, np.ndarray):
             return wav.astype(np.float32)
-
-        if TORCH_AVAILABLE and isinstance(wav, torch.Tensor):  # pragma: no cover - depends on runtime return type
-            return wav.detach().cpu().numpy().astype(np.float32)
 
         return np.asarray(wav, dtype=np.float32)
 
@@ -284,18 +348,19 @@ class XTTSLocalWrapper(TTSInterface):
         if waveform.size == 0:
             return waveform
 
-        amplitude = np.abs(waveform)
-        non_silence_indices = np.where(amplitude > self.silence_threshold)[0]
+        amp = np.abs(waveform)
+        non_silence_idx = np.where(amp > self.silence_threshold)[0]
 
-        if non_silence_indices.size == 0:
+        if non_silence_idx.size == 0:
+            # усё цішыня — не кранаем
             return waveform
 
         start_idx = max(
-            non_silence_indices[0] - int(self.margin_start_sec * self._sample_rate),
+            non_silence_idx[0] - int(self.margin_start_sec * self._sample_rate),
             0,
         )
         end_idx = min(
-            non_silence_indices[-1] + int(self.margin_end_sec * self._sample_rate),
+            non_silence_idx[-1] + int(self.margin_end_sec * self._sample_rate),
             len(waveform) - 1,
         )
 
@@ -309,11 +374,11 @@ class XTTSLocalWrapper(TTSInterface):
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
-        if not SCIPY_AVAILABLE:  # pragma: no cover - scipy is a declared dependency
+        if not SCIPY_AVAILABLE:  # pragma: no cover
             raise RuntimeError("scipy is required to save XTTS audio output but is not available.")
 
-        pcm16 = np.clip(waveform * 32767.0, -32768, 32767).astype(np.int16)
-        write_wav(output_path, self._sample_rate, pcm16)
+        wav_int16 = np.clip(waveform * 32767.0, -32768, 32767).astype(np.int16)
+        write_wav(output_path, self._sample_rate, wav_int16)
 
     # ------------------------------------------------------------------
     # Public synthesis interface
@@ -321,7 +386,7 @@ class XTTSLocalWrapper(TTSInterface):
     def synthesize(
         self,
         segments_data: List[TTSSegmentData],
-        language: str = "be",
+        language: str = "en",
         **_: Any,
     ) -> List[SegmentAlignment]:
         if not segments_data:
@@ -336,7 +401,7 @@ class XTTSLocalWrapper(TTSInterface):
 
             try:
                 waveform = self._run_model_inference(text_to_speak, language, reference_audio)
-            except Exception as exc:  # pragma: no cover - synthesis failures depend on runtime environment
+            except Exception as exc:  # pragma: no cover
                 logger.error(
                     "XTTS: failed to synthesize segment %d for speaker '%s': %s",
                     index + 1,
@@ -381,15 +446,13 @@ class XTTSLocalWrapper(TTSInterface):
     def estimate_audio_segment_length(
         self,
         segment_data: TTSSegmentData,
-        language: str = "be",
-    ) -> Optional[float]:  # noqa: D401 - the interface already documents the method
-        _ = language  # The heuristic is language agnostic for now
+        language: str = "en",
+    ) -> Optional[float]:
+        _ = language  # пакуль што без моўнай карэкцыі
 
         text = (segment_data.text or "").strip()
         if not text:
             return 0.0
 
-        # Basic heuristic: assume ~12 characters per second, with a minimum duration of 0.8 seconds
-        estimated_duration = max(len(text) / 12.0, 0.8)
-        return estimated_duration
-
+        # Простая эмпірыка: ~12 сімвалаў у секунду, мінімум 0.8 с
+        return max(len(text) / 12.0, 0.8)
