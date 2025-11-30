@@ -75,7 +75,12 @@ class DubbingConfig:
             'dubbed_volume': 1.0,
             'background_volume': 0.562341,
             'group_overflow_tolerance': 1.0,
-            'segment_reference_min_duration': 2.0
+            'segment_reference_min_duration': 2.0,
+            'xtts_repo_id': 'archivartaunik/BE_XTTS_V2_10ep250k',
+            'xtts_speaker_embedding_path': None,
+            'xtts_speaker_embedding_audio': None,
+            'xtts_gpt_cond_base_audio': None,
+            'xtts_speaker_embedding_key': None,
         }
         
         # Required parameters that must come from CLI
@@ -249,6 +254,11 @@ class DubbingConfig:
         parser.add_argument('--tts_system', type=str, choices=['coqui', 'xtts', 'openai', 'f5_tts', 'gemini', 'bextts'], help='Text-to-speech system to use')
         parser.add_argument('--tts_model', type=str, help='Model name for the selected TTS provider')
         parser.add_argument('--tts_fallback_model', type=str, help='Fallback model name for the TTS provider (used by Gemini)')
+        parser.add_argument('--xtts_repo_id', type=str, help='Hugging Face repo id for XTTS local model weights')
+        parser.add_argument('--xtts_speaker_embedding_path', type=str, help='Path to tensor file with a fixed XTTS speaker embedding')
+        parser.add_argument('--xtts_speaker_embedding_audio', type=str, help='Reference audio to derive a fixed XTTS speaker embedding')
+        parser.add_argument('--xtts_gpt_cond_base_audio', type=str, help='Base audio file to use for XTTS gpt_cond_latent regardless of segment reference')
+        parser.add_argument('--xtts_speaker_embedding_key', type=str, help='Key name from the speaker library to pick a specific XTTS embedding')
         parser.add_argument('--transcription_system', type=str, choices=['openai', 'whisperx'], help='Transcription system to use')
         parser.add_argument('--translator_type', type=str, choices=['llm'], help='Translator type to use')
         parser.add_argument('--llm_provider', type=str, choices=['gemini', 'openrouter'], help='LLM provider to use')

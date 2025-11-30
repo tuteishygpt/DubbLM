@@ -24,6 +24,11 @@ use_two_pass_encoding: true  # Use two-pass encoding for better video quality (s
 tts_system: "bextts"  # TTS engine: coqui, openai, gemini, f5_tts, bextts
 tts_prompt_prefix: ""  # Global voice instruction prefix for all speakers
 segment_reference_min_duration: 2.0  # Minimum segment length (seconds) to export a dedicated reference clip
+xtts_repo_id: "archivartaunik/BE_XTTS_V2_10ep250k"  # HF repo for the local XTTS model
+xtts_speaker_embedding_path: null  # Optional: path to tensor file with a fixed speaker embedding
+xtts_speaker_embedding_audio: null  # Optional: audio file to derive a fixed speaker embedding
+xtts_gpt_cond_base_audio: null  # Optional: base audio file to reuse for prosody (gpt_cond_latent)
+xtts_speaker_embedding_key: null  # Optional: key from speaker library to pick a specific voice
 
 # Transcription settings
 transcription_system: "assemblyai"  # Speech-to-text: whisper, openai, whisperx, assemblyai
