@@ -184,24 +184,24 @@ class SmartDubbing:
         """Initialize TTS systems based on configuration."""
         self.tts_systems = {}
         self.default_tts = None
-        
+
         try:
-                tts_instance = TTSFactory.create_tts(
-                    tts_system=self.config.get('tts_system', 'coqui'),
-                    device=self.device,
-                    voice_config=self.config.get('voice_name'),
-                    voice_prompt=self.config.get('voice_prompt', {}),
-                    prompt_prefix=self.config.get('tts_prompt_prefix'),
-                    enable_voice_matching=self.config.get('voice_auto_selection', True),
-                    debug_tts=self.config.get('debug_tts', False),
-                    model=self.config.get('tts_model'),
-                    fallback_model=self.config.get('tts_fallback_model'),
-                    repo_id=self.config.get('xtts_repo_id'),
-                    speaker_embedding_path=self.config.get('xtts_speaker_embedding_path'),
-                    speaker_embedding_audio=self.config.get('xtts_speaker_embedding_audio'),
-                    gpt_cond_base_audio=self.config.get('xtts_gpt_cond_base_audio'),
-                    speaker_embedding_key=self.config.get('xtts_speaker_embedding_key'),
-                )
+            tts_instance = TTSFactory.create_tts(
+                tts_system=self.config.get('tts_system', 'coqui'),
+                device=self.device,
+                voice_config=self.config.get('voice_name'),
+                voice_prompt=self.config.get('voice_prompt', {}),
+                prompt_prefix=self.config.get('tts_prompt_prefix'),
+                enable_voice_matching=self.config.get('voice_auto_selection', True),
+                debug_tts=self.config.get('debug_tts', False),
+                model=self.config.get('tts_model'),
+                fallback_model=self.config.get('tts_fallback_model'),
+                repo_id=self.config.get('xtts_repo_id'),
+                speaker_embedding_path=self.config.get('xtts_speaker_embedding_path'),
+                speaker_embedding_audio=self.config.get('xtts_speaker_embedding_audio'),
+                gpt_cond_base_audio=self.config.get('xtts_gpt_cond_base_audio'),
+                speaker_embedding_key=self.config.get('xtts_speaker_embedding_key'),
+            )
             self.tts_systems[self.config.get('tts_system', 'coqui')] = tts_instance
             self.default_tts = tts_instance
             logger.debug(f"Initialized {self.config.get('tts_system', 'coqui')} TTS system")
