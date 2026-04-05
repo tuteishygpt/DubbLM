@@ -12,13 +12,13 @@ dubbed_volume: 2
 use_two_pass_encoding: true
 tts_system: omnivoice
 segment_reference_min_duration: 2
-transcription_system: assemblyai
+transcription_system: gemini
 translator_type: llm
 llm_provider: gemini
-llm_model_name: gemini-2.5-flash
+llm_model_name: gemini-3.1-pro-preview
 llm_temperature: 1
 refinement_llm_provider: gemini
-refinement_model_name: gemini-2.5-flash
+refinement_model_name: gemini-3.1-pro-preview
 refinement_temperature: 1.8
 refinement_persona: normal
 save_original_subtitles: true
@@ -32,20 +32,4 @@ min_pause_duration: 3
 keyframe_buffer: 0.2
 background_volume: 0.762341
 group_overflow_tolerance: 1
-reference_audio_mapping:
-  SPEAKER_01: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_01\reference.mp3
-  SPEAKER_02: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_02\reference.mp3
-reference_text_mapping:
-  SPEAKER_01: Гаўніна нейкае... Савецкая ўлада моцна спрычынілася да знішчэння гэтага
-    горада і збудавала на яго месцы такі, як ёй. Увага..
-  SPEAKER_02: 'Такога спеву-сугалосся, што тут над рэчкаю панёсся, ніхто не зложыць,
-    не зайграе.
-
-    Дарога праз масток ішла раз''езджаная, бітая і за млынам цяжка рвалася на ўзгорак,
-    адразу ж за самотнымі спарышамі ўзбярэжных алешын.
-
-    Работа ў іх – з дошкі ў сшыткі перапісваць, не задаючы пытанняў і мазгі не ўключаючы.
-
-    Без гэтай з''явы пыл і дым пераносіліся б на вялікія адлегласці.
-
-    Іх ужо не было на праспекце, але горы смецця нікуды не падзеліся.'
+gemini_transcription_model: gemini-3.1-pro-preview

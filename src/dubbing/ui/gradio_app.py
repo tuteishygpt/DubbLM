@@ -34,6 +34,7 @@ WORKFLOW_FIELDS = [
 
 SETTINGS_FIELDS = [
     "whisper_model",
+    "gemini_transcription_model",
     "transcription_system",
     "start_time",
     "duration",
@@ -525,9 +526,13 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                 gr.Markdown("## Transcription")
                 with gr.Row():
                     whisper_model = gr.Textbox(label="Whisper model", value=defaults.get("whisper_model", "large-v3"))
+                    gemini_transcription_model = gr.Textbox(
+                        label="Gemini transcription model",
+                        value=defaults.get("gemini_transcription_model", "gemini-3-flash-preview"),
+                    )
                     transcription_system = gr.Dropdown(
                         label="Transcription system",
-                        choices=["whisper", "openai", "whisperx", "assemblyai"],
+                        choices=["whisper", "openai", "whisperx", "assemblyai", "gemini"],
                         value=defaults.get("transcription_system", "whisper"),
                     )
                     start_time = gr.Number(label="Start time (seconds)", precision=2, value=defaults.get("start_time"))
@@ -710,6 +715,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                 input_components.extend(
                     [
                         whisper_model,
+                        gemini_transcription_model,
                         transcription_system,
                         start_time,
                         duration,

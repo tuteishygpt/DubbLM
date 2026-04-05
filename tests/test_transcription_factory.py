@@ -40,6 +40,38 @@ def test_transcription_factory_supports_whisper_alias():
     assert transcriber.kwargs["transcription_system"] == "whisper"
 
 
+def test_transcription_factory_supports_gemini_backend():
+    from transcription.transcription_factory import TranscriptionFactory
+
+    fake_module = types.ModuleType("transcription.gemini_transcriber")
+
+    class FakeGeminiTranscriber:
+        def __init__(self, source_language, device=None, **kwargs):
+            self.source_language = source_language
+            self.device = device
+            self.kwargs = kwargs
+
+    fake_module.GeminiTranscriber = FakeGeminiTranscriber
+    original_module = sys.modules.get("transcription.gemini_transcriber")
+    sys.modules["transcription.gemini_transcriber"] = fake_module
+
+    try:
+        transcriber = TranscriptionFactory.create_transcriber(
+            transcription_system="gemini",
+            source_language="en",
+            device="cpu",
+            gemini_transcription_model="gemini-2.5-flash",
+        )
+    finally:
+        if original_module is None:
+            sys.modules.pop("transcription.gemini_transcriber", None)
+        else:
+            sys.modules["transcription.gemini_transcriber"] = original_module
+
+    assert isinstance(transcriber, FakeGeminiTranscriber)
+    assert transcriber.kwargs["gemini_transcription_model"] == "gemini-2.5-flash"
+
+
 def test_smart_dubbing_imports_without_optional_speechbrain():
     import dubbing.core.smart_dubbing as smart_dubbing
 
@@ -98,4 +130,37 @@ def test_transcription_factory_passes_artifacts_root_to_pyannote_backend():
             sys.modules["transcription.pyannote_openai_transcriber"] = original_module
 
     assert isinstance(transcriber, FakePyAnnoteOpenAITranscriber)
+    assert transcriber.kwargs["artifacts_root"] == "D:/tmp/Are/artifacts"
+
+
+def test_transcription_factory_passes_artifacts_root_to_gemini_backend():
+    from transcription.transcription_factory import TranscriptionFactory
+
+    fake_module = types.ModuleType("transcription.gemini_transcriber")
+
+    class FakeGeminiTranscriber:
+        def __init__(self, source_language, device=None, **kwargs):
+            self.source_language = source_language
+            self.device = device
+            self.kwargs = kwargs
+
+    fake_module.GeminiTranscriber = FakeGeminiTranscriber
+    original_module = sys.modules.get("transcription.gemini_transcriber")
+    sys.modules["transcription.gemini_transcriber"] = fake_module
+
+    try:
+        transcriber = TranscriptionFactory.create_transcriber(
+            transcription_system="gemini",
+            source_language="en",
+            device="cpu",
+            artifacts_root="D:/tmp/Are/artifacts",
+            gemini_transcription_model="gemini-2.5-flash",
+        )
+    finally:
+        if original_module is None:
+            sys.modules.pop("transcription.gemini_transcriber", None)
+        else:
+            sys.modules["transcription.gemini_transcriber"] = original_module
+
+    assert isinstance(transcriber, FakeGeminiTranscriber)
     assert transcriber.kwargs["artifacts_root"] == "D:/tmp/Are/artifacts"

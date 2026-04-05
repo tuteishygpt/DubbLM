@@ -234,6 +234,62 @@ def test_argument_parser_accepts_omnivoice_tts_system():
     assert args.tts_system == "omnivoice"
 
 
+def test_argument_parser_accepts_gemini_transcription_backend_and_model():
+    parser = create_argument_parser()
+
+    args = parser.parse_args(
+        [
+            "--input",
+            "clip.mp4",
+            "--source_language",
+            "en",
+            "--target_language",
+            "be",
+            "--transcription_system",
+            "gemini",
+            "--gemini_transcription_model",
+            "gemini-2.5-flash",
+        ]
+    )
+
+    assert args.transcription_system == "gemini"
+    assert args.gemini_transcription_model == "gemini-2.5-flash"
+
+
+def test_build_config_from_overrides_preserves_gemini_transcription_model(tmp_path):
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"video")
+
+    config = build_config_from_overrides(
+        {
+            "input": str(video_path),
+            "source_language": "en",
+            "target_language": "be",
+            "transcription_system": "gemini",
+            "gemini_transcription_model": "gemini-2.5-flash",
+        }
+    )
+
+    assert config.get("transcription_system") == "gemini"
+    assert config.get("gemini_transcription_model") == "gemini-2.5-flash"
+
+
+def test_build_config_from_overrides_defaults_gemini_transcription_model(tmp_path):
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"video")
+
+    config = build_config_from_overrides(
+        {
+            "input": str(video_path),
+            "source_language": "en",
+            "target_language": "be",
+            "transcription_system": "gemini",
+        }
+    )
+
+    assert config.get("gemini_transcription_model") == "gemini-3-flash-preview"
+
+
 def test_build_config_from_overrides_defaults_omnivoice_language_to_belarusian(tmp_path):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")

@@ -10,7 +10,7 @@ class TranscriptionFactory:
     
     @staticmethod
     def create_transcriber(
-        transcription_system: Literal["pyannote_openai", "whisper", "openai", "whisperx", "assemblyai"],
+        transcription_system: Literal["pyannote_openai", "whisper", "openai", "whisperx", "assemblyai", "gemini"],
         source_language: str,
         device: Optional[str] = None,
         **kwargs
@@ -54,6 +54,14 @@ class TranscriptionFactory:
             from transcription.assemblyai_transcriber import AssemblyAITranscriber
 
             return AssemblyAITranscriber(
+                source_language=source_language,
+                device=device,
+                **kwargs
+            )
+        elif transcription_system == "gemini":
+            from transcription.gemini_transcriber import GeminiTranscriber
+
+            return GeminiTranscriber(
                 source_language=source_language,
                 device=device,
                 **kwargs
