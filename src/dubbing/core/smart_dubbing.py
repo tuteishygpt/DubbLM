@@ -11,6 +11,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES', '0')
 # --- End of suppression block ---
 
 import time
+import hashlib
 import torch
 import warnings
 import shutil
@@ -45,6 +46,14 @@ warnings.filterwarnings("ignore")
 
 # Get logger
 logger = get_logger(__name__)
+
+
+SMART_DUBBING_STRESS_MARKS_REQUIREMENT = (
+    "For dubbing-ready text, add word stress marks where they help pronunciation. "
+    "Use the combining acute accent symbol U+0301 directly after the stressed vowel, "
+    "for example: каса́. Apply this to the main translation and to alternative "
+    "very_short / short / long variants intended for TTS."
+)
 
 
 class SmartDubbing:
@@ -623,7 +632,16 @@ class SmartDubbing:
     
     def translate_segments(self, transcription: List[Dict], audio_file: str) -> List[Dict]:
         """Translate segments using the translator."""
-        cache_key = f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}_{self.config.get('target_language')}"
+        effective_prompt_prefix = self._build_translation_prompt_prefix(
+            self.config.get("translation_prompt_prefix")
+        )
+        prompt_prefix_hash = hashlib.md5(
+            effective_prompt_prefix.encode("utf-8")
+        ).hexdigest()[:12]
+        cache_key = (
+            f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}"
+            f"_{self.config.get('target_language')}_{prompt_prefix_hash}"
+        )
         step_name = "translation"
         
         translated_segments = None
@@ -644,16 +662,26 @@ class SmartDubbing:
             if not translator.is_available():
                 raise ValueError("No translator available")
 
-            translated_segments = translator.translate(
-                segments=transcription,
-                source_language=self.config.get('source_language'),
-                target_language=self.config.get('target_language'),
-                refinement_persona=self.config.get('refinement_persona', 'normal'),
-                debug=self.debug_data,
-                debug_dir=self.config.get("translation_debug_dir"),
-                refinement_debug_dir=self.config.get("translation_refinement_debug_dir"),
-                timecodes_report_path=self.config.get("timecodes_report_path"),
-            )
+            original_prompt_prefix = getattr(translator, "prompt_prefix", None)
+            if hasattr(translator, "prompt_prefix"):
+                translator.prompt_prefix = self._build_translation_prompt_prefix(
+                    original_prompt_prefix
+                )
+
+            try:
+                translated_segments = translator.translate(
+                    segments=transcription,
+                    source_language=self.config.get('source_language'),
+                    target_language=self.config.get('target_language'),
+                    refinement_persona=self.config.get('refinement_persona', 'normal'),
+                    debug=self.debug_data,
+                    debug_dir=self.config.get("translation_debug_dir"),
+                    refinement_debug_dir=self.config.get("translation_refinement_debug_dir"),
+                    timecodes_report_path=self.config.get("timecodes_report_path"),
+                )
+            finally:
+                if hasattr(translator, "prompt_prefix"):
+                    translator.prompt_prefix = original_prompt_prefix
             
             # Save results to cache
             self.cache_manager.save_to_cache(step_name, cache_key, translated_segments)
@@ -666,6 +694,15 @@ class SmartDubbing:
         self.debug_data["translation"] = translated_segments
         
         return translated_segments
+
+    def _build_translation_prompt_prefix(self, base_prompt_prefix: Optional[str]) -> str:
+        """Combine any user-provided translation prompt prefix with SmartDubbing TTS stress rules."""
+        base_prompt = (base_prompt_prefix or "").strip()
+        if "U+0301" in base_prompt or "каса́" in base_prompt:
+            return base_prompt
+        if base_prompt:
+            return f"{base_prompt}\n\n{SMART_DUBBING_STRESS_MARKS_REQUIREMENT}"
+        return SMART_DUBBING_STRESS_MARKS_REQUIREMENT
     
     def analyze_emotions(self, segments: List[Dict], audio_file: str) -> List[Dict]:
         """Analyze emotions in the audio for each segment."""

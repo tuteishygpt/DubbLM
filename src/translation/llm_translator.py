@@ -975,12 +975,13 @@ Preserve the meaning, tone, and style of the original.
 2. Translatable terms: AI -> ИИ
 3. Number and Date Conversion: Convert all digits and numbers to their written form in the target language as they would be naturally spoken aloud.
 4. Remember this translation will be used for audio dubbing, so ensure the text flows naturally when spoken
-5. Maintain the speaker identifiers exactly as given
-6. Preserve the conversational flow and natural dialogue tone - don't make it sound too formal or robotic
-7. Keep the emotional tone of the original speech (excited, concerned, questioning, etc.)
-8. Ensure NO details or nuances from the original text are lost in translation - preserve
-9. Pay special attention to {context_info['domain']} terminology. all information, examples, technical concepts, and specific details accurately.
-10. Preserve the original structure of the conversation, number of lines, and number of speakers.
+5. Add word stress marks in the final translated text for dubbing where they help pronunciation. Use the combining acute accent symbol U+0301 directly after the stressed vowel, for example: каса́
+6. Maintain the speaker identifiers exactly as given
+7. Preserve the conversational flow and natural dialogue tone - don't make it sound too formal or robotic
+8. Keep the emotional tone of the original speech (excited, concerned, questioning, etc.)
+9. Ensure NO details or nuances from the original text are lost in translation - preserve
+10. Pay special attention to {context_info['domain']} terminology. all information, examples, technical concepts, and specific details accurately.
+11. Preserve the original structure of the conversation, number of lines, and number of speakers.
 
 {glossary_section}
 {custom_section}
@@ -1039,6 +1040,11 @@ Context after:
 </context_after>
 
 CRITICAL: Output tanslation should contain same number of rows and original speaker names. If phrase is not translatable, leave blank.
+
+CRITICAL: Respond with valid JSON only. Do not add markdown fences, comments, explanations, or any text before or after the JSON.
+CRITICAL: The top-level JSON object must contain only the "translations" key.
+CRITICAL: Each translation object must contain exactly two keys: "speaker" and "text".
+CRITICAL: "speaker" must exactly match the original speaker identifier, and "text" must contain only the final translated dubbing line.
 
 IMPORTANT: Respond in JSON format with an array of objects containing speaker and translated text:
 {{

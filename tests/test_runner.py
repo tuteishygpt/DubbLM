@@ -436,6 +436,75 @@ def test_translate_segments_passes_project_debug_paths_to_translator(tmp_path):
     assert translator.kwargs["timecodes_report_path"] == str(tmp_path / "Are" / "artifacts" / "timecodes.txt")
 
 
+def test_translate_segments_temporarily_adds_stress_marks_requirement_to_prompt(tmp_path):
+    video_path = tmp_path / "Are.mp4"
+    video_path.write_bytes(b"video")
+    audio_path = tmp_path / "Are" / "artifacts" / "audio" / "source.wav"
+    audio_path.parent.mkdir(parents=True, exist_ok=True)
+    audio_path.write_bytes(b"audio")
+
+    config = build_config_from_overrides(
+        {
+            "input": str(video_path),
+            "source_language": "en",
+            "target_language": "be",
+            "translation_prompt_prefix": "Keep idioms natural.",
+        }
+    )
+
+    class TranslatorStub:
+        def __init__(self):
+            self.kwargs = None
+            self.prompt_prefix = "Keep idioms natural."
+            self.prompt_prefix_at_call = None
+
+        def is_available(self):
+            return True
+
+        def translate(self, **kwargs):
+            self.kwargs = kwargs
+            self.prompt_prefix_at_call = self.prompt_prefix
+            return []
+
+    class PerfStub:
+        def start_timing(self, *_args, **_kwargs):
+            return None
+
+        def end_timing(self, *_args, **_kwargs):
+            return 0.0
+
+        def record_metric(self, *_args, **_kwargs):
+            return None
+
+        def write_performance_summary(self, *_args, **_kwargs):
+            return None
+
+    class CacheStub:
+        def generate_cache_key(self, *_args, **_kwargs):
+            return "cache-key"
+
+        def cache_exists(self, *_args, **_kwargs):
+            return False
+
+        def save_to_cache(self, *_args, **_kwargs):
+            return None
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = config
+    dubber.cache_manager = CacheStub()
+    dubber.performance_tracker = PerfStub()
+    dubber.debug_data = {}
+    translator = TranslatorStub()
+    dubber._require_translator = lambda: translator
+
+    dubber.translate_segments([], str(audio_path))
+
+    assert translator.prompt_prefix == "Keep idioms natural."
+    assert "Keep idioms natural." in translator.prompt_prefix_at_call
+    assert "Use the combining acute accent symbol U+0301" in translator.prompt_prefix_at_call
+    assert "каса́" in translator.prompt_prefix_at_call
+
+
 def test_segment_reference_clip_uses_segment_transcription_as_reference_text(tmp_path):
     dubber = SmartDubbing.__new__(SmartDubbing)
     dubber.speakers_audio_dir = tmp_path / "speakers_audio"

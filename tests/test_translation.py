@@ -67,3 +67,66 @@ def test_gemini_translator_accepts_legacy_gemini_api_key_env(monkeypatch):
     assert isinstance(llm, FakeGemini)
     assert created["api_key"] == "legacy-key"
     assert created["model"] == "models/gemini-2.5-flash"
+
+
+def test_translate_single_chunk_prompt_requires_json_only_and_stress_marks():
+    captured_prompt = {}
+
+    class FakeResponse:
+        def __init__(self, text):
+            self.text = text
+
+    class FakeLLM:
+        def complete(self, prompt):
+            captured_prompt["value"] = prompt
+            return FakeResponse(
+                '{"translations": [{"speaker": "SPEAKER_00", "text": "каса\\u0301"}]}'
+            )
+
+    translator = LLMTranslator(
+        enable_cache=False,
+        glossary={"LLM": "ИИ"},
+    )
+    translator.llm = FakeLLM()
+
+    chunk = {
+        "text": "SPEAKER_00: Hello there",
+        "original_speaker_texts": [{"speaker": "SPEAKER_00", "text": "Hello there"}],
+        "segments": [{"speaker": "SPEAKER_00", "text": "Hello there"}],
+    }
+    chunks = [
+        {"text": "SPEAKER_99: Previous context", "translation": "SPEAKER_99: Папярэдні кантэкст"},
+        chunk,
+        {"text": "SPEAKER_01: Next context"},
+    ]
+    context_info = {
+        "domain": "podcast",
+        "tone": "playful",
+        "themes": ["cats", "comedy"],
+        "terminology": ["LLM", "API"],
+    }
+
+    translator._translate_single_chunk(
+        chunk=chunk,
+        i=1,
+        chunks=chunks,
+        context_info=context_info,
+        source_language="en",
+        target_language="be",
+        source_summary="Кароткі змест відэа",
+        enable_cache=False,
+    )
+
+    prompt = captured_prompt["value"]
+
+    assert "Кароткі змест відэа" in prompt
+    assert "SPEAKER_99: Папярэдні кантэкст" in prompt
+    assert "SPEAKER_01: Next context" in prompt
+    assert "podcast" in prompt
+    assert "playful" in prompt
+    assert "cats, comedy" in prompt
+    assert "LLM, API" in prompt
+    assert 'CRITICAL: Respond with valid JSON only.' in prompt
+    assert 'Each translation object must contain exactly two keys: "speaker" and "text".' in prompt
+    assert "Use the combining acute accent symbol U+0301" in prompt
+    assert "каса́" in prompt
