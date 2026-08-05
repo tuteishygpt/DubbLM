@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 import math
 
+from google_vertex import get_vertex_ai_settings
+
 try:
     import json_repair
 except ImportError:
@@ -22,7 +24,7 @@ if TYPE_CHECKING:
 
 # Import LLM-related dependencies, with error handling for missing packages
 try:
-    from llama_index.llms.gemini import Gemini
+    from llama_index.llms.google_genai import GoogleGenAI
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False
@@ -42,6 +44,10 @@ except ImportError:
     JSON_REPAIR_AVAILABLE = False
 
 logger = get_logger(__name__)
+
+
+def _normalize_gemini_model_name(model_name: str) -> str:
+    return model_name.removeprefix("models/")
 
 
 class LLMTranslator(TranslationInterface):
@@ -201,19 +207,19 @@ class LLMTranslator(TranslationInterface):
         
         if provider == "gemini":
             if not GEMINI_AVAILABLE:
-                raise ImportError("Gemini dependencies are not installed. Please install llama-index.")
-            
-            # Support both the current Google env var and the legacy Gemini alias.
-            api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-            if not api_key:
-                raise ValueError(
-                    "Gemini API key not found in environment. "
-                    "Set GOOGLE_API_KEY or GEMINI_API_KEY."
+                raise ImportError(
+                    "Gemini dependencies are not installed. Please install llama-index-llms-google-genai."
                 )
-            
+
+            vertex_ai_settings = get_vertex_ai_settings()
+
             try:
                 # Initialize Gemini LLM
-                llm = Gemini(api_key=api_key, model=model_name, temperature=temperature)
+                llm = GoogleGenAI(
+                    model=_normalize_gemini_model_name(model_name),
+                    temperature=temperature,
+                    vertexai_config=vertex_ai_settings.llamaindex_vertexai_config,
+                )
                 logger.debug(f"Initialized Gemini {purpose} LLM with model: {model_name}, temperature={temperature}")
                 return llm
             except Exception as e:

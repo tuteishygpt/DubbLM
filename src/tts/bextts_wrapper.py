@@ -85,7 +85,10 @@ class BexTTSWrapper(TTSInterface):
                 logger.info(
                     "Initializing BexTTS client with authenticated access to %s", self.space_id
                 )
-                self.client = Client(self.space_id, hf_token=token)
+                try:
+                    self.client = Client(self.space_id, hf_token=token)
+                except TypeError:
+                    self.client = Client(self.space_id, headers={"Authorization": f"Bearer {token}"})
             else:
                 logger.warning(
                     "%s environment variable not set – using anonymous Hugging Face access.",

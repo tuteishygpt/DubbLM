@@ -94,3 +94,81 @@ def test_encode_with_two_pass_uses_safe_text_decoding(monkeypatch, tmp_path):
         assert call["kwargs"]["text"] is True
         assert call["kwargs"]["encoding"] == "utf-8"
         assert call["kwargs"]["errors"] == "replace"
+
+
+def test_build_reencoding_cuts_command_remaps_original_audio_track_for_pause_removed_video(
+    tmp_path, monkeypatch
+):
+    artifacts_root = tmp_path / "artifacts"
+    video_path = tmp_path / "input.mp4"
+    translated_audio_path = tmp_path / "dub.wav"
+    background_audio_path = tmp_path / "bg.wav"
+    output_path = tmp_path / "output.mp4"
+
+    video_path.write_bytes(b"video")
+    translated_audio_path.write_bytes(b"dub")
+    background_audio_path.write_bytes(b"bg")
+
+    processor = VideoProcessor(PerformanceTracker(), artifacts_root=str(artifacts_root))
+
+    cut_translated_audio_path = tmp_path / "dub_cut.wav"
+    cut_background_audio_path = tmp_path / "bg_cut.wav"
+    cut_original_audio_path = tmp_path / "orig_cut.wav"
+    cut_translated_audio_path.write_bytes(b"dub-cut")
+    cut_background_audio_path.write_bytes(b"bg-cut")
+    cut_original_audio_path.write_bytes(b"orig-cut")
+
+    monkeypatch.setattr(
+        "dubbing.video.video_processor.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="audio", stderr=""),
+    )
+
+    def fake_create_cut_audio_file(audio_path, cuts_to_keep):
+        mapping = {
+            str(translated_audio_path): str(cut_translated_audio_path),
+            str(background_audio_path): str(cut_background_audio_path),
+            str(video_path): str(cut_original_audio_path),
+        }
+        return mapping.get(str(audio_path))
+
+    monkeypatch.setattr(processor, "_create_cut_audio_file", fake_create_cut_audio_file)
+
+    original_command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_path),
+        "-i",
+        str(translated_audio_path),
+        "-i",
+        str(background_audio_path),
+        "-filter_complex",
+        "[1:a:0]volume=2[dubbed_vol_adj];[2:a:0]volume=0.762341[bg_audio_reduced];"
+        "[dubbed_vol_adj][bg_audio_reduced]amix=inputs=2:duration=longest[dub_mixed_with_bg]",
+        "-map",
+        "0:v:0",
+        "-map",
+        "[dub_mixed_with_bg]",
+        "-map",
+        "0:a:0",
+        "-shortest",
+        str(output_path),
+    ]
+
+    modified_command, temp_files_to_cleanup = processor._build_reencoding_cuts_command(
+        original_command=original_command,
+        video_path=str(video_path),
+        cuts_to_keep=[(0.0, 10.0)],
+        output_path=str(output_path),
+        use_two_pass_encoding=False,
+        video_info={},
+    )
+
+    map_indexes = [i for i, token in enumerate(modified_command) if token == "-map"]
+    mapped_streams = [modified_command[i + 1] for i in map_indexes]
+
+    assert str(artifacts_root / "temp_video_with_cuts.mp4") in modified_command
+    assert str(cut_original_audio_path) in modified_command
+    assert "0:a:0" not in mapped_streams
+    assert "3:a:0" in mapped_streams
+    assert str(cut_original_audio_path) in temp_files_to_cleanup

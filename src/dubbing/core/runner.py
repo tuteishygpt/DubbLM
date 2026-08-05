@@ -157,7 +157,7 @@ def run_dubbing_job(
     root_logger.addHandler(capture_handler)
 
     try:
-        load_dotenv()
+        load_dotenv(override=True)
         config = build_config_from_overrides(overrides)
 
         if dubbing_factory is None:
@@ -182,6 +182,20 @@ def run_dubbing_job(
             logging.getLogger(__name__).info("Video combination complete: %s", output_path)
             return DubbingJobResult(
                 status="Combine step completed",
+                logs=log_stream.getvalue(),
+                output_file=output_path,
+            )
+
+        if config.get("run_step") == "tts_to_end":
+            output_path = _extract_output_path(
+                dubber.run_from_tts(
+                    save_original_subtitles=config.get("save_original_subtitles", False),
+                    save_translated_subtitles=config.get("save_translated_subtitles", False),
+                )
+            )
+            logging.getLogger(__name__).info("TTS resume complete: %s", output_path)
+            return DubbingJobResult(
+                status="TTS resume step completed",
                 logs=log_stream.getvalue(),
                 output_file=output_path,
             )

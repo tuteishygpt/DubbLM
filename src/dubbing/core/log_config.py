@@ -12,6 +12,12 @@ def setup_logging(level=logging.INFO):
     Args:
         level: The logging level to use for console output (e.g., logging.INFO, logging.DEBUG)
     """
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     # Create logs directory if it doesn't exist
     log_dir = "logs"
     if not os.path.exists(log_dir):

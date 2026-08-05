@@ -1594,42 +1594,51 @@ class VideoProcessor:
             else:
                 modified_command.append(arg)
 
-        # If the filter graph references [0:a:0] (original audio), but input 0 is now video-without-audio,
-        # inject a cut version of the original video's audio as a new input before -filter_complex
+        # If input 0 is now video-without-audio but the final command still needs the original audio track,
+        # inject a cut version of that track as a new dedicated input and remap references to it.
         try:
-            if "-filter_complex" in modified_command:
-                fc_idx = modified_command.index("-filter_complex")
-                fc_str = modified_command[fc_idx + 1]
+            filter_complex_index = modified_command.index("-filter_complex") if "-filter_complex" in modified_command else None
+            filter_complex_value = (
+                modified_command[filter_complex_index + 1]
+                if filter_complex_index is not None and filter_complex_index + 1 < len(modified_command)
+                else None
+            )
+            needs_original_audio_input = any(
+                modified_command[i] == "-map" and modified_command[i + 1] == "0:a:0"
+                for i in range(len(modified_command) - 1)
+            )
+            if filter_complex_value and "[0:a:0]" in filter_complex_value:
+                needs_original_audio_input = True
 
-                if "[0:a:0]" in fc_str:
-                    # Count inputs before filter_complex to determine new input index
-                    inputs_before_fc = sum(1 for j in range(fc_idx) if modified_command[j] == "-i")
+            if needs_original_audio_input:
+                cut_orig_audio = self._create_cut_audio_file(video_path, cuts_to_keep)
+                if cut_orig_audio:
+                    last_input_idx = max(
+                        idx for idx, token in enumerate(modified_command) if token == "-i"
+                    )
+                    insert_idx = last_input_idx + 2
+                    new_input_index = sum(
+                        1 for token in modified_command[:insert_idx] if token == "-i"
+                    )
 
-                    # Create cut audio from original video audio track
-                    cut_orig_audio = self._create_cut_audio_file(video_path, cuts_to_keep)
-                    if cut_orig_audio:
-                        # Insert new input before -filter_complex
-                        modified_command.insert(fc_idx, "-i")
-                        modified_command.insert(fc_idx + 1, cut_orig_audio)
-                        temp_files_to_cleanup.append(cut_orig_audio)
+                    modified_command.insert(insert_idx, "-i")
+                    modified_command.insert(insert_idx + 1, cut_orig_audio)
+                    temp_files_to_cleanup.append(cut_orig_audio)
 
-                        # After insertion, -filter_complex moved by +2
-                        fc_token_idx = fc_idx + 2
-                        fc_value_idx = fc_token_idx + 1
+                    if filter_complex_index is not None and filter_complex_value is not None:
+                        updated_filter_complex_index = modified_command.index("-filter_complex")
+                        modified_command[updated_filter_complex_index + 1] = filter_complex_value.replace(
+                            "[0:a:0]",
+                            f"[{new_input_index}:a:0]",
+                        )
 
-                        # Replace occurrences of [0:a:0] with the new input index
-                        new_input_index = inputs_before_fc  # zero-based
-                        fc_str_updated = fc_str.replace("[0:a:0]", f"[{new_input_index}:a:0]")
-                        modified_command[fc_value_idx] = fc_str_updated
-
-                        # Also fix any explicit mapping of 0:a:0 if present
-                        k = 0
-                        while k < len(modified_command) - 1:
-                            if modified_command[k] == "-map" and modified_command[k + 1] == "0:a:0":
-                                modified_command[k + 1] = f"{new_input_index}:a:0"
-                            k += 2 if modified_command[k] == "-map" else 1
-                    else:
-                        logger.warning("Could not create cut original audio; original ranges may fail.")
+                    k = 0
+                    while k < len(modified_command) - 1:
+                        if modified_command[k] == "-map" and modified_command[k + 1] == "0:a:0":
+                            modified_command[k + 1] = f"{new_input_index}:a:0"
+                        k += 2 if modified_command[k] == "-map" else 1
+                else:
+                    logger.warning("Could not create cut original audio; original audio track may fail.")
         except Exception as e:
             logger.warning(f"Failed to adjust original audio input for filter graph: {e}")
         

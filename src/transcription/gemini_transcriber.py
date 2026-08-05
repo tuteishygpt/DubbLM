@@ -3,12 +3,11 @@ Implementation of transcription and diarization using the Gemini API.
 """
 import json
 import mimetypes
-import os
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from pydantic import BaseModel
 
+from google_vertex import get_vertex_ai_settings
 from transcription.transcription_interface import BaseTranscriber
 from src.dubbing.core.log_config import get_logger
 
@@ -26,6 +25,7 @@ if TYPE_CHECKING:
     from src.dubbing.core.cache_manager import CacheManager
 
 logger = get_logger(__name__)
+TIMESTAMP_PRECISION_CACHE_VERSION = "ts_v2"
 
 
 class GeminiSegment(BaseModel):
@@ -53,14 +53,12 @@ class GeminiTranscriber(BaseTranscriber):
         super().__init__(source_language, device, **kwargs)
         self.gemini_transcription_model = gemini_transcription_model
         self.cache_manager = cache_manager
-        self.api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-        if not self.api_key:
-            raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY environment variable is required")
         if not GEMINI_GENAI_AVAILABLE:
             raise ImportError(
                 "google-genai package not found. Install it with: pip install google-genai"
             )
-        self.client = genai.Client(api_key=self.api_key)
+        self.vertex_ai_settings = get_vertex_ai_settings()
+        self.client = genai.Client(**self.vertex_ai_settings.genai_client_kwargs)
 
     @property
     def name(self) -> str:
@@ -73,7 +71,10 @@ class GeminiTranscriber(BaseTranscriber):
         use_cache: bool = True,
     ) -> Tuple[Dict[Tuple[float, float], str], List[Dict[str, Any]]]:
         if cache_key is None:
-            cache_key = self._generate_cache_key(audio_file, f"_{self.gemini_transcription_model}")
+            cache_key = self._generate_cache_key(
+                audio_file,
+                f"_{self.gemini_transcription_model}_{TIMESTAMP_PRECISION_CACHE_VERSION}",
+            )
 
         step_name = "gemini_diarization_transcription"
         if use_cache and self.cache_manager and self.cache_manager.cache_exists(step_name, cache_key):
@@ -84,17 +85,17 @@ class GeminiTranscriber(BaseTranscriber):
             return cached_results["diarization"], cached_results["transcription"]
 
         logger.info("Running Gemini transcription and diarization on %s...", audio_file)
-        uploaded_file = None
         try:
             upload_mime_type = self._guess_mime_type(audio_file)
-            uploaded_file = self.client.files.upload(
-                file=audio_file,
-                config=genai_types.UploadFileConfig(mimeType=upload_mime_type),
-            )
+            with open(audio_file, "rb") as audio_stream:
+                audio_part = genai_types.Part.from_bytes(
+                    data=audio_stream.read(),
+                    mime_type=upload_mime_type,
+                )
 
             response = self.client.models.generate_content(
                 model=self.gemini_transcription_model,
-                contents=[uploaded_file, self._build_prompt()],
+                contents=[audio_part, self._build_prompt()],
                 config=genai_types.GenerateContentConfig(
                     temperature=0,
                     responseMimeType="application/json",
@@ -120,12 +121,6 @@ class GeminiTranscriber(BaseTranscriber):
         except Exception as e:
             logger.error("Gemini transcription failed: %s", e)
             raise RuntimeError(f"Gemini transcription failed: {e}") from e
-        finally:
-            if uploaded_file is not None and getattr(uploaded_file, "name", None):
-                try:
-                    self.client.files.delete(name=uploaded_file.name)
-                except Exception:
-                    logger.debug("Failed to delete uploaded Gemini file %s", getattr(uploaded_file, "name", None))
 
     @staticmethod
     def _build_prompt() -> str:
@@ -134,13 +129,13 @@ class GeminiTranscriber(BaseTranscriber):
             "Return JSON only with a top-level 'segments' array. "
             "Each segment must contain exactly these string fields: "
             "'start', 'end', 'speaker', 'text'. "
-            "Use timestamps in HH.MM.SS format. "
+            "Use timestamps in HH:MM:SS.mmm format with millisecond precision. "
             "Use stable speaker labels such as SPEAKER_A, SPEAKER_B, SPEAKER_C. "
             "Keep the segments chronological, do not overlap them, and do not omit spoken words. "
             "Example:\n"
             "{\n"
             '  "segments": [\n'
-            '    {"start": "00.00.00", "end": "00.00.07", "speaker": "SPEAKER_A", "text": "What have you done?"}\n'
+            '    {"start": "00:00:00.000", "end": "00:00:07.250", "speaker": "SPEAKER_A", "text": "What have you done?"}\n'
             "  ]\n"
             "}"
         )
@@ -223,12 +218,17 @@ class GeminiTranscriber(BaseTranscriber):
         if not value:
             raise ValueError("Timestamp value cannot be empty.")
 
-        separator = "." if "." in value and ":" not in value else ":"
-        parts = value.split(separator)
-        if len(parts) != 3:
+        if ":" in value:
+            parts = value.split(":")
+            if len(parts) != 3:
+                raise ValueError(f"Unsupported timestamp format: {value}")
+            hours_raw, minutes_raw, seconds_raw = parts
+        elif value.count(".") >= 2:
+            hours_raw, minutes_raw, seconds_raw = value.split(".", 2)
+        else:
             raise ValueError(f"Unsupported timestamp format: {value}")
 
-        hours = int(parts[0])
-        minutes = int(parts[1])
-        seconds = float(parts[2])
+        hours = int(hours_raw)
+        minutes = int(minutes_raw)
+        seconds = float(str(seconds_raw).replace(",", "."))
         return hours * 3600 + minutes * 60 + seconds

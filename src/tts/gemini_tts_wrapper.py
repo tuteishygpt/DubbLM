@@ -10,6 +10,8 @@ import hashlib
 from pathlib import Path
 import numpy as np
 
+from google_vertex import get_vertex_ai_settings
+
 from .models import (
     TTSSegmentData, 
     VoiceDurationStats, 
@@ -384,12 +386,11 @@ class GeminiAPIClient:
 
     def initialize(self) -> None:
         """Initialize the Google GenAI client."""
-        api_key = os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError("Gemini API key not provided. Please set GOOGLE_API_KEY environment variable.")
-        
+        vertex_ai_settings = get_vertex_ai_settings()
+
         try:
-            self.client = genai.Client(api_key=api_key)
+            self.client = genai.Client(**vertex_ai_settings.genai_client_kwargs)
+            self.vertex_ai_settings = vertex_ai_settings
             logger.info(f"Gemini TTS client initialized. Target model: {self.current_model}")
         except Exception as e:
             raise RuntimeError(f"Failed to initialize Google GenAI client: {str(e)}")

@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 def main():
     """Main function to run the dubbing tool."""
     # Load environment variables
-    load_dotenv()
+    load_dotenv(override=True)
     
     # Create argument parser and parse arguments
     parser = create_argument_parser()

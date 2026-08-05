@@ -34,16 +34,16 @@ def test_pyproject_declares_json_repair_dependency():
     assert any(dep.startswith("json-repair") for dep in dependencies)
 
 
-def test_pyproject_declares_gemini_dependency_for_default_translator():
+def test_pyproject_declares_google_genai_llamaindex_dependency_for_default_translator():
     pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
 
     dependencies = pyproject["project"]["dependencies"]
 
-    assert any(dep.startswith("llama-index-llms-gemini") for dep in dependencies)
+    assert any(dep.startswith("llama-index-llms-google-genai") for dep in dependencies)
 
 
-def test_gemini_translator_accepts_legacy_gemini_api_key_env(monkeypatch):
+def test_gemini_translator_uses_vertex_ai_config(monkeypatch):
     created = {}
 
     class FakeGemini:
@@ -52,21 +52,55 @@ def test_gemini_translator_accepts_legacy_gemini_api_key_env(monkeypatch):
 
     monkeypatch.setattr(llm_translator, "GEMINI_AVAILABLE", True)
     monkeypatch.setattr(llm_translator, "Gemini", FakeGemini, raising=False)
+    monkeypatch.setattr(llm_translator, "GoogleGenAI", FakeGemini, raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    monkeypatch.setenv("GEMINI_API_KEY", "legacy-key")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "vertex-project")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
 
     translator = LLMTranslator(enable_cache=False)
 
     llm = translator._create_llm(
+        provider="gemini",
+        model_name="gemini-2.5-flash",
+        temperature=0.5,
+        purpose="translation",
+    )
+
+    assert isinstance(llm, FakeGemini)
+    assert created["model"] == "gemini-2.5-flash"
+    assert created["vertexai_config"] == {
+        "project": "vertex-project",
+        "location": "global",
+    }
+    assert "api_key" not in created
+
+
+def test_gemini_translator_normalizes_legacy_models_prefix(monkeypatch):
+    created = {}
+
+    class FakeGemini:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+
+    monkeypatch.setattr(llm_translator, "GEMINI_AVAILABLE", True)
+    monkeypatch.setattr(llm_translator, "Gemini", FakeGemini, raising=False)
+    monkeypatch.setattr(llm_translator, "GoogleGenAI", FakeGemini, raising=False)
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "vertex-project")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+
+    translator = LLMTranslator(enable_cache=False)
+
+    translator._create_llm(
         provider="gemini",
         model_name="models/gemini-2.5-flash",
         temperature=0.5,
         purpose="translation",
     )
 
-    assert isinstance(llm, FakeGemini)
-    assert created["api_key"] == "legacy-key"
-    assert created["model"] == "models/gemini-2.5-flash"
+    assert created["model"] == "gemini-2.5-flash"
 
 
 def test_translate_single_chunk_prompt_requires_json_only_and_stress_marks():

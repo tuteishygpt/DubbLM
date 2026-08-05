@@ -13,7 +13,7 @@ An intelligent video dubbing system that uses AI to create natural, context-awar
 The DubbLM process consists of several AI-powered stages:
 
 1. **Audio Extraction & Speaker Diarization** - Separates speakers and identifies who speaks when
-2. **Transcription** - Converts speech to text using advanced models (Whisper, OpenAI, AssemblyAI)
+2. **Transcription** - Converts speech to text using advanced models (Whisper, OpenAI, AssemblyAI, Deepgram, Gemini)
 3. **Context-Aware Translation** - Uses LLM to translate with full context understanding
 4. **Translation Refinement** - Applies persona-specific refinement for natural speech patterns
 5. **Voice Synthesis** - Generates dubbed audio using TTS systems (OpenAI, Gemini, Coqui, BexTTS)
@@ -98,44 +98,64 @@ uv pip install -r requirements.txt
 
 # Set up environment variables
 cp .env.example .env
-# Edit .env with your API keys (see API Keys section below)
+# Edit .env with your credentials and Vertex AI settings (see setup section below)
 ```
 
-### API Keys Configuration
+### Environment Configuration
 
-Different features require different API keys. Add these to your `.env` file:
+Google-backed features now run through Vertex AI with Application Default Credentials (ADC).
+
+Initialize ADC once on the machine:
+
+```bash
+gcloud auth application-default login
+```
+
+Add these to your `.env` file:
 
 **Required for basic functionality:**
 - `OPENAI_API_KEY` - For OpenAI TTS and transcription services
-- `GOOGLE_API_KEY` - For Gemini TTS and LLM translation services
+- `GOOGLE_GENAI_USE_VERTEXAI=true`
+- `GOOGLE_CLOUD_PROJECT` - GCP project ID for Vertex AI
+- `GOOGLE_CLOUD_LOCATION` - Vertex AI location, for example `global`
 
 **Optional (depending on chosen services):**
 
 *For Transcription:*
 - `ASSEMBLYAI_API_KEY` - If using `transcription_system: "assemblyai"`
+- `DEEPGRAM_API_KEY` - If using `transcription_system: "deepgram"`
 - `OPENAI_API_KEY` - If using `transcription_system: "openai"`
 - `HF_TOKEN` - Required for PyAnnote diarization when `transcription_system` is `"openai"` (aka `"pyannote_openai"`). Create an access token in your Hugging Face account and set it as `HF_TOKEN`.
 
 *For Translation:*
-- `GOOGLE_API_KEY` - If using `llm_provider: "gemini"` (default)
+- Vertex AI ADC + the three `GOOGLE_*` Vertex variables above if using `llm_provider: "gemini"` (default)
 - `OPENROUTER_API_KEY` - If using `llm_provider: "openrouter"`
 
 *For Text-to-Speech:*
 - `OPENAI_API_KEY` - If using `tts_system: "openai"`
-- `GOOGLE_API_KEY` - If using `tts_system: "gemini"`
+- Vertex AI ADC + the three `GOOGLE_*` Vertex variables above if using `tts_system: "gemini"`
 - `HF_TOKEN` - Recommended when using `tts_system: "bextts"` to authenticate against the Hugging Face Space
 - No API key needed for `tts_system: "coqui"` or `"xtts"` (local XTTS voice cloning)
 
 **Example .env file:**
 ```env
 OPENAI_API_KEY=sk-your-openai-key-here
-GOOGLE_API_KEY=your-google-api-key-here
+GOOGLE_GENAI_USE_VERTEXAI=true
+GOOGLE_CLOUD_PROJECT=your-gcp-project-id
+GOOGLE_CLOUD_LOCATION=global
 ASSEMBLYAI_API_KEY=your-assemblyai-key-here
 OPENROUTER_API_KEY=your-openrouter-key-here
 HF_TOKEN=your-huggingface-token-here
 ```
 
-**Minimum setup:** You need at least `GOOGLE_API_KEY` for default Gemini-based translation and TTS.
+**Minimum setup:** for the default Gemini-based transcription, translation, refinement, and TTS flow you need:
+
+```bash
+gcloud auth application-default login
+export GOOGLE_GENAI_USE_VERTEXAI=true
+export GOOGLE_CLOUD_PROJECT=your-gcp-project-id
+export GOOGLE_CLOUD_LOCATION=global
+```
 
 If you enable OpenAI transcription (`--transcription_system openai` or `pyannote_openai`), you must also set `HF_TOKEN` to allow loading the PyAnnote diarization pipeline.
 

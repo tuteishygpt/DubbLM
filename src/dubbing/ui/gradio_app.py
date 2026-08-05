@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import csv
 import json
+import pickle
 import shutil
 from pathlib import Path
 
 import gradio as gr
 import yaml
 
-from ..core.runner import run_dubbing_job
+from src.utils.time_utils import format_seconds_to_hms
+
+from ..core.cache_manager import CacheManager
+from ..core.runner import build_config_from_overrides, run_dubbing_job
+from ..core.smart_dubbing import SmartDubbing
 from ..core.config import DubbingConfig
 
 
@@ -85,6 +91,14 @@ LIST_TEXT_FIELDS = {"keep_original_audio_ranges"}
 SPEAKER_REFERENCE_FIELD = "speaker_reference_rows"
 SPEAKER_REFERENCE_HEADERS = ["Speaker ID", "Reference audio path", "Reference text"]
 SPEAKER_REFERENCE_LIBRARY_HEADERS = ["Speaker ID", "Saved audio path", "Reference text"]
+DUBBING_TEXT_HEADERS = ["Speaker", "Time", "Translation", "Original"]
+DUBBING_TEXT_COLUMN_WIDTHS = ["12%", "14%", "54%", "20%"]
+TRANSLATION_TRACK_FIELDS = (
+    "translation",
+    "short_translation",
+    "very_short_translation",
+    "long_translation",
+)
 
 
 def _load_yaml_mapping(config_path: str | Path) -> dict:
@@ -169,8 +183,15 @@ def save_speaker_reference_to_library(
 
 
 def _normalize_table_rows(rows: object) -> list[list[str]]:
+    if isinstance(rows, dict) and "data" in rows:
+        rows = rows["data"]
+    elif hasattr(rows, "to_numpy"):
+        rows = rows.to_numpy().tolist()
+    elif hasattr(rows, "values"):
+        rows = rows.values.tolist()
+
     normalized_rows: list[list[str]] = []
-    if not isinstance(rows, list):
+    if not isinstance(rows, (list, tuple)):
         return normalized_rows
 
     for row in rows:
@@ -313,7 +334,14 @@ def _speaker_reference_rows_from_mappings(
 
 
 def _speaker_reference_rows_to_mappings(rows: object) -> tuple[dict[str, str] | None, dict[str, str] | None]:
-    if not isinstance(rows, list):
+    if isinstance(rows, dict) and "data" in rows:
+        rows = rows["data"]
+    elif hasattr(rows, "to_numpy"):
+        rows = rows.to_numpy().tolist()
+    elif hasattr(rows, "values"):
+        rows = rows.values.tolist()
+
+    if not isinstance(rows, (list, tuple)):
         return None, None
 
     reference_audio_mapping: dict[str, str] = {}
@@ -426,9 +454,154 @@ def save_settings(
     return f"Settings saved to {DEFAULT_CONFIG_PATH}"
 
 
-def _collect_values(*values):
+def _collect_overrides(*values) -> dict[str, object]:
     overrides = dict(zip(ALL_FIELDS, values))
     overrides = _expand_speaker_reference_rows(overrides)
+    return overrides
+
+
+def _build_dubbing_text_context(overrides: dict[str, object]) -> tuple[DubbingConfig, Path, Path]:
+    config = build_config_from_overrides(overrides)
+    audio_path = Path(config.get("audio_artifacts_dir")) / "source.wav"
+    if not audio_path.is_file():
+        raise FileNotFoundError(
+            f"Expected extracted source audio at {audio_path}. "
+            "Run the full pipeline once before editing dubbing texts."
+        )
+
+    cache_manager = CacheManager(use_cache=True, input_file=config.get("input"))
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = config
+    dubber.cache_manager = cache_manager
+    cache_key = dubber._build_translation_cache_key(str(audio_path))
+    cache_path = cache_manager.get_cache_path("translation") / f"{cache_key}.pkl"
+    artifact_path = Path(config.get("artifacts_dir")) / "dubbing_texts.tsv"
+    return config, cache_path, artifact_path
+
+
+def _format_dubbing_text_time(start: object, end: object) -> str:
+    start_seconds = float(start or 0.0)
+    end_seconds = float(end or 0.0)
+    return f"{format_seconds_to_hms(start_seconds)} - {format_seconds_to_hms(end_seconds)}"
+
+
+def _segments_to_dubbing_text_rows(segments: object) -> list[list[str]]:
+    rows: list[list[str]] = []
+    if not isinstance(segments, list):
+        return rows
+
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        rows.append(
+            [
+                str(segment.get("speaker", "") or ""),
+                _format_dubbing_text_time(segment.get("start"), segment.get("end")),
+                str(segment.get("translation", "") or ""),
+                str(segment.get("text", "") or ""),
+            ]
+        )
+    return rows
+
+
+def _normalize_dubbing_text_rows(rows: object) -> list[list[str]]:
+    normalized_rows: list[list[str]] = []
+    if not isinstance(rows, list):
+        return normalized_rows
+
+    for row in rows:
+        if not isinstance(row, (list, tuple)):
+            continue
+        normalized_rows.append(
+            [
+                str(row[0]).strip() if len(row) > 0 and row[0] is not None else "",
+                str(row[1]).strip() if len(row) > 1 and row[1] is not None else "",
+                str(row[2]) if len(row) > 2 and row[2] is not None else "",
+                str(row[3]) if len(row) > 3 and row[3] is not None else "",
+            ]
+        )
+    return normalized_rows
+
+
+def _load_cached_translation_segments(cache_path: Path) -> list[dict[str, object]]:
+    if not cache_path.is_file():
+        raise FileNotFoundError(
+            f"Translation cache not found: {cache_path}. "
+            "Run the full pipeline first so `tts_to_end` has cached translations to edit."
+        )
+
+    with cache_path.open("rb") as handle:
+        cached_segments = pickle.load(handle)
+    if not isinstance(cached_segments, list):
+        raise ValueError(f"Unexpected translation cache payload in {cache_path}")
+    return cached_segments
+
+
+def _write_dubbing_text_artifact(artifact_path: Path, rows: list[list[str]]) -> None:
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    with artifact_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerow(["speaker", "time", "translation", "original"])
+        for row in rows:
+            writer.writerow(row)
+
+
+def load_dubbing_text_rows(overrides: dict[str, object]) -> tuple[str, list[list[str]]]:
+    try:
+        _config, cache_path, _artifact_path = _build_dubbing_text_context(overrides)
+        cached_segments = _load_cached_translation_segments(cache_path)
+        rows = _segments_to_dubbing_text_rows(cached_segments)
+        return f"Loaded {len(rows)} dubbing text row(s).", rows
+    except Exception as exc:
+        return f"Failed: {exc}", []
+
+
+def save_dubbing_text_rows(rows: object, overrides: dict[str, object]) -> tuple[str, list[list[str]]]:
+    normalized_rows = _normalize_dubbing_text_rows(rows)
+    try:
+        _config, cache_path, artifact_path = _build_dubbing_text_context(overrides)
+        cached_segments = _load_cached_translation_segments(cache_path)
+        if len(normalized_rows) != len(cached_segments):
+            raise ValueError(
+                f"Edited row count ({len(normalized_rows)}) does not match cached segment count ({len(cached_segments)})."
+            )
+
+        saved_rows: list[list[str]] = []
+        for segment, row in zip(cached_segments, normalized_rows):
+            translation = row[2].strip()
+            if not translation:
+                raise ValueError("Translation text cannot be empty.")
+
+            for field in TRANSLATION_TRACK_FIELDS:
+                segment[field] = translation
+
+            saved_rows.append(
+                [
+                    str(segment.get("speaker", "") or ""),
+                    _format_dubbing_text_time(segment.get("start"), segment.get("end")),
+                    translation,
+                    str(segment.get("text", "") or ""),
+                ]
+            )
+
+        with cache_path.open("wb") as handle:
+            pickle.dump(cached_segments, handle)
+        _write_dubbing_text_artifact(artifact_path, saved_rows)
+        return f"Saved {len(saved_rows)} dubbing text row(s).", saved_rows
+    except Exception as exc:
+        return f"Failed: {exc}", normalized_rows
+
+
+def _load_dubbing_text_values(*values):
+    return load_dubbing_text_rows(_collect_overrides(*values))
+
+
+def _save_dubbing_text_values(rows, *values):
+    return save_dubbing_text_rows(rows, _collect_overrides(*values))
+
+
+def _collect_values(*values):
+    overrides = _collect_overrides(*values)
     result = run_dubbing_job(overrides)
 
     output_file = result.output_file
@@ -476,10 +649,10 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     config = gr.Textbox(label="Config path", value=defaults.get("config", DEFAULT_CONFIG_PATH))
                     run_step = gr.Dropdown(
                         label="Run step",
-                        choices=["combine_video"],
-                        value=None,
+                        choices=["full_pipeline", "combine_video", "tts_to_end"],
+                        value=defaults.get("run_step") or "full_pipeline",
                         allow_custom_value=False,
-                        info="Advanced resume/debug option. Requires existing artifacts from a previous full run in the same project directory. For a normal run, leave this empty and click 'Run DubbLM'.",
+                        info="Choose `full_pipeline` for the normal end-to-end run, then click `Run DubbLM`. Resume options require existing artifacts from a previous full run in the same project directory: use `combine_video` to rebuild the final video from an existing dubbed audio file, or `tts_to_end` to restart at cached translation data, regenerate TTS, replace the generated audio artifacts, and finish a new video.",
                     )
                 with gr.Row():
                     generate_speaker_report = gr.Checkbox(label="Generate speaker report only")
@@ -532,7 +705,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     )
                     transcription_system = gr.Dropdown(
                         label="Transcription system",
-                        choices=["whisper", "openai", "whisperx", "assemblyai", "gemini"],
+                        choices=["whisper", "openai", "whisperx", "assemblyai", "gemini", "deepgram"],
                         value=defaults.get("transcription_system", "whisper"),
                     )
                     start_time = gr.Number(label="Start time (seconds)", precision=2, value=defaults.get("start_time"))
@@ -759,6 +932,33 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     ]
                 )
 
+            with gr.Tab("Dubbing Texts"):
+                gr.Markdown(
+                    "Load cached translation segments, edit the dubbing text in the `Translation` column, then save. "
+                    "Saved edits are written both to `artifacts/dubbing_texts.tsv` and to the translation cache used by `tts_to_end`."
+                )
+                with gr.Row():
+                    load_dubbing_texts_button = gr.Button("Load texts")
+                    save_dubbing_texts_button = gr.Button("Save texts")
+                dubbing_text_status = gr.Textbox(label="Dubbing text status", interactive=False)
+                dubbing_text_rows = gr.Dataframe(
+                    headers=DUBBING_TEXT_HEADERS,
+                    datatype=["str", "str", "str", "str"],
+                    row_count=(1, "dynamic"),
+                    col_count=(4, "fixed"),
+                    label="Dubbing texts",
+                    value=[["", "", "", ""]],
+                    type="array",
+                    interactive=True,
+                    wrap=True,
+                    line_breaks=True,
+                    show_search="search",
+                    show_row_numbers=True,
+                    pinned_columns=2,
+                    static_columns=[0, 1, 3],
+                    column_widths=DUBBING_TEXT_COLUMN_WIDTHS,
+                )
+
         with gr.Row():
             save_button = gr.Button("Save settings")
             run_button = gr.Button("Run DubbLM", variant="primary")
@@ -800,10 +1000,29 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
             inputs=[selected_library_row, speaker_reference_rows],
             outputs=[status, speaker_reference_rows],
         )
+        load_dubbing_texts_button.click(
+            fn=_load_dubbing_text_values,
+            inputs=input_components,
+            outputs=[dubbing_text_status, dubbing_text_rows],
+        )
+        save_dubbing_texts_button.click(
+            fn=_save_dubbing_text_values,
+            inputs=[dubbing_text_rows, *input_components],
+            outputs=[dubbing_text_status, dubbing_text_rows],
+        )
         run_button.click(
             fn=_collect_values,
             inputs=input_components,
             outputs=[status, logs, output_file, report_file, artifacts_path],
+        )
+
+        def _load_values_on_page_load():
+            fresh_defaults = load_ui_defaults(config_path)
+            return [fresh_defaults.get(field) for field in ALL_FIELDS]
+
+        app.load(
+            fn=_load_values_on_page_load,
+            outputs=input_components,
         )
 
     return app

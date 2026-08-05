@@ -26,17 +26,54 @@ except ImportError:  # pragma: no cover - dependency missing at runtime
 logger = get_logger(__name__)
 
 
+LANGUAGE_MAP: Dict[str, str] = {
+    "be": "Belarusian",
+    "bel": "Belarusian",
+    "belarusian": "Belarusian",
+    "ru": "Russian",
+    "rus": "Russian",
+    "russian": "Russian",
+    "en": "English",
+    "eng": "English",
+    "english": "English",
+    "uk": "Ukrainian",
+    "ukr": "Ukrainian",
+    "ukrainian": "Ukrainian",
+    "pl": "Polish",
+    "pol": "Polish",
+    "polish": "Polish",
+    "de": "German",
+    "deu": "German",
+    "ger": "German",
+    "german": "German",
+    "fr": "French",
+    "fra": "French",
+    "french": "French",
+    "es": "Spanish",
+    "spa": "Spanish",
+    "spanish": "Spanish",
+}
+
+
+def resolve_omnivoice_language(override_lang: Optional[str], synthesis_lang: Optional[str]) -> str:
+    target = (override_lang or synthesis_lang or "Belarusian").strip()
+    key = target.lower()
+    return LANGUAGE_MAP.get(key, target)
+
+
 class OmniVoiceWrapper(TTSInterface):
     """Text-to-speech wrapper around the public OmniVoice Space."""
 
     def __init__(
         self,
-        space_id: str = "archivartaunik/OmniVoice",
+        space_id: str = "k2-fsa/OmniVoice",
         api_name: str = "/_clone_fn",
         default_reference_audio: Optional[str] = None,
         default_reference_text: Optional[str] = None,
         hf_token_env: str = "HF_TOKEN",
-        lang: str = "Belarusian",
+        debug_tts: bool = False,
+        lang: Optional[str] = None,
+        instruct: str = "",
         num_steps: int = 32,
         guidance_scale: float = 2.0,
         denoise: bool = True,
@@ -62,8 +99,10 @@ class OmniVoiceWrapper(TTSInterface):
         self.default_reference_audio = default_reference_audio
         self.default_reference_text = default_reference_text
         self.hf_token_env = hf_token_env
+        self.debug_tts = debug_tts
 
         self.lang = lang
+        self.instruct = instruct
         self.num_steps = num_steps
         self.guidance_scale = guidance_scale
         self.denoise = denoise
@@ -92,7 +131,10 @@ class OmniVoiceWrapper(TTSInterface):
                     "Initializing OmniVoice client with authenticated access to %s",
                     self.space_id,
                 )
-                self.client = Client(self.space_id, hf_token=token)
+                try:
+                    self.client = Client(self.space_id, hf_token=token)
+                except TypeError:
+                    self.client = Client(self.space_id, headers={"Authorization": f"Bearer {token}"})
             else:
                 logger.warning(
                     "%s environment variable not set - using anonymous Hugging Face access.",
@@ -169,7 +211,7 @@ class OmniVoiceWrapper(TTSInterface):
             prepared_text = self._prepare_text(segment)
             reference_audio = self._resolve_reference_audio(segment)
             reference_text = self._resolve_reference_text(segment)
-            duration = self._resolve_duration(segment)
+            target_duration = self._resolve_duration(segment)
 
             if reference_audio and not Path(reference_audio).exists():
                 logger.warning(
@@ -187,26 +229,38 @@ class OmniVoiceWrapper(TTSInterface):
                 continue
 
             speed = segment.speed if segment.speed is not None else self.speed
+            reference_name = Path(reference_audio).name
 
+            effective_lang = resolve_omnivoice_language(self.lang, language)
             logger.info(
-                "OmniVoice: Synthesizing segment %d/%d for speaker '%s' (lang=%s)",
+                "OmniVoice: Synthesizing segment %d/%d for speaker '%s' (lang=%s, ref=%s, text=%s)",
                 index + 1,
                 len(segments_data),
                 segment.speaker,
-                self.lang or language,
+                effective_lang,
+                reference_name,
+                prepared_text,
             )
+            if getattr(self, "debug_tts", False):
+                logger.info(
+                    "OmniVoice: Segment %d/%d target_duration=%.2fs",
+                    index + 1,
+                    len(segments_data),
+                    target_duration,
+                )
 
             try:
                 prediction = self.client.predict(
                     text=prepared_text,
-                    lang=self.lang or language,
+                    lang=effective_lang,
                     ref_aud=handle_file(reference_audio),
                     ref_text=reference_text,
+                    instruct=self.instruct,
                     ns=self.num_steps,
                     gs=self.guidance_scale,
                     dn=self.denoise,
                     sp=speed,
-                    du=duration,
+                    du=target_duration,
                     pp=self.preprocess_prompt,
                     po=self.postprocess_output,
                     api_name=self.api_name,
@@ -229,10 +283,19 @@ class OmniVoiceWrapper(TTSInterface):
                 if temp_output != result_path:
                     shutil.copy(result_path, temp_output)
                 audio = AudioSegment.from_file(temp_output)
-                duration = len(audio) / 1000.0
+                actual_duration = len(audio) / 1000.0
             except Exception as exc:  # pragma: no cover - audio parsing failures
                 logger.error("OmniVoice: Unable to load synthesized audio: %s", exc)
-                duration = 0.0
+                actual_duration = 0.0
+
+            if getattr(self, "debug_tts", False):
+                logger.info(
+                    "OmniVoice: Segment %d/%d actual_duration=%.2fs (target_duration=%.2fs)",
+                    index + 1,
+                    len(segments_data),
+                    actual_duration,
+                    target_duration,
+                )
 
             if segment.output_path:
                 try:
@@ -248,7 +311,7 @@ class OmniVoiceWrapper(TTSInterface):
 
             diarized = DiarizationSegment(
                 start_time=0.0,
-                end_time=duration,
+                end_time=actual_duration,
                 speaker=segment.speaker,
                 text=segment.text,
                 confidence=1.0,

@@ -223,6 +223,7 @@ class SmartDubbing:
                 space_id=self.config.get('omnivoice_space_id'),
                 api_name=self.config.get('omnivoice_api_name'),
                 lang=self.config.get('omnivoice_lang'),
+                instruct=self.config.get('omnivoice_instruct', ''),
                 num_steps=self.config.get('omnivoice_num_steps'),
                 guidance_scale=self.config.get('omnivoice_guidance_scale'),
                 denoise=self.config.get('omnivoice_denoise'),
@@ -271,6 +272,8 @@ class SmartDubbing:
         error_text = str(init_error or "")
         if "ASSEMBLYAI_API_KEY" in error_text:
             message += " Set ASSEMBLYAI_API_KEY or choose another transcription_system."
+        elif "DEEPGRAM_API_KEY" in error_text:
+            message += " Set DEEPGRAM_API_KEY or choose another transcription_system."
         elif "HF_TOKEN" in error_text:
             message += " Set HF_TOKEN or choose a backend that does not require Hugging Face authentication."
         elif "json_repair" in error_text:
@@ -344,6 +347,254 @@ class SmartDubbing:
         tts_segment_data_args["reference_text"] = segment_dict.get("text")
 
         return tts_segment_data_args, original_audio_segment
+
+    def _prepare_audio_inputs(self) -> tuple[str, Optional[str], str]:
+        """Extract the source audio and optional background/vocals tracks."""
+        audio_file = self.audio_processor.extract_audio(
+            self.config.get('input'),
+            self.config.get('start_time'),
+            self.config.get('duration')
+        )
+        background_audio_path = None
+        segment_reference_audio_file = audio_file
+        if self.config.get('keep_background', False):
+            (
+                background_audio_path,
+                separated_vocals_path,
+            ) = self.audio_processor.separate_background_and_vocals(audio_file)
+            if separated_vocals_path:
+                segment_reference_audio_file = separated_vocals_path
+
+        return audio_file, background_audio_path, segment_reference_audio_file
+
+    def _build_translation_cache_key(self, audio_file: str) -> str:
+        """Compute the translation cache key used by translate_segments()."""
+        effective_prompt_prefix = self._build_translation_prompt_prefix(
+            self.config.get("translation_prompt_prefix")
+        )
+        prompt_prefix_hash = hashlib.md5(
+            effective_prompt_prefix.encode("utf-8")
+        ).hexdigest()[:12]
+        return (
+            f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}"
+            f"_{self.config.get('target_language')}_{prompt_prefix_hash}"
+        )
+
+    def _build_emotions_cache_key(self, audio_file: str) -> str:
+        """Compute the emotion-analysis cache key used by analyze_emotions()."""
+        return self.cache_manager.generate_cache_key(audio_file, "", "", "")
+
+    def _load_required_cached_step(self, *, step_name: str, cache_key: str, hint: str) -> Any:
+        """Load a required cached artifact or raise an actionable error."""
+        if not getattr(self.cache_manager, "use_cache", True):
+            raise FileNotFoundError(
+                f"run_step=tts_to_end requires cached {hint} artifacts from a previous full dubbing run, "
+                "but caching is currently disabled. Re-enable cache or run the full pipeline first."
+            )
+
+        if not self.cache_manager.cache_exists(step_name, cache_key):
+            raise FileNotFoundError(
+                f"run_step=tts_to_end requires cached {hint} artifacts from a previous full dubbing run in the same project directory, "
+                f"but no cache entry was found for step '{step_name}'."
+            )
+
+        cached_value = self.cache_manager.load_from_cache(step_name, cache_key)
+        if cached_value is None:
+            raise FileNotFoundError(
+                f"run_step=tts_to_end found step '{step_name}' but could not load cached {hint} artifacts. "
+                "Re-run the full pipeline to rebuild them."
+            )
+
+        return cached_value
+
+    def _build_speaker_rolls_from_segments(self, segments: List[Dict]) -> Dict[Tuple[float, float], str]:
+        """Reconstruct a speaker timeline from translated segment data."""
+        speakers_rolls: Dict[Tuple[float, float], str] = {}
+        for segment in segments:
+            start = segment.get("start")
+            end = segment.get("end")
+            speaker = segment.get("speaker")
+            if start is None or end is None or speaker is None:
+                continue
+            speakers_rolls[(float(start), float(end))] = str(speaker)
+        return speakers_rolls
+
+    def _save_requested_subtitles(
+        self,
+        segments_for_output: List[Dict],
+        *,
+        save_original_subtitles: bool,
+        save_translated_subtitles: bool,
+        pause_adjustments: Optional[List[Dict[str, float]]] = None,
+    ) -> None:
+        """Persist subtitle files for the current output state."""
+        if not (save_original_subtitles or save_translated_subtitles):
+            return
+
+        remove_pauses_enabled = self.config.get('remove_pauses', True)
+        if not remove_pauses_enabled:
+            if save_original_subtitles:
+                self.subtitle_manager.save_subtitles(
+                    segments_for_output,
+                    "original",
+                    self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language')),
+                )
+
+            if save_translated_subtitles:
+                self.subtitle_manager.save_subtitles(
+                    segments_for_output,
+                    "translation",
+                    self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language')),
+                )
+            return
+
+        if pause_adjustments:
+            logger.info("Adjusting subtitle timestamps based on pause modifications...")
+            adjusted_segments = self.adjust_subtitle_timestamps(segments_for_output, pause_adjustments)
+            if save_original_subtitles:
+                self.subtitle_manager.save_subtitles(
+                    adjusted_segments,
+                    "original",
+                    self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language')),
+                )
+                adjusted_path = self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language'))
+                logger.info(f"Saved pause-corrected original subtitles to {adjusted_path}")
+
+            if save_translated_subtitles:
+                self.subtitle_manager.save_subtitles(
+                    adjusted_segments,
+                    "translation",
+                    self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language')),
+                )
+                adjusted_path = self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language'))
+                logger.info(f"Saved pause-corrected translated subtitles to {adjusted_path}")
+            return
+
+        logger.info("No pause adjustments needed, saving subtitles with original timestamps...")
+        if save_original_subtitles:
+            self.subtitle_manager.save_subtitles(
+                segments_for_output,
+                "original",
+                self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language')),
+            )
+            subtitle_path = self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language'))
+            logger.info(f"Saved original subtitles to {subtitle_path}")
+
+        if save_translated_subtitles:
+            self.subtitle_manager.save_subtitles(
+                segments_for_output,
+                "translation",
+                self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language')),
+            )
+            subtitle_path = self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language'))
+            logger.info(f"Saved translated subtitles to {subtitle_path}")
+
+    def _combine_final_video(
+        self,
+        *,
+        translated_audio_path: str,
+        background_audio_path: Optional[str],
+        speakers_rolls: Dict[Tuple[float, float], str],
+    ) -> tuple[str, List[Dict[str, float]]]:
+        """Combine the current translated audio track with the source video."""
+        keep_original_audio_ranges = self.config.get('keep_original_audio_ranges')
+        muted_speakers = getattr(self, "muted_speakers", set())
+        if keep_original_audio_ranges is None and self.config.get('include_original_audio', False) and muted_speakers:
+            try:
+                keep_original_audio_ranges = [
+                    (start, end) for (start, end), spk in (speakers_rolls or {}).items() if spk not in muted_speakers
+                ]
+                if keep_original_audio_ranges:
+                    logger.info(f"Computed keep_original_audio_ranges excluding muted speakers ({len(keep_original_audio_ranges)} ranges)")
+            except Exception:
+                keep_original_audio_ranges = self.config.get('keep_original_audio_ranges')
+
+        return self.video_processor.combine_audio_with_video(
+            video_path=self.config.get('input'),
+            translated_audio_path=translated_audio_path,
+            background_audio_path=background_audio_path,
+            watermark_path=self.config.get('watermark_path'),
+            watermark_text=self.config.get('watermark_text'),
+            include_original_audio=self.config.get('include_original_audio', False),
+            output_file=self.config.get('output'),
+            start_time=self.config.get('start_time'),
+            duration=self.config.get('duration'),
+            keep_original_audio_ranges=keep_original_audio_ranges,
+            source_language=self.config.get('source_language'),
+            target_language=self.config.get('target_language'),
+            normalize_audio=self.config.get('normalize_audio', True),
+            use_two_pass_encoding=self.config.get('use_two_pass_encoding', True),
+            remove_pauses=self.config.get('remove_pauses', True),
+            min_pause_duration=self.config.get('min_pause_duration', 3),
+            preserve_pause_duration=self.config.get('preserve_pause_duration', 1.5),
+            keyframe_buffer=self.config.get('keyframe_buffer', 0.2),
+            ffmpeg_batch_size=self.config.get('ffmpeg_batch_size', 50),
+            dubbed_volume=self.config.get('dubbed_volume', 1.0),
+            background_volume=self.config.get('background_volume', 0.562341),
+            upscale_factor=self.config.get('upscale_factor', 1.0),
+            upscale_sharpen=self.config.get('upscale_sharpen', True),
+        )
+
+    def run_from_tts(self, save_original_subtitles: bool = False, save_translated_subtitles: bool = False) -> str:
+        """Resume from cached translation artifacts, rerun TTS, and finish the video."""
+        logger.info("Resuming dubbing process from the TTS step")
+        output_video_path = ""
+
+        try:
+            audio_file, background_audio_path, segment_reference_audio_file = self._prepare_audio_inputs()
+            translated_segments = self._load_required_cached_step(
+                step_name="translation",
+                cache_key=self._build_translation_cache_key(audio_file),
+                hint="translation",
+            )
+
+            self.debug_data["translation"] = translated_segments
+            segments_for_output = self._apply_speaker_filter(translated_segments)
+            self.subtitle_manager.save_debug_tsv(segments_for_output, output_dir=self.config.get("debug_dir"))
+
+            if self.config.get('enable_emotion_analysis', True):
+                segments_for_output = self._load_required_cached_step(
+                    step_name="emotions",
+                    cache_key=self._build_emotions_cache_key(audio_file),
+                    hint="emotion-analysis",
+                )
+            else:
+                for segment in segments_for_output:
+                    segment["emotion"] = "Neutral"
+
+            speakers_rolls = self._build_speaker_rolls_from_segments(segments_for_output)
+            original_use_cache = getattr(self.cache_manager, "use_cache", True)
+            try:
+                self.cache_manager.use_cache = False
+                logger.info("Bypassing TTS caches for run_step=tts_to_end to force audio regeneration")
+                translated_audio_path = self.synthesize_speech(
+                    segments_for_output,
+                    speakers_rolls,
+                    segment_reference_audio_file,
+                )
+            finally:
+                self.cache_manager.use_cache = original_use_cache
+
+            self.speaker_processor.save_translated_samples(segments_for_output, audio_file)
+            output_video_path, pause_adjustments = self._combine_final_video(
+                translated_audio_path=translated_audio_path,
+                background_audio_path=background_audio_path,
+                speakers_rolls=speakers_rolls,
+            )
+            self.pause_adjustments = pause_adjustments
+            self._save_requested_subtitles(
+                segments_for_output,
+                save_original_subtitles=save_original_subtitles,
+                save_translated_subtitles=save_translated_subtitles,
+                pause_adjustments=pause_adjustments,
+            )
+        except Exception as e:
+            logger.error(f"Error in TTS resume pipeline: {e}", exc_info=True)
+            raise
+        finally:
+            self._cleanup()
+
+        return output_video_path
     
     def run_pipeline(self, save_original_subtitles: bool = False, save_translated_subtitles: bool = False) -> str:
         """Run the full dubbing pipeline."""
@@ -354,21 +605,7 @@ class SmartDubbing:
         output_video_path = ""
         
         try:
-            # Extract audio from video
-            audio_file = self.audio_processor.extract_audio(
-                self.config.get('input'),
-                self.config.get('start_time'),
-                self.config.get('duration')
-            )
-            background_audio_path = None
-            segment_reference_audio_file = audio_file
-            if self.config.get('keep_background', False):
-                (
-                    background_audio_path,
-                    separated_vocals_path,
-                ) = self.audio_processor.separate_background_and_vocals(audio_file)
-                if separated_vocals_path:
-                    segment_reference_audio_file = separated_vocals_path
+            audio_file, background_audio_path, segment_reference_audio_file = self._prepare_audio_inputs()
             
             # Perform speaker diarization and transcription
             speakers_rolls, transcription = self.diarize_and_transcribe(audio_file)
@@ -390,15 +627,6 @@ class SmartDubbing:
             
             # Save debug TSV
             self.subtitle_manager.save_debug_tsv(segments_for_output, output_dir=self.config.get("debug_dir"))
-            
-            # Save subtitles if requested (only if pause removal is disabled)
-            remove_pauses_enabled = self.config.get('remove_pauses', True)
-            if not remove_pauses_enabled:
-                if save_original_subtitles:
-                    self.subtitle_manager.save_subtitles(segments_for_output, "original", self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language')))
-                
-                if save_translated_subtitles:
-                    self.subtitle_manager.save_subtitles(segments_for_output, "translation", self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language')))
             
             # Analyze emotions (if enabled)
             if self.config.get('enable_emotion_analysis', True):
@@ -438,79 +666,20 @@ class SmartDubbing:
                     self.audio_processor.get_total_duration()
                 )
             
-            # Determine original audio keep ranges when including original audio and muting speakers
-            keep_original_audio_ranges = self.config.get('keep_original_audio_ranges')
-            if keep_original_audio_ranges is None and self.config.get('include_original_audio', False) and self.muted_speakers:
-                try:
-                    # Keep only ranges where non-muted speakers talk
-                    keep_original_audio_ranges = [
-                        (start, end) for (start, end), spk in (speakers_rolls or {}).items() if spk not in self.muted_speakers
-                    ]
-                    if keep_original_audio_ranges:
-                        logger.info(f"Computed keep_original_audio_ranges excluding muted speakers ({len(keep_original_audio_ranges)} ranges)")
-                except Exception:
-                    # Fallback silently if structure is unexpected
-                    keep_original_audio_ranges = self.config.get('keep_original_audio_ranges')
-
-            # Combine with video (includes pause removal if enabled)
-            output_video_path, pause_adjustments = self.video_processor.combine_audio_with_video(
-                video_path=self.config.get('input'),
+            output_video_path, pause_adjustments = self._combine_final_video(
                 translated_audio_path=translated_audio_path,
                 background_audio_path=background_audio_path,
-                watermark_path=self.config.get('watermark_path'),
-                watermark_text=self.config.get('watermark_text'),
-                include_original_audio=self.config.get('include_original_audio', False),
-                output_file=self.config.get('output'),
-                start_time=self.config.get('start_time'),
-                duration=self.config.get('duration'),
-                keep_original_audio_ranges=keep_original_audio_ranges,
-                source_language=self.config.get('source_language'),
-                target_language=self.config.get('target_language'),
-                normalize_audio=self.config.get('normalize_audio', True),
-                use_two_pass_encoding=self.config.get('use_two_pass_encoding', True),
-                remove_pauses=self.config.get('remove_pauses', True),
-                min_pause_duration=self.config.get('min_pause_duration', 3),
-                preserve_pause_duration=self.config.get('preserve_pause_duration', 1.5),
-                keyframe_buffer=self.config.get('keyframe_buffer', 0.2),
-                ffmpeg_batch_size=self.config.get('ffmpeg_batch_size', 50),
-                dubbed_volume=self.config.get('dubbed_volume', 1.0),
-                background_volume=self.config.get('background_volume', 0.562341),
-                upscale_factor=self.config.get('upscale_factor', 1.0),
-                upscale_sharpen=self.config.get('upscale_sharpen', True)
+                speakers_rolls=speakers_rolls,
             )
             
             # Store pause adjustments for potential future use
             self.pause_adjustments = pause_adjustments
-            
-            # Save subtitles after pause processing if pause removal is enabled
-            if remove_pauses_enabled and (save_original_subtitles or save_translated_subtitles):
-                if pause_adjustments:
-                    logger.info("Adjusting subtitle timestamps based on pause modifications...")
-                    
-                    if save_original_subtitles:
-                        adjusted_original_segments = self.adjust_subtitle_timestamps(segments_for_output, pause_adjustments)
-                        self.subtitle_manager.save_subtitles(adjusted_original_segments, "original", self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language')))
-                        adjusted_path = self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language'))
-                        logger.info(f"Saved pause-corrected original subtitles to {adjusted_path}")
-                    
-                    if save_translated_subtitles:
-                        adjusted_translated_segments = self.adjust_subtitle_timestamps(segments_for_output, pause_adjustments)
-                        self.subtitle_manager.save_subtitles(adjusted_translated_segments, "translation", self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language')))
-                        adjusted_path = self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language'))
-                        logger.info(f"Saved pause-corrected translated subtitles to {adjusted_path}")
-                else:
-                    # No pause adjustments made, but pause removal was enabled - save original timestamps
-                    logger.info("No pause adjustments needed, saving subtitles with original timestamps...")
-                    
-                    if save_original_subtitles:
-                        self.subtitle_manager.save_subtitles(segments_for_output, "original", self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language')))
-                        subtitle_path = self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language'))
-                        logger.info(f"Saved original subtitles to {subtitle_path}")
-                    
-                    if save_translated_subtitles:
-                        self.subtitle_manager.save_subtitles(segments_for_output, "translation", self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language')))
-                        subtitle_path = self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language'))
-                        logger.info(f"Saved translated subtitles to {subtitle_path}")
+            self._save_requested_subtitles(
+                segments_for_output,
+                save_original_subtitles=save_original_subtitles,
+                save_translated_subtitles=save_translated_subtitles,
+                pause_adjustments=pause_adjustments,
+            )
             
             # Overall pipeline metrics
             total_elapsed = time.perf_counter() - pipeline_start_time
@@ -912,11 +1081,43 @@ class SmartDubbing:
                         "tts_system": tts_system
                     }
                 
-                # Check cache first
+                # Prepare base TTSSegmentData & resolve reference audio/text first
+                tts_segment_data_args = {
+                    "speaker": speaker,
+                    "text": segment_dict["translation"],
+                    "emotion": segment_dict.get("emotion", "Neutral"),
+                    "style_prompt": segment_style_prompt,
+                    "reference_audio_path": None,
+                    "reference_text": None,
+                    "voice": voice_name,
+                    "speed": 1.0,
+                    "target_duration": max(segment_dict["end"] - segment_dict["start"], 0.0),
+                }
+                try:
+                    if original_audio_segment is None:
+                        original_audio_segment = AudioSegment.from_file(audio_file)
+
+                    tts_segment_data_args, original_audio_segment = self._apply_reference_fallbacks(
+                        tts_segment_data_args=tts_segment_data_args,
+                        segment_dict=segment_dict,
+                        speaker=speaker,
+                        segment_index=i,
+                        original_audio_segment=original_audio_segment,
+                        segment_reference_min_duration=segment_reference_min_duration,
+                        segment_reference_min_duration_ms=segment_reference_min_duration_ms,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"Failed to resolve reference audio for segment {i+1} ({speaker}): {exc}"
+                    )
+
+                # Check cache (including reference audio path in hash)
                 import hashlib
                 translation_hash = hashlib.md5(segment_dict["translation"].encode()).hexdigest()[:8]
                 voice_prompt_hash = hashlib.md5((segment_style_prompt or "").encode()).hexdigest()[:8]
-                segment_cache_key = f"{base_cache_prefix}_{tts_system}_{i}_{speaker}_{translation_hash}_{voice_prompt_hash}"
+                ref_audio_str = str(tts_segment_data_args.get("reference_audio_path") or "")
+                ref_audio_hash = hashlib.md5(ref_audio_str.encode()).hexdigest()[:8]
+                segment_cache_key = f"{base_cache_prefix}_{tts_system}_{i}_{speaker}_{translation_hash}_{voice_prompt_hash}_{ref_audio_hash}"
                 current_segment_output_path = str(self.audio_chunks_dir / f"{i}.wav")
                 os.makedirs(os.path.dirname(current_segment_output_path), exist_ok=True)
                 
@@ -940,46 +1141,6 @@ class SmartDubbing:
                         except:
                             pass
                 
-                # Prepare base TTSSegmentData
-                tts_segment_data_args = {
-                    "speaker": speaker,
-                    "text": segment_dict["translation"],
-                    "emotion": segment_dict.get("emotion", "Neutral"),
-                    "style_prompt": segment_style_prompt,
-                    "reference_audio_path": None,
-                    "reference_text": None,
-                    "voice": voice_name,
-                    "speed": 1.0,
-                    "target_duration": max(segment_dict["end"] - segment_dict["start"], 0.0),
-                }
-
-                tts_segment_data_args = self._apply_configured_reference_mapping(tts_segment_data_args, speaker)
-                
-                # Generic reference audio path for systems that might use it
-                potential_ref_audio_for_speaker = str(self.speakers_audio_dir / f"{speaker}.wav")
-                if not tts_segment_data_args["reference_audio_path"] and os.path.exists(potential_ref_audio_for_speaker):
-                    tts_segment_data_args["reference_audio_path"] = potential_ref_audio_for_speaker
-
-                # Attempt to create a segment-specific reference audio clip when possible
-                if not tts_segment_data_args["reference_audio_path"]:
-                    try:
-                        if original_audio_segment is None:
-                            original_audio_segment = AudioSegment.from_file(audio_file)
-
-                        tts_segment_data_args, original_audio_segment = self._attach_segment_reference(
-                            tts_segment_data_args=tts_segment_data_args,
-                            segment_dict=segment_dict,
-                            speaker=speaker,
-                            segment_index=i,
-                            original_audio_segment=original_audio_segment,
-                            segment_reference_min_duration=segment_reference_min_duration,
-                            segment_reference_min_duration_ms=segment_reference_min_duration_ms,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            f"Failed to create segment reference audio for segment {i+1} ({speaker}): {exc}"
-                        )
-
                 # Calculate original duration and estimate current translation
                 original_duration = segment_dict["end"] - segment_dict["start"]
                 
@@ -1344,6 +1505,45 @@ class SmartDubbing:
             tts_segment_data_args["reference_text"] = reference_text
 
         return tts_segment_data_args
+
+    def _apply_reference_fallbacks(
+        self,
+        *,
+        tts_segment_data_args: Dict[str, Any],
+        segment_dict: Dict[str, Any],
+        speaker: str,
+        segment_index: int,
+        original_audio_segment: Optional[AudioSegment],
+        segment_reference_min_duration: float,
+        segment_reference_min_duration_ms: int,
+    ) -> tuple[Dict[str, Any], Optional[AudioSegment]]:
+        """Resolve reference audio/text in priority order for synthesis.
+
+        Order:
+        1. Explicit per-speaker mappings from config
+        2. Segment-specific clip + matching original text
+        3. Extracted per-speaker wav in speakers_audio_dir
+        4. Wrapper-level global fallback (handled by the TTS wrapper)
+        """
+        tts_segment_data_args = self._apply_configured_reference_mapping(tts_segment_data_args, speaker)
+
+        if not tts_segment_data_args["reference_audio_path"]:
+            tts_segment_data_args, original_audio_segment = self._attach_segment_reference(
+                tts_segment_data_args=tts_segment_data_args,
+                segment_dict=segment_dict,
+                speaker=speaker,
+                segment_index=segment_index,
+                original_audio_segment=original_audio_segment,
+                segment_reference_min_duration=segment_reference_min_duration,
+                segment_reference_min_duration_ms=segment_reference_min_duration_ms,
+            )
+
+        if not tts_segment_data_args["reference_audio_path"]:
+            potential_ref_audio_for_speaker = str(self.speakers_audio_dir / f"{speaker}.wav")
+            if os.path.exists(potential_ref_audio_for_speaker):
+                tts_segment_data_args["reference_audio_path"] = potential_ref_audio_for_speaker
+
+        return tts_segment_data_args, original_audio_segment
     
     def _calculate_percentage_deviation(self, ratio: float, min_ratio_comfort: float, max_ratio_comfort: float) -> float:
         """

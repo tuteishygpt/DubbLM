@@ -7,7 +7,7 @@ name = "dubblm"
 version = "0.1.0"
 description = "AI-assisted video dubbing pipeline"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
     {name = "ArteusAI"}
 ]
@@ -21,7 +21,8 @@ classifiers = [
 dependencies = [
     "json-repair==0.41.0",
     "google-genai==1.16.1",
-    "llama-index-llms-gemini==0.4.14",
+    "llama-index-llms-google-genai==0.9.1",
+    "deepgram-sdk==5.3.2",
 ]
 
 [project.urls]
@@ -33,6 +34,7 @@ dubblm-gradio = "dubbing.ui.gradio_app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+py-modules = ["google_vertex"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

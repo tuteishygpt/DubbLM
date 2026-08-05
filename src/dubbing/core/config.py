@@ -11,6 +11,8 @@ from .log_config import get_logger
 
 logger = get_logger(__name__)
 
+DEFAULT_PROJECTS_ROOT = Path(__file__).resolve().parents[3] / "prj"
+
 def _parse_time_to_seconds(time_str: str) -> float:
     """Parse time string (HH:MM:SS, MM:SS, or SS) into seconds."""
     parts = time_str.split(':')
@@ -39,9 +41,10 @@ class DubbingConfig:
             'tts_system': 'coqui',
             'tts_model': None,
             'tts_fallback_model': None,
-            'omnivoice_space_id': 'archivartaunik/OmniVoice',
+            'omnivoice_space_id': 'k2-fsa/OmniVoice',
             'omnivoice_api_name': '/_clone_fn',
-            'omnivoice_lang': 'Belarusian',
+            'omnivoice_lang': None,
+            'omnivoice_instruct': '',
             'omnivoice_num_steps': 32,
             'omnivoice_guidance_scale': 2.0,
             'omnivoice_denoise': True,
@@ -151,7 +154,7 @@ class DubbingConfig:
             sys.exit(1)
 
         input_path = Path(input_file)
-        project_dir = input_path.parent / input_path.stem
+        project_dir = DEFAULT_PROJECTS_ROOT / input_path.stem
         artifacts_dir = project_dir / "artifacts"
         project_dir.mkdir(parents=True, exist_ok=True)
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -303,6 +306,15 @@ class DubbingConfig:
                 default_ref_duration
             )
             self.config['segment_reference_min_duration'] = default_ref_duration
+
+        # Dynamically map omnivoice_lang from target_language when not explicitly set
+        if not self.config.get('omnivoice_lang'):
+            target_lang = self.config.get('target_language')
+            if target_lang:
+                from tts.omnivoice_wrapper import resolve_omnivoice_language
+                self.config['omnivoice_lang'] = resolve_omnivoice_language(None, target_lang)
+            else:
+                self.config['omnivoice_lang'] = 'Belarusian'
     
     def get(self, key: str, default: Any = None) -> Any:
         """Get configuration value."""
@@ -335,6 +347,7 @@ class DubbingConfig:
         parser.add_argument('--omnivoice_space_id', type=str, help='Hugging Face Space ID for OmniVoice')
         parser.add_argument('--omnivoice_api_name', type=str, help='Gradio API endpoint for OmniVoice synthesis')
         parser.add_argument('--omnivoice_lang', type=str, help='Language setting for OmniVoice (default: Belarusian)')
+        parser.add_argument('--omnivoice_instruct', type=str, default='', help='Instruct text for OmniVoice synthesis (required by k2-fsa/OmniVoice, empty string = no instruction)')
         parser.add_argument('--omnivoice_num_steps', type=int, help='Number of OmniVoice generation steps')
         parser.add_argument('--omnivoice_guidance_scale', type=float, help='Guidance scale for OmniVoice synthesis')
         parser.add_argument('--omnivoice_denoise', type=lambda x: (str(x).lower() == 'true'), help='Enable OmniVoice denoising (True/False)')
@@ -342,7 +355,7 @@ class DubbingConfig:
         parser.add_argument('--omnivoice_duration', type=float, help='Default OmniVoice duration control value')
         parser.add_argument('--omnivoice_preprocess_prompt', type=lambda x: (str(x).lower() == 'true'), help='Enable OmniVoice prompt preprocessing (True/False)')
         parser.add_argument('--omnivoice_postprocess_output', type=lambda x: (str(x).lower() == 'true'), help='Enable OmniVoice audio postprocessing (True/False)')
-        parser.add_argument('--transcription_system', type=str, choices=['whisper', 'openai', 'pyannote_openai', 'whisperx', 'assemblyai', 'gemini'], help='Transcription system to use')
+        parser.add_argument('--transcription_system', type=str, choices=['whisper', 'openai', 'pyannote_openai', 'whisperx', 'assemblyai', 'gemini', 'deepgram'], help='Transcription system to use')
         parser.add_argument('--gemini_transcription_model', type=str, help='Model name for Gemini transcription backend')
         parser.add_argument('--translator_type', type=str, choices=['llm'], help='Translator type to use')
         parser.add_argument('--llm_provider', type=str, choices=['gemini', 'openrouter'], help='LLM provider to use')
@@ -367,9 +380,11 @@ class DubbingConfig:
         parser.add_argument('--watermark_text', type=str, help='Text to display under the watermark')
         parser.add_argument('--voice_auto_selection', type=lambda x: (str(x).lower() == 'true'), help='Enable automatic voice selection for TTS (True/False)')
         parser.add_argument('--enable_emotion_analysis', type=lambda x: (str(x).lower() == 'true'), help='Enable emotion analysis for speech synthesis (True/False)')
-        parser.add_argument('--run_step', type=str, choices=['combine_video'], 
+        parser.add_argument('--run_step', type=str, choices=['full_pipeline', 'combine_video', 'tts_to_end'], 
                             help='Run only a specific, advanced pipeline step. This is intended for debugging or resuming a failed run where prior steps have successfully created their expected output files in the default locations. \
+                                  Example: --run_step full_pipeline (Normal end-to-end run). \
                                   Example: --run_step combine_video (Assumes audio/output.wav and potentially audio/background.wav exist from prior steps). \
+                                  Example: --run_step tts_to_end (Assumes cached translation artifacts from a previous full run in the same project directory, then regenerates TTS and finishes the video). \
                                   Note: For most users, running the full pipeline or using --generate_speaker_report is recommended.')
         parser.add_argument('--include_original_audio', action='store_true', default=argparse.SUPPRESS, help='Include the original audio track in the final video')
         parser.add_argument('--output', type=str, help='Path to the output video file (default: input_name + target_language + extension in current directory)')

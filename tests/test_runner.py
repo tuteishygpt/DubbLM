@@ -2,15 +2,23 @@ from pathlib import Path
 
 from pydub import AudioSegment
 
+import dubbing.core.config as config_module
 import dubbing.core.runner as runner
 from dubbing.core.config import create_argument_parser
 from dubbing.core.smart_dubbing import SmartDubbing
 from dubbing.core.runner import build_config_from_overrides, run_dubbing_job
 
 
-def test_build_config_from_overrides_parses_structured_fields(tmp_path):
+def _patch_projects_root(monkeypatch, tmp_path):
+    projects_root = tmp_path / "prj"
+    monkeypatch.setattr(config_module, "DEFAULT_PROJECTS_ROOT", projects_root, raising=False)
+    return projects_root
+
+
+def test_build_config_from_overrides_parses_structured_fields(tmp_path, monkeypatch):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")
+    projects_root = _patch_projects_root(monkeypatch, tmp_path)
 
     config = build_config_from_overrides(
         {
@@ -29,15 +37,17 @@ def test_build_config_from_overrides_parses_structured_fields(tmp_path):
     assert config.get("glossary") == {"term": "translation"}
     assert config.get("voice_prompt") == {"SPEAKER_00": "calm"}
     assert config.get("keep_original_audio_ranges") == [(1.0, 3.0), (10.0, 12.0)]
-    assert config.get("output") == str(tmp_path / "clip" / "clip_be.mp4")
+    assert config.get("output") == str(projects_root / "clip" / "clip_be.mp4")
 
 
-def test_build_config_from_overrides_treats_zero_duration_as_unset(tmp_path):
+def test_build_config_from_overrides_treats_zero_duration_as_unset(tmp_path, monkeypatch):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")
+    _patch_projects_root(monkeypatch, tmp_path)
 
     config = build_config_from_overrides(
         {
+            "config": "",
             "input": str(video_path),
             "source_language": "en",
             "target_language": "be",
@@ -50,7 +60,7 @@ def test_build_config_from_overrides_treats_zero_duration_as_unset(tmp_path):
     assert config.get("duration") is None
 
 
-def test_build_config_from_overrides_clears_zero_duration_from_yaml(tmp_path):
+def test_build_config_from_overrides_clears_zero_duration_from_yaml(tmp_path, monkeypatch):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")
     config_path = tmp_path / "config.yml"
@@ -61,6 +71,7 @@ def test_build_config_from_overrides_clears_zero_duration_from_yaml(tmp_path):
         "duration: 0\n",
         encoding="utf-8",
     )
+    _patch_projects_root(monkeypatch, tmp_path)
 
     config = build_config_from_overrides(
         {
@@ -107,8 +118,8 @@ def test_run_dubbing_job_loads_dotenv_before_constructing_dubber(tmp_path, monke
     output_path = tmp_path / "dubbed.mp4"
     calls = []
 
-    def fake_load_dotenv():
-        calls.append("dotenv")
+    def fake_load_dotenv(**kwargs):
+        calls.append(("dotenv", kwargs))
 
     class FakeDubber:
         def __init__(self, config):
@@ -130,7 +141,7 @@ def test_run_dubbing_job_loads_dotenv_before_constructing_dubber(tmp_path, monke
     )
 
     assert result.status == "Completed"
-    assert calls == ["dotenv", "dubber"]
+    assert calls == [("dotenv", {"override": True}), "dubber"]
 
 
 def test_run_dubbing_job_returns_speaker_report_paths(tmp_path):
@@ -215,6 +226,63 @@ def test_run_dubbing_job_extracts_file_path_from_combine_video_tuple(tmp_path, m
     assert result.output_file == str(output_path)
 
 
+def test_run_dubbing_job_routes_tts_to_end_step(tmp_path):
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"video")
+    output_path = tmp_path / "clip_be.mp4"
+
+    class FakeDubber:
+        def __init__(self, config):
+            self.config = config
+
+        def run_from_tts(self, save_original_subtitles=False, save_translated_subtitles=False):
+            assert save_original_subtitles is True
+            assert save_translated_subtitles is False
+            return str(output_path)
+
+    result = run_dubbing_job(
+        {
+            "config": "",
+            "input": str(video_path),
+            "source_language": "en",
+            "target_language": "be",
+            "run_step": "tts_to_end",
+            "save_original_subtitles": True,
+        },
+        dubbing_factory=FakeDubber,
+    )
+
+    assert result.status == "TTS resume step completed"
+    assert result.output_file == str(output_path)
+
+
+def test_run_dubbing_job_treats_full_pipeline_step_as_normal_run(tmp_path):
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"video")
+    output_path = tmp_path / "clip_be.mp4"
+
+    class FakeDubber:
+        def __init__(self, config):
+            self.config = config
+
+        def run_pipeline(self, save_original_subtitles=False, save_translated_subtitles=False):
+            return str(output_path)
+
+    result = run_dubbing_job(
+        {
+            "config": "",
+            "input": str(video_path),
+            "source_language": "en",
+            "target_language": "be",
+            "run_step": "full_pipeline",
+        },
+        dubbing_factory=FakeDubber,
+    )
+
+    assert result.status == "Completed"
+    assert result.output_file == str(output_path)
+
+
 def test_argument_parser_accepts_omnivoice_tts_system():
     parser = create_argument_parser()
 
@@ -256,9 +324,67 @@ def test_argument_parser_accepts_gemini_transcription_backend_and_model():
     assert args.gemini_transcription_model == "gemini-2.5-flash"
 
 
-def test_build_config_from_overrides_preserves_gemini_transcription_model(tmp_path):
+def test_argument_parser_accepts_deepgram_transcription_backend():
+    parser = create_argument_parser()
+
+    args = parser.parse_args(
+        [
+            "--input",
+            "clip.mp4",
+            "--source_language",
+            "ru",
+            "--target_language",
+            "be",
+            "--transcription_system",
+            "deepgram",
+        ]
+    )
+
+    assert args.transcription_system == "deepgram"
+
+
+def test_argument_parser_accepts_tts_to_end_run_step():
+    parser = create_argument_parser()
+
+    args = parser.parse_args(
+        [
+            "--input",
+            "clip.mp4",
+            "--source_language",
+            "en",
+            "--target_language",
+            "be",
+            "--run_step",
+            "tts_to_end",
+        ]
+    )
+
+    assert args.run_step == "tts_to_end"
+
+
+def test_argument_parser_accepts_full_pipeline_run_step():
+    parser = create_argument_parser()
+
+    args = parser.parse_args(
+        [
+            "--input",
+            "clip.mp4",
+            "--source_language",
+            "en",
+            "--target_language",
+            "be",
+            "--run_step",
+            "full_pipeline",
+        ]
+    )
+
+    assert args.run_step == "full_pipeline"
+
+
+def test_build_config_from_overrides_preserves_gemini_transcription_model(tmp_path, monkeypatch):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")
+    _patch_projects_root(monkeypatch, tmp_path)
 
     config = build_config_from_overrides(
         {
@@ -274,12 +400,14 @@ def test_build_config_from_overrides_preserves_gemini_transcription_model(tmp_pa
     assert config.get("gemini_transcription_model") == "gemini-2.5-flash"
 
 
-def test_build_config_from_overrides_defaults_gemini_transcription_model(tmp_path):
+def test_build_config_from_overrides_defaults_gemini_transcription_model(tmp_path, monkeypatch):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")
+    _patch_projects_root(monkeypatch, tmp_path)
 
     config = build_config_from_overrides(
         {
+            "config": "",
             "input": str(video_path),
             "source_language": "en",
             "target_language": "be",
@@ -290,9 +418,10 @@ def test_build_config_from_overrides_defaults_gemini_transcription_model(tmp_pat
     assert config.get("gemini_transcription_model") == "gemini-3-flash-preview"
 
 
-def test_build_config_from_overrides_defaults_omnivoice_language_to_belarusian(tmp_path):
+def test_build_config_from_overrides_defaults_omnivoice_language_to_belarusian(tmp_path, monkeypatch):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")
+    _patch_projects_root(monkeypatch, tmp_path)
 
     config = build_config_from_overrides(
         {
@@ -306,9 +435,10 @@ def test_build_config_from_overrides_defaults_omnivoice_language_to_belarusian(t
     assert config.get("omnivoice_lang") == "Belarusian"
 
 
-def test_build_config_from_overrides_places_outputs_inside_project_dir(tmp_path):
+def test_build_config_from_overrides_places_outputs_inside_project_dir(tmp_path, monkeypatch):
     video_path = tmp_path / "Are.mp4"
     video_path.write_bytes(b"video")
+    projects_root = _patch_projects_root(monkeypatch, tmp_path)
 
     config = build_config_from_overrides(
         {
@@ -318,7 +448,7 @@ def test_build_config_from_overrides_places_outputs_inside_project_dir(tmp_path)
         }
     )
 
-    project_dir = tmp_path / "Are"
+    project_dir = projects_root / "Are"
 
     assert config.get("project_dir") == str(project_dir)
     assert config.get("artifacts_dir") == str(project_dir / "artifacts")
@@ -326,9 +456,10 @@ def test_build_config_from_overrides_places_outputs_inside_project_dir(tmp_path)
     assert project_dir.is_dir()
 
 
-def test_build_config_from_overrides_appends_missing_output_extension(tmp_path):
+def test_build_config_from_overrides_appends_missing_output_extension(tmp_path, monkeypatch):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")
+    _patch_projects_root(monkeypatch, tmp_path)
     custom_output = tmp_path / "катс2"
 
     config = build_config_from_overrides(
@@ -343,9 +474,10 @@ def test_build_config_from_overrides_appends_missing_output_extension(tmp_path):
     assert config.get("output") == str(custom_output.with_suffix(".mp4"))
 
 
-def test_smart_dubbing_subtitles_default_to_project_dir(tmp_path):
+def test_smart_dubbing_subtitles_default_to_project_dir(tmp_path, monkeypatch):
     video_path = tmp_path / "Are.mp4"
     video_path.write_bytes(b"video")
+    projects_root = _patch_projects_root(monkeypatch, tmp_path)
     config = build_config_from_overrides(
         {
             "input": str(video_path),
@@ -357,14 +489,15 @@ def test_smart_dubbing_subtitles_default_to_project_dir(tmp_path):
     dubber = SmartDubbing.__new__(SmartDubbing)
     dubber.config = config
 
-    assert dubber._get_subtitle_path("original", str(video_path), "en") == str(tmp_path / "Are" / "Are_en.srt")
-    assert dubber._get_subtitle_path("translation", str(video_path), "be") == str(tmp_path / "Are" / "Are_be.srt")
+    assert dubber._get_subtitle_path("original", str(video_path), "en") == str(projects_root / "Are" / "Are_en.srt")
+    assert dubber._get_subtitle_path("translation", str(video_path), "be") == str(projects_root / "Are" / "Are_be.srt")
 
 
-def test_translate_segments_passes_project_debug_paths_to_translator(tmp_path):
+def test_translate_segments_passes_project_debug_paths_to_translator(tmp_path, monkeypatch):
     video_path = tmp_path / "Are.mp4"
     video_path.write_bytes(b"video")
-    audio_path = tmp_path / "Are" / "artifacts" / "audio" / "source.wav"
+    projects_root = _patch_projects_root(monkeypatch, tmp_path)
+    audio_path = projects_root / "Are" / "artifacts" / "audio" / "source.wav"
     audio_path.parent.mkdir(parents=True, exist_ok=True)
     audio_path.write_bytes(b"audio")
 
@@ -432,14 +565,15 @@ def test_translate_segments_passes_project_debug_paths_to_translator(tmp_path):
 
     dubber.translate_segments([], str(audio_path))
 
-    assert translator.kwargs["debug_dir"] == str(tmp_path / "Are" / "artifacts" / "debug" / "translation")
-    assert translator.kwargs["timecodes_report_path"] == str(tmp_path / "Are" / "artifacts" / "timecodes.txt")
+    assert translator.kwargs["debug_dir"] == str(projects_root / "Are" / "artifacts" / "debug" / "translation")
+    assert translator.kwargs["timecodes_report_path"] == str(projects_root / "Are" / "artifacts" / "timecodes.txt")
 
 
-def test_translate_segments_temporarily_adds_stress_marks_requirement_to_prompt(tmp_path):
+def test_translate_segments_temporarily_adds_stress_marks_requirement_to_prompt(tmp_path, monkeypatch):
     video_path = tmp_path / "Are.mp4"
     video_path.write_bytes(b"video")
-    audio_path = tmp_path / "Are" / "artifacts" / "audio" / "source.wav"
+    projects_root = _patch_projects_root(monkeypatch, tmp_path)
+    audio_path = projects_root / "Are" / "artifacts" / "audio" / "source.wav"
     audio_path.parent.mkdir(parents=True, exist_ok=True)
     audio_path.write_bytes(b"audio")
 
@@ -559,9 +693,55 @@ def test_manual_speaker_reference_mapping_overrides_auto_segment_reference(tmp_p
     assert updated_args["reference_text"] == "Manual reference text"
 
 
-def test_run_pipeline_uses_separated_vocals_for_segment_references_when_keep_background_enabled(tmp_path):
+def test_segment_reference_clip_takes_priority_over_speaker_wav_and_keeps_matching_text(tmp_path):
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {
+        "reference_audio_mapping": {},
+        "reference_text_mapping": {},
+    }
+    dubber.reference_audio_mapping = {}
+    dubber.reference_text_mapping = {}
+    dubber.speakers_audio_dir = tmp_path / "speakers_audio"
+    dubber.speakers_audio_dir.mkdir(parents=True, exist_ok=True)
+    speaker_wav = dubber.speakers_audio_dir / "SPEAKER_00.wav"
+    speaker_wav.write_bytes(b"speaker-audio")
+
+    base_args = {
+        "speaker": "SPEAKER_00",
+        "text": "Translated text",
+        "reference_audio_path": None,
+        "reference_text": None,
+    }
+    segment_dict = {
+        "speaker": "SPEAKER_00",
+        "start": 0.0,
+        "end": 1.5,
+        "text": "Recognized original speech",
+        "translation": "Translated text",
+    }
+    original_audio = AudioSegment.silent(duration=2000)
+
+    updated_args, returned_audio = dubber._apply_reference_fallbacks(
+        tts_segment_data_args=base_args,
+        segment_dict=segment_dict,
+        speaker="SPEAKER_00",
+        segment_index=0,
+        original_audio_segment=original_audio,
+        segment_reference_min_duration=1.0,
+        segment_reference_min_duration_ms=1000,
+    )
+
+    assert updated_args["reference_audio_path"] != str(speaker_wav)
+    assert Path(updated_args["reference_audio_path"]).is_file()
+    assert Path(updated_args["reference_audio_path"]).name == "SPEAKER_00_0.wav"
+    assert updated_args["reference_text"] == "Recognized original speech"
+    assert returned_audio is original_audio
+
+
+def test_run_pipeline_uses_separated_vocals_for_segment_references_when_keep_background_enabled(tmp_path, monkeypatch):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")
+    _patch_projects_root(monkeypatch, tmp_path)
     config = build_config_from_overrides(
         {
             "input": str(video_path),
@@ -676,3 +856,155 @@ def test_segment_target_duration_matches_original_segment_length():
     }
 
     assert tts_segment_data_args["target_duration"] == 1.75
+
+
+def test_run_from_tts_uses_cached_translation_and_creates_video(tmp_path, monkeypatch):
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"video")
+    _patch_projects_root(monkeypatch, tmp_path)
+    config = build_config_from_overrides(
+        {
+            "config": "",
+            "input": str(video_path),
+            "source_language": "en",
+            "target_language": "be",
+            "enable_emotion_analysis": False,
+        }
+    )
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = config
+    dubber.muted_speakers = set()
+    dubber.debug_data = {}
+    dubber.pause_adjustments = []
+
+    class PerfStub:
+        def start_timing(self, *_args, **_kwargs):
+            return None
+
+        def end_timing(self, *_args, **_kwargs):
+            return 0.0
+
+        def record_metric(self, *_args, **_kwargs):
+            return None
+
+        def write_performance_summary(self, *_args, **_kwargs):
+            return None
+
+    class AudioProcessorStub:
+        def extract_audio(self, *_args, **_kwargs):
+            return str(tmp_path / "source.wav")
+
+        def get_total_duration(self):
+            return 3.0
+
+    class SpeakerProcessorStub:
+        def save_translated_samples(self, segments, audio_file):
+            assert len(segments) == 1
+            assert audio_file == str(tmp_path / "source.wav")
+            return None
+
+    class SubtitleManagerStub:
+        def save_debug_tsv(self, segments, output_dir=None):
+            assert len(segments) == 1
+            return None
+
+        def save_subtitles(self, *_args, **_kwargs):
+            return None
+
+    class VideoProcessorStub:
+        def combine_audio_with_video(self, **kwargs):
+            assert kwargs["translated_audio_path"] == str(tmp_path / "dubbed.wav")
+            assert kwargs["video_path"] == str(video_path)
+            return str(tmp_path / "output.mp4"), []
+
+    class CacheStub:
+        def __init__(self):
+            self.seen = []
+            self.use_cache = True
+
+        def generate_cache_key(self, *_args, **_kwargs):
+            return "cache-key"
+
+        def cache_exists(self, step_name, cache_key):
+            self.seen.append((step_name, cache_key))
+            return step_name == "translation"
+
+        def load_from_cache(self, step_name, cache_key):
+            self.seen.append((step_name, cache_key, "load"))
+            assert step_name == "translation"
+            return [
+                {
+                    "speaker": "SPEAKER_00",
+                    "start": 0.0,
+                    "end": 1.2,
+                    "text": "hello",
+                    "translation": "прывітанне",
+                }
+            ]
+
+    dubber.performance_tracker = PerfStub()
+    dubber.audio_processor = AudioProcessorStub()
+    dubber.speaker_processor = SpeakerProcessorStub()
+    dubber.subtitle_manager = SubtitleManagerStub()
+    dubber.video_processor = VideoProcessorStub()
+    dubber.cache_manager = CacheStub()
+
+    synth_calls = []
+
+    def synthesize_speech(segments, speakers_rolls, audio_file):
+        assert dubber.cache_manager.use_cache is False
+        synth_calls.append((segments, speakers_rolls, audio_file))
+        return str(tmp_path / "dubbed.wav")
+
+    dubber.synthesize_speech = synthesize_speech
+
+    output_path = dubber.run_from_tts()
+
+    assert output_path == str(tmp_path / "output.mp4")
+    assert synth_calls[0][1] == {(0.0, 1.2): "SPEAKER_00"}
+    assert synth_calls[0][2] == str(tmp_path / "source.wav")
+    assert dubber.cache_manager.seen[0][0] == "translation"
+    assert dubber.cache_manager.use_cache is True
+
+
+def test_run_from_tts_requires_cached_translation(tmp_path, monkeypatch):
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"video")
+    _patch_projects_root(monkeypatch, tmp_path)
+    config = build_config_from_overrides(
+        {
+            "config": "",
+            "input": str(video_path),
+            "source_language": "en",
+            "target_language": "be",
+            "enable_emotion_analysis": False,
+        }
+    )
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = config
+
+    class AudioProcessorStub:
+        def extract_audio(self, *_args, **_kwargs):
+            return str(tmp_path / "source.wav")
+
+    class CacheStub:
+        use_cache = True
+
+        def generate_cache_key(self, *_args, **_kwargs):
+            return "cache-key"
+
+        def cache_exists(self, *_args, **_kwargs):
+            return False
+
+    dubber.audio_processor = AudioProcessorStub()
+    dubber.cache_manager = CacheStub()
+
+    try:
+        dubber.run_from_tts()
+    except FileNotFoundError as exc:
+        assert "translation" in str(exc)
+        assert "full dubbing run" in str(exc)
+    else:
+        raise AssertionError("Expected FileNotFoundError when translation cache is missing")

@@ -1,11 +1,17 @@
+import pickle
 from pathlib import Path
 from types import SimpleNamespace
 
 import gradio as gr
+from pydub import AudioSegment
 import yaml
 
 import dubbing.ui.gradio_app as gradio_app
 from dubbing.ui.gradio_app import DEFAULT_CONFIG_PATH, build_app, save_settings
+from dubbing.core.cache_manager import CacheManager
+from dubbing.core.runner import build_config_from_overrides
+from dubbing.core.smart_dubbing import SmartDubbing
+import dubbing.core.config as config_module
 
 
 def test_build_app_returns_gradio_blocks():
@@ -80,6 +86,15 @@ def test_build_app_lists_gemini_in_transcription_system_choices():
     assert "gemini" in choice_values
 
 
+def test_build_app_lists_deepgram_in_transcription_system_choices():
+    app = build_app()
+
+    transcription_props = _component_props_by_label(app, "Transcription system")
+    choice_values = [choice[1] if isinstance(choice, (list, tuple)) else choice for choice in transcription_props["choices"]]
+
+    assert "deepgram" in choice_values
+
+
 def test_build_app_exposes_gemini_transcription_model_field(tmp_path):
     config_path = tmp_path / "ui_defaults.yml"
     config_path.write_text(
@@ -105,6 +120,38 @@ def test_build_app_explains_run_step_requires_existing_artifacts():
 
     assert "existing artifacts" in run_step_props["info"]
     assert "Run DubbLM" in run_step_props["info"]
+
+
+def test_build_app_lists_tts_to_end_in_run_step_choices():
+    app = build_app()
+
+    run_step_props = _component_props_by_label(app, "Run step")
+    choice_values = [choice[1] if isinstance(choice, (list, tuple)) else choice for choice in run_step_props["choices"]]
+
+    assert "tts_to_end" in choice_values
+    assert "TTS" in run_step_props["info"]
+
+
+def test_build_app_defaults_run_step_to_full_pipeline():
+    app = build_app()
+
+    run_step_props = _component_props_by_label(app, "Run step")
+    choice_values = [choice[1] if isinstance(choice, (list, tuple)) else choice for choice in run_step_props["choices"]]
+
+    assert run_step_props["value"] == "full_pipeline"
+    assert choice_values == ["full_pipeline", "combine_video", "tts_to_end"]
+
+
+def test_build_app_exposes_dubbing_texts_editor():
+    app = build_app()
+
+    dubbing_texts_props = _component_props_by_label(app, "Dubbing texts")
+
+    assert dubbing_texts_props["headers"] == ["Speaker", "Time", "Translation", "Original"]
+    assert dubbing_texts_props["column_widths"] == ["12%", "14%", "54%", "20%"]
+    assert dubbing_texts_props["static_columns"] == [0, 1, 3]
+    assert dubbing_texts_props["show_search"] == "search"
+    assert dubbing_texts_props["pinned_columns"] == 2
 
 
 def test_save_settings_writes_to_default_config_and_preserves_other_keys(tmp_path, monkeypatch):
@@ -378,3 +425,120 @@ def test_use_selected_library_row_replaces_existing_speaker_mapping():
 
     assert "updated" in status.lower()
     assert updated_rows == [["SPEAKER_01", "D:/lib/SPEAKER_01/reference.wav", "Library text"]]
+
+
+def _patch_projects_root(monkeypatch, tmp_path):
+    projects_root = tmp_path / "prj"
+    monkeypatch.setattr(config_module, "DEFAULT_PROJECTS_ROOT", projects_root, raising=False)
+    return projects_root
+
+
+def _create_translation_cache(tmp_path, monkeypatch, *, segments):
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"video")
+    _patch_projects_root(monkeypatch, tmp_path)
+
+    overrides = {
+        "input": str(video_path),
+        "source_language": "en",
+        "target_language": "be",
+        "config": "",
+    }
+    config = build_config_from_overrides(overrides)
+    audio_path = Path(config.get("audio_artifacts_dir")) / "source.wav"
+    audio_path.parent.mkdir(parents=True, exist_ok=True)
+    AudioSegment.silent(duration=1200).export(audio_path, format="wav")
+
+    cache_manager = CacheManager(use_cache=True, input_file=config.get("input"))
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = config
+    dubber.cache_manager = cache_manager
+    cache_key = dubber._build_translation_cache_key(str(audio_path))
+    cache_path = cache_manager.get_cache_path("translation") / f"{cache_key}.pkl"
+    with cache_path.open("wb") as handle:
+        pickle.dump(segments, handle)
+
+    return overrides, config, cache_path
+
+
+def test_load_dubbing_text_rows_reads_translation_cache(tmp_path, monkeypatch):
+    overrides, _config, _cache_path = _create_translation_cache(
+        tmp_path,
+        monkeypatch,
+        segments=[
+            {
+                "speaker": "SPEAKER_00",
+                "start": 0.0,
+                "end": 1.2,
+                "text": "Hello there",
+                "translation": "Прывітанне",
+            }
+        ],
+    )
+
+    status, rows = gradio_app.load_dubbing_text_rows(overrides)
+
+    assert status == "Loaded 1 dubbing text row(s)."
+    assert rows == [["SPEAKER_00", "00.00.00 - 00.00.01", "Прывітанне", "Hello there"]]
+
+
+def test_save_dubbing_text_rows_updates_cache_and_tsv(tmp_path, monkeypatch):
+    overrides, config, cache_path = _create_translation_cache(
+        tmp_path,
+        monkeypatch,
+        segments=[
+            {
+                "speaker": "SPEAKER_00",
+                "start": 0.0,
+                "end": 1.2,
+                "text": "Hello there",
+                "translation": "Стары тэкст",
+                "short_translation": "Стары кароткі",
+                "very_short_translation": "Стары вельмі кароткі",
+                "long_translation": "Стары доўгі",
+            }
+        ],
+    )
+
+    status, saved_rows = gradio_app.save_dubbing_text_rows(
+        [["SPEAKER_00", "00.00.00 - 00.00.01", "Новы тэкст", "Hello there"]],
+        overrides,
+    )
+
+    artifact_path = Path(config.get("artifacts_dir")) / "dubbing_texts.tsv"
+    with cache_path.open("rb") as handle:
+        saved_segments = pickle.load(handle)
+
+    assert status == "Saved 1 dubbing text row(s)."
+    assert saved_rows == [["SPEAKER_00", "00.00.00 - 00.00.01", "Новы тэкст", "Hello there"]]
+    assert artifact_path.is_file()
+    assert "Новы тэкст" in artifact_path.read_text(encoding="utf-8")
+    assert saved_segments[0]["translation"] == "Новы тэкст"
+    assert saved_segments[0]["short_translation"] == "Новы тэкст"
+    assert saved_segments[0]["very_short_translation"] == "Новы тэкст"
+    assert saved_segments[0]["long_translation"] == "Новы тэкст"
+
+
+def test_save_dubbing_text_rows_rejects_row_count_mismatch(tmp_path, monkeypatch):
+    overrides, _config, cache_path = _create_translation_cache(
+        tmp_path,
+        monkeypatch,
+        segments=[
+            {
+                "speaker": "SPEAKER_00",
+                "start": 0.0,
+                "end": 1.2,
+                "text": "Hello there",
+                "translation": "Прывітанне",
+            }
+        ],
+    )
+
+    status, saved_rows = gradio_app.save_dubbing_text_rows([], overrides)
+
+    with cache_path.open("rb") as handle:
+        saved_segments = pickle.load(handle)
+
+    assert "row count" in status.lower()
+    assert saved_rows == []
+    assert saved_segments[0]["translation"] == "Прывітанне"

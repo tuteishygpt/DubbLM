@@ -72,6 +72,39 @@ def test_transcription_factory_supports_gemini_backend():
     assert transcriber.kwargs["gemini_transcription_model"] == "gemini-2.5-flash"
 
 
+def test_transcription_factory_supports_deepgram_backend():
+    from transcription.transcription_factory import TranscriptionFactory
+
+    fake_module = types.ModuleType("transcription.deepgram_transcriber")
+
+    class FakeDeepgramTranscriber:
+        def __init__(self, source_language, device=None, **kwargs):
+            self.source_language = source_language
+            self.device = device
+            self.kwargs = kwargs
+
+    fake_module.DeepgramTranscriber = FakeDeepgramTranscriber
+    original_module = sys.modules.get("transcription.deepgram_transcriber")
+    sys.modules["transcription.deepgram_transcriber"] = fake_module
+
+    try:
+        transcriber = TranscriptionFactory.create_transcriber(
+            transcription_system="deepgram",
+            source_language="ru",
+            device="cpu",
+            cache_manager="cache-stub",
+        )
+    finally:
+        if original_module is None:
+            sys.modules.pop("transcription.deepgram_transcriber", None)
+        else:
+            sys.modules["transcription.deepgram_transcriber"] = original_module
+
+    assert isinstance(transcriber, FakeDeepgramTranscriber)
+    assert transcriber.source_language == "ru"
+    assert transcriber.kwargs["cache_manager"] == "cache-stub"
+
+
 def test_smart_dubbing_imports_without_optional_speechbrain():
     import dubbing.core.smart_dubbing as smart_dubbing
 
