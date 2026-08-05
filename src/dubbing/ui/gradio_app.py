@@ -14,7 +14,7 @@ import yaml
 from src.utils.time_utils import format_seconds_to_hms
 
 from ..core.cache_manager import CacheManager
-from ..core.runner import build_config_from_overrides, run_dubbing_job
+from ..core.runner import build_config_from_overrides, run_dubbing_job, run_dubbing_job_streaming
 from ..core.smart_dubbing import SmartDubbing
 from ..core.config import DubbingConfig
 
@@ -90,8 +90,18 @@ LIST_TEXT_FIELDS = {"keep_original_audio_ranges"}
 SPEAKER_REFERENCE_FIELD = "speaker_reference_rows"
 SPEAKER_REFERENCE_HEADERS = ["Speaker ID", "Reference audio path", "Reference text"]
 SPEAKER_REFERENCE_LIBRARY_HEADERS = ["Speaker ID", "Saved audio path", "Reference text"]
-DUBBING_TEXT_HEADERS = ["Speaker", "Time", "Translation", "Original"]
-DUBBING_TEXT_COLUMN_WIDTHS = ["12%", "14%", "54%", "20%"]
+DUBBING_TEXT_HEADERS = [
+    "Speaker",
+    "Start",
+    "End",
+    "Original",
+    "Translation",
+    "Synthesized text",
+    "Audio file",
+]
+DUBBING_TEXT_COLUMN_WIDTHS = ["9%", "8%", "8%", "20%", "25%", "22%", "8%"]
+DUBBING_TEXT_COLUMN_COUNT = len(DUBBING_TEXT_HEADERS)
+DUBBING_TEXT_EMPTY_ROW = [""] * DUBBING_TEXT_COLUMN_COUNT
 TRANSLATION_TRACK_FIELDS = (
     "translation",
     "short_translation",
@@ -303,6 +313,9 @@ def _save_library_reference(
         source_audio_path=str(reference_audio_file),
         reference_text=reference_text,
     )
+    # Library entries accept any label ("MaleDeep", "Anchor", "SPEAKER_01",
+    # …). The mapping table below is what has to match the diarization IDs,
+    # not the library.
     updated_rows = _upsert_speaker_reference_row(current_rows, speaker_id, saved_audio_path, reference_text)
     library_rows = load_speaker_reference_library()
     return (
@@ -329,26 +342,47 @@ def _store_selected_library_row(evt: gr.SelectData):
     return None
 
 
-def _use_selected_library_reference(selected_row: object, current_rows: object):
+def _use_selected_library_reference(
+    selected_row: object,
+    current_rows: object,
+    assign_speaker_id: str = "",
+):
+    """Copy the selected library entry into the active mapping table.
+
+    ``assign_speaker_id`` overrides the mapping key so a library entry can be
+    stored under any label ("MaleDeep", "Anchor", …) and still assigned to a
+    real diarization ID (SPEAKER_00, SPEAKER_01, …) here.
+    """
     if not isinstance(selected_row, (list, tuple)) or len(selected_row) < 3:
         return "Select one library row first.", _normalize_table_rows(current_rows)
 
-    speaker_id = str(selected_row[0]).strip()
+    library_label = str(selected_row[0]).strip()
     reference_audio_path = str(selected_row[1]).strip()
     reference_text = str(selected_row[2]).strip()
-    if not speaker_id or not reference_audio_path:
+    if not library_label or not reference_audio_path:
         return "Selected library row is incomplete.", _normalize_table_rows(current_rows)
+
+    target_speaker_id = str(assign_speaker_id or "").strip() or library_label
 
     normalized_rows = _normalize_table_rows(current_rows)
     existing_speakers = {row[0] for row in normalized_rows if row[0]}
     updated_rows = _upsert_speaker_reference_row(
         normalized_rows,
-        speaker_id,
+        target_speaker_id,
         reference_audio_path,
         reference_text,
     )
-    action = "updated" if speaker_id in existing_speakers else "added"
-    return f"{speaker_id} {action} from library.", updated_rows
+    action = "updated" if target_speaker_id in existing_speakers else "added"
+    status = f"{target_speaker_id} {action} from library entry '{library_label}'."
+
+    import re
+    if not re.match(r"^SPEAKER_\d+$", target_speaker_id):
+        status += (
+            " ⚠ Warning: this ID does not match the diarization pattern "
+            "SPEAKER_00, SPEAKER_01, … — the pipeline will ignore this mapping "
+            "at runtime. Fill 'Assign to speaker' with the correct SPEAKER_XX before running."
+        )
+    return status, updated_rows
 
 
 def delete_speaker_reference_from_library(
@@ -636,7 +670,21 @@ def save_settings(
     with Path(config_path).open("w", encoding="utf-8") as config_file:
         yaml.safe_dump(config_data, config_file, sort_keys=False, allow_unicode=True)
 
-    return f"Settings saved to {DEFAULT_CONFIG_PATH}"
+    status = f"Settings saved to {DEFAULT_CONFIG_PATH}"
+
+    import re
+    invalid_speakers = [
+        s
+        for s in (reference_audio_mapping or {}).keys()
+        if not re.match(r"^SPEAKER_\d+$", s)
+    ]
+    if invalid_speakers:
+        status += (
+            f". ⚠ Warning: speaker IDs {invalid_speakers} do not match the diarization pattern "
+            "SPEAKER_00, SPEAKER_01, … — those mappings will be silently ignored by the pipeline. "
+            "Check for typos like 'SPEACKER_' (two Cs)."
+        )
+    return status
 
 
 def _collect_overrides(*values) -> dict[str, object]:
@@ -645,13 +693,15 @@ def _collect_overrides(*values) -> dict[str, object]:
     return overrides
 
 
-def _build_dubbing_text_context(overrides: dict[str, object]) -> tuple[DubbingConfig, Path, Path]:
+def _build_dubbing_text_context(
+    overrides: dict[str, object],
+) -> tuple[DubbingConfig, Path, Path, Path]:
     config = build_config_from_overrides(overrides)
     audio_path = Path(config.get("audio_artifacts_dir")) / "source.wav"
     if not audio_path.is_file():
         raise FileNotFoundError(
             f"Expected extracted source audio at {audio_path}. "
-            "Run the full pipeline once before editing dubbing texts."
+            "Run at least `transcribe_only` (or the full pipeline) once before editing dubbing texts."
         )
 
     cache_manager = CacheManager(use_cache=True, input_file=config.get("input"))
@@ -661,13 +711,89 @@ def _build_dubbing_text_context(overrides: dict[str, object]) -> tuple[DubbingCo
     cache_key = dubber._build_translation_cache_key(str(audio_path))
     cache_path = cache_manager.get_cache_path("translation") / f"{cache_key}.pkl"
     artifact_path = Path(config.get("artifacts_dir")) / "dubbing_texts.tsv"
-    return config, cache_path, artifact_path
+    return config, cache_path, artifact_path, audio_path
 
 
-def _format_dubbing_text_time(start: object, end: object) -> str:
-    start_seconds = float(start or 0.0)
-    end_seconds = float(end or 0.0)
-    return f"{format_seconds_to_hms(start_seconds)} - {format_seconds_to_hms(end_seconds)}"
+def _seed_segments_from_transcription(
+    config: DubbingConfig, audio_path: Path
+) -> list[dict[str, object]]:
+    """Build dubbing-texts segments from a cached transcription when no
+    `translation` pickle exists yet (e.g. after `transcribe_only`).
+    """
+    dubber = SmartDubbing(config)
+    _speakers_rolls, transcription = dubber.diarize_and_transcribe(str(audio_path))
+    if not transcription:
+        raise RuntimeError(
+            "Transcription cache is empty. Run `transcribe_only` (or the full pipeline) first."
+        )
+
+    segments: list[dict[str, object]] = []
+    for entry in transcription:
+        text = str(entry.get("text", "") or "").strip()
+        speaker = str(entry.get("speaker", "") or "SPEAKER_00")
+        start = float(entry.get("start", 0.0) or 0.0)
+        end = float(entry.get("end", 0.0) or 0.0)
+        segments.append(
+            {
+                "speaker": speaker,
+                "start": start,
+                "end": end,
+                "text": text,
+                "translation": text,
+                "short_translation": text,
+                "very_short_translation": text,
+                "long_translation": text,
+                "emotion": "Neutral",
+            }
+        )
+    return segments
+
+
+def _load_or_seed_segments(
+    config: DubbingConfig, cache_path: Path, audio_path: Path
+) -> tuple[list[dict[str, object]], bool]:
+    """Return cached translation segments; if the pickle is missing, seed
+    them from the transcription cache. The second return value is ``True``
+    when a fresh seed was created (i.e. no translation pickle yet).
+    """
+    if cache_path.is_file():
+        return _load_cached_translation_segments(cache_path), False
+    return _seed_segments_from_transcription(config, audio_path), True
+
+
+def _format_seconds(value: object) -> str:
+    try:
+        return f"{float(value or 0.0):.3f}"
+    except (TypeError, ValueError):
+        return "0.000"
+
+
+def _parse_seconds(value: object) -> float:
+    if value is None:
+        return 0.0
+    try:
+        return float(str(value).strip() or 0.0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid timestamp '{value}': {exc}")
+
+
+def _segment_to_dubbing_text_row(segment: dict) -> list[str]:
+    audio_file = str(segment.get("synthesized_speech_file", "") or "")
+    if audio_file:
+        try:
+            if not Path(audio_file).is_file():
+                audio_file = f"(MISSING) {audio_file}"
+        except (OSError, ValueError):
+            audio_file = f"(MISSING) {audio_file}"
+    return [
+        str(segment.get("speaker", "") or ""),
+        _format_seconds(segment.get("start")),
+        _format_seconds(segment.get("end")),
+        str(segment.get("text", "") or ""),
+        str(segment.get("translation", "") or ""),
+        str(segment.get("synthesized_text", "") or ""),
+        audio_file,
+    ]
 
 
 def _segments_to_dubbing_text_rows(segments: object) -> list[list[str]]:
@@ -678,14 +804,7 @@ def _segments_to_dubbing_text_rows(segments: object) -> list[list[str]]:
     for segment in segments:
         if not isinstance(segment, dict):
             continue
-        rows.append(
-            [
-                str(segment.get("speaker", "") or ""),
-                _format_dubbing_text_time(segment.get("start"), segment.get("end")),
-                str(segment.get("translation", "") or ""),
-                str(segment.get("text", "") or ""),
-            ]
-        )
+        rows.append(_segment_to_dubbing_text_row(segment))
     return rows
 
 
@@ -699,13 +818,30 @@ def _normalize_dubbing_text_rows(rows: object) -> list[list[str]]:
             continue
         normalized_rows.append(
             [
-                str(row[0]).strip() if len(row) > 0 and row[0] is not None else "",
-                str(row[1]).strip() if len(row) > 1 and row[1] is not None else "",
-                str(row[2]) if len(row) > 2 and row[2] is not None else "",
-                str(row[3]) if len(row) > 3 and row[3] is not None else "",
+                str(row[c]).strip() if c < len(row) and row[c] is not None else ""
+                for c in range(DUBBING_TEXT_COLUMN_COUNT)
             ]
         )
     return normalized_rows
+
+
+def _apply_row_to_segment(segment: dict, row: list[str]) -> None:
+    """Mutate ``segment`` with edited values from a Dubbing Texts row."""
+    segment["speaker"] = row[0]
+    segment["start"] = _parse_seconds(row[1])
+    segment["end"] = _parse_seconds(row[2])
+    segment["text"] = row[3]
+
+    translation = row[4]
+    if not translation:
+        raise ValueError("Translation text cannot be empty.")
+    for field in TRANSLATION_TRACK_FIELDS:
+        segment[field] = translation
+
+    synthesized_text = row[5]
+    if synthesized_text:
+        segment["synthesized_text"] = synthesized_text
+    # Column 6 (audio file) is read-only.
 
 
 def _load_cached_translation_segments(cache_path: Path) -> list[dict[str, object]]:
@@ -726,17 +862,43 @@ def _write_dubbing_text_artifact(artifact_path: Path, rows: list[list[str]]) -> 
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     with artifact_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t")
-        writer.writerow(["speaker", "time", "translation", "original"])
+        writer.writerow([
+            "speaker",
+            "start",
+            "end",
+            "original",
+            "translation",
+            "synthesized_text",
+            "audio_file",
+        ])
         for row in rows:
             writer.writerow(row)
 
 
 def load_dubbing_text_rows(overrides: dict[str, object]) -> tuple[str, list[list[str]]]:
     try:
-        _config, cache_path, _artifact_path = _build_dubbing_text_context(overrides)
-        cached_segments = _load_cached_translation_segments(cache_path)
+        config, cache_path, _artifact_path, audio_path = _build_dubbing_text_context(overrides)
+        cached_segments, seeded = _load_or_seed_segments(config, cache_path, audio_path)
         rows = _segments_to_dubbing_text_rows(cached_segments)
-        return f"Loaded {len(rows)} dubbing text row(s).", rows
+        missing_indexes = [
+            i for i, row in enumerate(rows)
+            if not row[6] or row[6].startswith("(MISSING)")
+        ]
+        missing_note = (
+            f" {len(missing_indexes)} segment(s) missing audio (rows: {missing_indexes[:20]}"
+            f"{'…' if len(missing_indexes) > 20 else ''}). Select a row and click "
+            "`Regenerate selected row` to re-run TTS for it."
+            if missing_indexes else ""
+        )
+        if seeded:
+            status = (
+                f"Loaded {len(rows)} row(s) from transcription cache — no translations yet. "
+                "Edit the `Translation` column and click `Save texts` to create the translation cache."
+                + missing_note
+            )
+        else:
+            status = f"Loaded {len(rows)} dubbing text row(s)." + missing_note
+        return status, rows
     except Exception as exc:
         return f"Failed: {exc}", []
 
@@ -744,37 +906,103 @@ def load_dubbing_text_rows(overrides: dict[str, object]) -> tuple[str, list[list
 def save_dubbing_text_rows(rows: object, overrides: dict[str, object]) -> tuple[str, list[list[str]]]:
     normalized_rows = _normalize_dubbing_text_rows(rows)
     try:
-        _config, cache_path, artifact_path = _build_dubbing_text_context(overrides)
-        cached_segments = _load_cached_translation_segments(cache_path)
+        config, cache_path, artifact_path, audio_path = _build_dubbing_text_context(overrides)
+        cached_segments, seeded = _load_or_seed_segments(config, cache_path, audio_path)
         if len(normalized_rows) != len(cached_segments):
             raise ValueError(
                 f"Edited row count ({len(normalized_rows)}) does not match cached segment count ({len(cached_segments)})."
             )
 
-        saved_rows: list[list[str]] = []
         for segment, row in zip(cached_segments, normalized_rows):
-            translation = row[2].strip()
-            if not translation:
-                raise ValueError("Translation text cannot be empty.")
+            _apply_row_to_segment(segment, row)
 
-            for field in TRANSLATION_TRACK_FIELDS:
-                segment[field] = translation
+        saved_rows = [_segment_to_dubbing_text_row(seg) for seg in cached_segments]
 
-            saved_rows.append(
-                [
-                    str(segment.get("speaker", "") or ""),
-                    _format_dubbing_text_time(segment.get("start"), segment.get("end")),
-                    translation,
-                    str(segment.get("text", "") or ""),
-                ]
-            )
-
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
         with cache_path.open("wb") as handle:
             pickle.dump(cached_segments, handle)
         _write_dubbing_text_artifact(artifact_path, saved_rows)
-        return f"Saved {len(saved_rows)} dubbing text row(s).", saved_rows
+        prefix = "Created translation cache with" if seeded else "Saved"
+        return f"{prefix} {len(saved_rows)} dubbing text row(s).", saved_rows
     except Exception as exc:
         return f"Failed: {exc}", normalized_rows
+
+
+def regenerate_dubbing_text_row(
+    rows: object,
+    selected_index: object,
+    overrides: dict[str, object],
+) -> tuple[str, list[list[str]]]:
+    import traceback
+
+    normalized_rows = _normalize_dubbing_text_rows(rows)
+    try:
+        try:
+            row_index = int(selected_index) if selected_index is not None else -1
+        except (TypeError, ValueError):
+            row_index = -1
+        if row_index < 0 or row_index >= len(normalized_rows):
+            raise ValueError(
+                "Click a cell in the table first so a row is selected, then click Regenerate."
+            )
+
+        config, cache_path, artifact_path, audio_path = _build_dubbing_text_context(overrides)
+        cached_segments, _seeded = _load_or_seed_segments(config, cache_path, audio_path)
+        if len(normalized_rows) != len(cached_segments):
+            raise ValueError(
+                f"Edited row count ({len(normalized_rows)}) does not match cached segment count ({len(cached_segments)}). "
+                "Save your edits or reload the table before regenerating."
+            )
+
+        # Apply every edit from the table first so the segment we're about to
+        # resynthesize reflects any recent user changes.
+        for segment, row in zip(cached_segments, normalized_rows):
+            _apply_row_to_segment(segment, row)
+
+        segment_dict = cached_segments[row_index]
+        # Prefer explicit `Synthesized text` override; fall back to edited
+        # `Translation` when the user has not filled the synthesized column
+        # (typical for the initial regenerate-after-skip flow).
+        synthesized_override = (normalized_rows[row_index][5] or "").strip()
+        translation_text = (normalized_rows[row_index][4] or "").strip()
+        override_text = synthesized_override or translation_text or None
+
+        dubber = SmartDubbing(config)
+
+        # Ensure per-speaker reference audio exists before running TTS —
+        # otherwise cloning backends will silently skip the segment again.
+        try:
+            speakers_dir = Path(dubber.speakers_audio_dir)
+            speakers_dir.mkdir(parents=True, exist_ok=True)
+            speaker = str(segment_dict.get("speaker", "") or "")
+            speaker_wav = speakers_dir / f"{speaker}.wav" if speaker else None
+            if speaker_wav is not None and not speaker_wav.is_file():
+                speakers_rolls = dubber._build_speaker_rolls_from_segments(cached_segments)
+                dubber.speaker_processor.extract_speaker_audio(str(audio_path), speakers_rolls)
+        except Exception as ref_exc:
+            # Non-fatal — resynthesize_one_segment may still find another
+            # reference via reference_audio_mapping / segment ref clip.
+            _ = ref_exc
+
+        dubber.resynthesize_one_segment(
+            segments=cached_segments,
+            segment_index=row_index,
+            override_text=override_text,
+        )
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("wb") as handle:
+            pickle.dump(cached_segments, handle)
+        saved_rows = [_segment_to_dubbing_text_row(seg) for seg in cached_segments]
+        _write_dubbing_text_artifact(artifact_path, saved_rows)
+        audio_file = segment_dict.get("synthesized_speech_file") or "(missing)"
+        return (
+            f"Regenerated row {row_index}: {audio_file}",
+            saved_rows,
+        )
+    except Exception as exc:
+        detail = traceback.format_exc(limit=4)
+        return f"Failed to regenerate row: {exc}\n{detail}", normalized_rows
 
 
 def _load_dubbing_text_values(*values):
@@ -785,19 +1013,52 @@ def _save_dubbing_text_values(rows, *values):
     return save_dubbing_text_rows(rows, _collect_overrides(*values))
 
 
+def _regenerate_dubbing_text_value(rows, selected_index, *values):
+    return regenerate_dubbing_text_row(rows, selected_index, _collect_overrides(*values))
+
+
+def _store_selected_dubbing_row(evt: gr.SelectData) -> int:
+    try:
+        index = evt.index
+    except Exception:
+        return -1
+    if isinstance(index, (list, tuple)) and index:
+        try:
+            return int(index[0])
+        except (TypeError, ValueError):
+            return -1
+    try:
+        return int(index) if index is not None else -1
+    except (TypeError, ValueError):
+        return -1
+
+
 def _collect_values(*values):
+    """Streaming variant: yields ``(status, logs, output_file, report_file, artifacts_path)``
+    tuples so the Gradio UI updates the log textbox live instead of only after
+    the whole pipeline finishes.
+    """
     overrides = _collect_overrides(*values)
-    result = run_dubbing_job(overrides)
 
-    output_file = result.output_file
-    if output_file and not Path(output_file).is_file():
-        artifacts_path = output_file
-        output_file = None
-    else:
-        artifacts_path = None
+    for status, logs, result in run_dubbing_job_streaming(overrides):
+        if result is None:
+            # In-flight update — only status/logs are meaningful.
+            yield status, logs, None, None, None
+            continue
 
-    report_file = result.report_file if result.report_file and Path(result.report_file).is_file() else None
-    return result.status, result.logs, output_file, report_file, artifacts_path
+        output_file = result.output_file
+        if output_file and not Path(output_file).is_file():
+            artifacts_path = output_file
+            output_file = None
+        else:
+            artifacts_path = None
+
+        report_file = (
+            result.report_file
+            if result.report_file and Path(result.report_file).is_file()
+            else None
+        )
+        yield status, logs, output_file, report_file, artifacts_path
 
 
 def _save_values(*values):
@@ -835,10 +1096,17 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     config = gr.Textbox(label="Config path", value=defaults.get("config", DEFAULT_CONFIG_PATH))
                     run_step = gr.Dropdown(
                         label="Run step",
-                        choices=["full_pipeline", "combine_video", "tts_to_end"],
+                        choices=[
+                            "full_pipeline",
+                            "from_scratch",
+                            "transcribe_only",
+                            "translate_only",
+                            "combine_video",
+                            "tts_to_end",
+                        ],
                         value=defaults.get("run_step") or "full_pipeline",
                         allow_custom_value=False,
-                        info="Choose `full_pipeline` for the normal end-to-end run, then click `Run DubbLM`. Resume options require existing artifacts from a previous full run in the same project directory: use `combine_video` to rebuild the final video from an existing dubbed audio file, or `tts_to_end` to restart at cached translation data, regenerate TTS, replace the generated audio artifacts, and finish a new video.",
+                        info="`full_pipeline` — normal end-to-end run. `from_scratch` — clear cached artifacts for this input and rerun everything from zero. `transcribe_only` — stop after diarization + transcription (saves original subtitles when requested). `translate_only` — diarization + transcription + translation only (saves subtitles when requested). Resume options require existing artifacts from a previous full run: `combine_video` rebuilds the final video from existing dubbed audio; `tts_to_end` restarts at cached translation data, regenerates TTS, and finishes the video.",
                     )
                 with gr.Row():
                     generate_speaker_report = gr.Checkbox(label="Generate speaker report only")
@@ -1007,6 +1275,11 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     type="array",
                 )
                 with gr.Row():
+                    library_assign_speaker_id = gr.Textbox(
+                        label="Assign to speaker",
+                        placeholder="SPEAKER_00",
+                        info="Diarization ID that will receive this library entry. Leave empty to reuse the library label.",
+                    )
                     use_selected_library_button = gr.Button("Use selected from library")
                     delete_library_button = gr.Button("Delete selected from library", variant="stop")
                 with gr.Row():
@@ -1132,28 +1405,32 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
 
             with gr.Tab("Dubbing Texts"):
                 gr.Markdown(
-                    "Load cached translation segments, edit the dubbing text in the `Translation` column, then save. "
-                    "Saved edits are written both to `artifacts/dubbing_texts.tsv` and to the translation cache used by `tts_to_end`."
+                    "Load cached translation segments, edit any column (except the read-only `Audio file`), then save. "
+                    "`Synthesized text` shows what was actually spoken by the TTS after best-variant selection and any auto-adjustments; "
+                    "editing it and clicking `Regenerate selected row` runs TTS just for that segment. "
+                    "Saved edits are written to `artifacts/dubbing_texts.tsv` and to the translation cache used by `tts_to_end`."
                 )
                 with gr.Row():
                     load_dubbing_texts_button = gr.Button("Load texts")
                     save_dubbing_texts_button = gr.Button("Save texts")
+                    regenerate_dubbing_row_button = gr.Button("Regenerate selected row", variant="secondary")
                 dubbing_text_status = gr.Textbox(label="Dubbing text status", interactive=False)
+                selected_dubbing_row_index = gr.State(-1)
                 dubbing_text_rows = gr.Dataframe(
                     headers=DUBBING_TEXT_HEADERS,
-                    datatype=["str", "str", "str", "str"],
+                    datatype=["str"] * DUBBING_TEXT_COLUMN_COUNT,
                     row_count=(1, "dynamic"),
-                    col_count=(4, "fixed"),
+                    col_count=(DUBBING_TEXT_COLUMN_COUNT, "fixed"),
                     label="Dubbing texts",
-                    value=[["", "", "", ""]],
+                    value=[list(DUBBING_TEXT_EMPTY_ROW)],
                     type="array",
                     interactive=True,
                     wrap=True,
                     line_breaks=True,
                     show_search="search",
                     show_row_numbers=True,
-                    pinned_columns=2,
-                    static_columns=[0, 1, 3],
+                    pinned_columns=3,
+                    static_columns=[6],
                     column_widths=DUBBING_TEXT_COLUMN_WIDTHS,
                 )
 
@@ -1221,7 +1498,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
         )
         use_selected_library_button.click(
             fn=_use_selected_library_reference,
-            inputs=[selected_library_row, speaker_reference_rows],
+            inputs=[selected_library_row, speaker_reference_rows, library_assign_speaker_id],
             outputs=[status, speaker_reference_rows],
         )
         delete_library_button.click(
@@ -1237,6 +1514,15 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
         save_dubbing_texts_button.click(
             fn=_save_dubbing_text_values,
             inputs=[dubbing_text_rows, *input_components],
+            outputs=[dubbing_text_status, dubbing_text_rows],
+        )
+        dubbing_text_rows.select(
+            fn=_store_selected_dubbing_row,
+            outputs=selected_dubbing_row_index,
+        )
+        regenerate_dubbing_row_button.click(
+            fn=_regenerate_dubbing_text_value,
+            inputs=[dubbing_text_rows, selected_dubbing_row_index, *input_components],
             outputs=[dubbing_text_status, dubbing_text_rows],
         )
         run_button.click(

@@ -537,6 +537,150 @@ class SmartDubbing:
             upscale_sharpen=self.config.get('upscale_sharpen', True),
         )
 
+    def _persist_synthesis_results(
+        self, segments: List[Dict], audio_file: str
+    ) -> None:
+        """Write post-synthesis segment state (with `synthesized_text` /
+        `synthesized_speech_file`) back to the translation cache so the UI
+        editor can display and reuse them.
+        """
+        try:
+            cache_key = self._build_translation_cache_key(audio_file)
+            self.cache_manager.save_to_cache("translation", cache_key, segments)
+        except Exception as e:
+            logger.warning(f"Could not persist synthesis results to translation cache: {e}")
+
+    def _reset_input_cache(self, reason: str) -> None:
+        """Delete every cached artifact tied to the current input file.
+
+        Also drops any legacy per-step caches saved without an input hash so
+        callers do not silently reuse stale results from earlier runs.
+        """
+        logger.info(f"Clearing cached artifacts for this input ({reason})")
+        try:
+            if hasattr(self.cache_manager, "clear_input_cache"):
+                self.cache_manager.clear_input_cache(self.config.get('input'))
+        except Exception as e:
+            logger.warning(f"Could not clear per-input cache: {e}")
+
+        # Legacy fallback: older transcription backends write to ./cache/<step>/
+        # without the input-hash prefix, so a targeted wipe is still needed.
+        legacy_root = getattr(self.cache_manager, "cache_root", None)
+        if legacy_root is None:
+            return
+        for step_name in (
+            "whisperx_diarization_transcription",
+            "gemini_diarization_transcription",
+            "deepgram_diarization_transcription",
+            "assemblyai_diarization_transcription",
+            "chunked_processing",
+            "segment_transcription",
+            "diarization",
+            "transcription",
+            "translation",
+            "emotions",
+        ):
+            legacy_dir = Path(legacy_root) / step_name
+            if legacy_dir.exists():
+                try:
+                    shutil.rmtree(legacy_dir)
+                except Exception as e:
+                    logger.warning(f"Could not remove legacy cache {legacy_dir}: {e}")
+
+    def run_transcribe_only(self, save_original_subtitles: bool = False) -> str:
+        """Run only audio extraction, diarization, and transcription; then exit.
+
+        Cached transcription/translation artifacts for this input are wiped
+        before the step runs so the transcriber always produces a fresh
+        result. `use_cache` stays enabled so the fresh transcription is
+        written back to disk for later `tts_to_end` / `translate_only` runs.
+
+        Returns the path to the saved transcription file.
+        """
+        logger.info("Running transcription-only step")
+        self.performance_tracker.start_timing("total")
+        self._reset_input_cache("run_step=transcribe_only")
+        try:
+            audio_file, _, _ = self._prepare_audio_inputs()
+            speakers_rolls, transcription = self.diarize_and_transcribe(audio_file)
+            if speakers_rolls is None or len(speakers_rolls) == 0:
+                raise ValueError("No speakers found in the video")
+
+            segments_for_output = self._apply_speaker_filter(transcription)
+            self.subtitle_manager.save_debug_tsv(
+                segments_for_output, output_dir=self.config.get("debug_dir")
+            )
+            self._save_requested_subtitles(
+                segments_for_output,
+                save_original_subtitles=save_original_subtitles,
+                save_translated_subtitles=False,
+            )
+            transcription_path = self.config.get("transcription_path")
+            logger.info(f"Transcription-only step complete: {transcription_path}")
+            return transcription_path
+        finally:
+            self._cleanup()
+
+    def run_translate_only(
+        self,
+        save_original_subtitles: bool = False,
+        save_translated_subtitles: bool = False,
+    ) -> str:
+        """Run diarization + transcription + translation only; then exit.
+
+        Cached artifacts for this input are wiped first so both the
+        transcription and translation steps run against fresh data. Fresh
+        results are still persisted so a follow-up `tts_to_end` can pick
+        them up.
+
+        Returns the path to the saved translated subtitles when requested,
+        otherwise the transcription file path.
+        """
+        logger.info("Running translation-only step")
+        self.performance_tracker.start_timing("total")
+        self._reset_input_cache("run_step=translate_only")
+        try:
+            audio_file, _, _ = self._prepare_audio_inputs()
+            speakers_rolls, transcription = self.diarize_and_transcribe(audio_file)
+            if speakers_rolls is None or len(speakers_rolls) == 0:
+                raise ValueError("No speakers found in the video")
+
+            translated_segments = self.translate_segments(transcription, audio_file)
+            segments_for_output = self._apply_speaker_filter(translated_segments)
+            self.subtitle_manager.save_debug_tsv(
+                segments_for_output, output_dir=self.config.get("debug_dir")
+            )
+            self._save_requested_subtitles(
+                segments_for_output,
+                save_original_subtitles=save_original_subtitles,
+                save_translated_subtitles=save_translated_subtitles,
+            )
+            if save_translated_subtitles:
+                return self._get_subtitle_path(
+                    "translation",
+                    self.config.get('input'),
+                    self.config.get('target_language'),
+                )
+            return self.config.get("transcription_path")
+        finally:
+            self._cleanup()
+
+    def run_from_scratch(
+        self,
+        save_original_subtitles: bool = False,
+        save_translated_subtitles: bool = False,
+    ) -> str:
+        """Wipe cached artifacts for this input and run the full pipeline fresh.
+
+        Fresh results are persisted to cache so subsequent resume steps
+        (`tts_to_end`, `combine_video`) can reuse them.
+        """
+        self._reset_input_cache("run_step=from_scratch")
+        return self.run_pipeline(
+            save_original_subtitles=save_original_subtitles,
+            save_translated_subtitles=save_translated_subtitles,
+        )
+
     def run_from_tts(self, save_original_subtitles: bool = False, save_translated_subtitles: bool = False) -> str:
         """Resume from cached translation artifacts, rerun TTS, and finish the video."""
         logger.info("Resuming dubbing process from the TTS step")
@@ -565,6 +709,17 @@ class SmartDubbing:
                     segment["emotion"] = "Neutral"
 
             speakers_rolls = self._build_speaker_rolls_from_segments(segments_for_output)
+
+            # Ensure per-speaker reference clips exist. Cloning-based TTS
+            # backends (OmniVoice, XTTS, F5, BexTTS) silently skip segments
+            # when no reference audio is available, which used to produce a
+            # `translated_audio.wav` full of silence when `tts_to_end` was
+            # resumed after `_reset_input_cache` wiped `speakers_audio/`.
+            try:
+                self.speaker_processor.extract_speaker_audio(audio_file, speakers_rolls)
+            except Exception as e:
+                logger.warning(f"Could not (re)extract speaker reference audio: {e}")
+
             original_use_cache = getattr(self.cache_manager, "use_cache", True)
             try:
                 self.cache_manager.use_cache = False
@@ -598,6 +753,8 @@ class SmartDubbing:
                 )
             finally:
                 self.cache_manager.use_cache = original_use_cache
+
+            self._persist_synthesis_results(segments_for_output, audio_file)
 
             self.speaker_processor.save_translated_samples(segments_for_output, audio_file)
             output_video_path, pause_adjustments = self._combine_final_video(
@@ -667,6 +824,7 @@ class SmartDubbing:
                     speakers_rolls,
                     segment_reference_audio_file,
                 )
+                self._persist_synthesis_results(segments_for_output, audio_file)
             else:
                 logger.info("All segments filtered by mute_speakers; generating silent audio track...")
                 total_duration_sec = self.audio_processor.get_total_duration() or 0
@@ -675,7 +833,7 @@ class SmartDubbing:
                 self.audio_dir.mkdir(parents=True, exist_ok=True)
                 translated_audio_path = self.config.get("translated_audio_path")
                 silent_audio.export(translated_audio_path, format="wav")
-            
+
             # Save translated samples
             self.speaker_processor.save_translated_samples(segments_for_output, audio_file)
             
@@ -1156,6 +1314,7 @@ class SmartDubbing:
                             shutil.copy(segment_cached_file_path, current_segment_output_path)
                             segment_dict['synthesized_speech_len'] = len(cached_audio_info) / 1000.0
                             segment_dict['synthesized_speech_file'] = current_segment_output_path
+                            segment_dict['synthesized_text'] = segment_dict.get('translation', '')
                             continue
                         else:
                             os.remove(segment_cached_file_path)
@@ -1314,7 +1473,8 @@ class SmartDubbing:
                         audio_info = AudioSegment.from_file(output_path)
                         segment_dict['synthesized_speech_len'] = len(audio_info) / 1000.0
                         segment_dict['synthesized_speech_file'] = output_path
-                        
+                        segment_dict['synthesized_text'] = metadata.get('chosen_text', segment_dict.get('translation', ''))
+
                         # Cache the synthesized segment
                         if self.cache_manager.use_cache and len(audio_info) > 0:
                             try:
@@ -1338,12 +1498,31 @@ class SmartDubbing:
                                 current_ratio=ratio,
                             )
                     else:
-                        logger.warning(f"Warning: No audio file created for segment {metadata['index']+1} ({tts_system})")
+                        logger.warning(
+                            f"Segment {metadata['index']+1} ({tts_system}) skipped by TTS. "
+                            f"Will retry individually."
+                        )
                         segment_dict['synthesized_speech_len'] = 0
                         segment_dict['synthesized_speech_file'] = None
-                        # Create empty file to prevent downstream errors
-                        AudioSegment.silent(duration=0).export(output_path, format="wav")
-                
+                        # Remove any stale empty file left over from a previous run so
+                        # the downstream combiner treats this slot as truly missing
+                        # instead of loading a 0ms clip.
+                        try:
+                            if os.path.exists(output_path):
+                                os.remove(output_path)
+                        except OSError:
+                            pass
+
+                # Retry any segments that the batch pass produced no audio for.
+                self._retry_missing_segments(
+                    segments_to_synthesize,
+                    segments_metadata,
+                    tts_instance,
+                    tts_system,
+                    COMFORT_MIN_ADJUSTMENT_RATIO,
+                    COMFORT_MAX_ADJUSTMENT_RATIO,
+                )
+
                 logger.debug(f"Batch synthesis completed for {len(segments_to_synthesize)} segments with {tts_system}")
                 
             except Exception as e:
@@ -1372,7 +1551,8 @@ class SmartDubbing:
                             audio_info = AudioSegment.from_file(output_path)
                             segment_dict['synthesized_speech_len'] = len(audio_info) / 1000.0
                             segment_dict['synthesized_speech_file'] = output_path
-                            
+                            segment_dict['synthesized_text'] = metadata.get('chosen_text', segment_dict.get('translation', ''))
+
                             # Cache the synthesized segment
                             if self.cache_manager.use_cache and len(audio_info) > 0:
                                 shutil.copy(output_path, metadata["cache_path"])
@@ -1398,7 +1578,23 @@ class SmartDubbing:
                         logger.error(f"Failed to synthesize segment {metadata['index']+1} ({tts_system}): {e_synth}")
                         segment_dict['synthesized_speech_len'] = 0
                         segment_dict['synthesized_speech_file'] = None
-                        AudioSegment.silent(duration=0).export(output_path, format="wav")
+                        try:
+                            if os.path.exists(output_path):
+                                os.remove(output_path)
+                        except OSError:
+                            pass
+
+                # After the fallback pass, retry anything that is still missing
+                # once more with the same TTS – handles transient network errors
+                # from cloud TTS backends (OmniVoice, Gemini, OpenAI).
+                self._retry_missing_segments(
+                    segments_to_synthesize,
+                    segments_metadata,
+                    tts_instance,
+                    tts_system,
+                    COMFORT_MIN_ADJUSTMENT_RATIO,
+                    COMFORT_MAX_ADJUSTMENT_RATIO,
+                )
         
         # Adjust timing and combine audio segments
         combined_audio, real_segment_positions = self._adjust_and_combine_audio_grouped(segments)
@@ -1442,6 +1638,255 @@ class SmartDubbing:
         
         return output_path
     
+    def _retry_missing_segments(
+        self,
+        segments_to_synthesize: List[Any],
+        segments_metadata: List[Dict[str, Any]],
+        tts_instance,
+        tts_system: str,
+        min_ratio: float,
+        max_ratio: float,
+        max_attempts: int = 2,
+    ) -> None:
+        """Retry any segments for which the previous synthesis pass did not
+        produce an audio file. Cloud TTS backends (OmniVoice, Gemini API) can
+        silently drop segments on transient errors — one more attempt clears
+        those up and stops empty WAVs from ending up in the final track.
+        """
+        from tts.models import TTSSegmentData
+
+        # Build a mapping from output_path back to the original segment_data so
+        # we can rerun exactly the same request.
+        segment_data_by_path = {s.output_path: s for s in segments_to_synthesize if s.output_path}
+
+        for attempt in range(max_attempts):
+            still_missing: List[Dict[str, Any]] = []
+            for metadata in segments_metadata:
+                segment_dict = metadata["segment_dict"]
+                output_path = metadata["output_path"]
+                if segment_dict.get("synthesized_speech_file") and os.path.exists(output_path):
+                    try:
+                        if len(AudioSegment.from_file(output_path)) > 0:
+                            continue
+                    except Exception:
+                        pass
+                still_missing.append(metadata)
+
+            if not still_missing:
+                return
+
+            logger.warning(
+                f"Retrying {len(still_missing)} missing segment(s) with {tts_system} (attempt {attempt + 1}/{max_attempts})"
+            )
+
+            for metadata in still_missing:
+                segment_dict = metadata["segment_dict"]
+                output_path = metadata["output_path"]
+                segment_data = segment_data_by_path.get(output_path)
+                if segment_data is None:
+                    text = metadata.get("chosen_text") or segment_dict.get("translation", "")
+                    segment_data = TTSSegmentData(**{**metadata.get("segment_data_args", {}), "text": text, "output_path": output_path})
+
+                # Ensure the reference audio still resolves; fall back to the
+                # per-speaker wav in speakers_audio_dir when the previous
+                # attempt lost it (e.g. temp segment ref clip removed).
+                if not segment_data.reference_audio_path:
+                    speaker_ref = self.speakers_audio_dir / f"{segment_dict.get('speaker', '')}.wav"
+                    if speaker_ref.is_file():
+                        segment_data.reference_audio_path = str(speaker_ref)
+
+                try:
+                    tts_instance.synthesize(
+                        segments_data=[segment_data],
+                        language=self.config.get('target_language'),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Retry {attempt + 1}: segment {metadata['index']+1} ({tts_system}) failed again: {exc}"
+                    )
+                    continue
+
+                if os.path.exists(output_path):
+                    try:
+                        audio_info = AudioSegment.from_file(output_path)
+                    except Exception as exc:
+                        logger.error(
+                            f"Retry {attempt + 1}: segment {metadata['index']+1} produced unreadable audio: {exc}"
+                        )
+                        continue
+                    if len(audio_info) <= 0:
+                        try:
+                            os.remove(output_path)
+                        except OSError:
+                            pass
+                        continue
+
+                    segment_dict['synthesized_speech_len'] = len(audio_info) / 1000.0
+                    segment_dict['synthesized_speech_file'] = output_path
+                    segment_dict['synthesized_text'] = metadata.get('chosen_text', segment_dict.get('translation', ''))
+                    logger.info(
+                        f"Retry {attempt + 1}: recovered segment {metadata['index']+1} ({tts_system})"
+                    )
+                    if self.cache_manager.use_cache and len(audio_info) > 0:
+                        try:
+                            shutil.copy(output_path, metadata["cache_path"])
+                        except Exception:
+                            pass
+
+        # Log any that are still missing after all retries.
+        missing_indexes = [
+            metadata["index"] + 1
+            for metadata in segments_metadata
+            if not metadata["segment_dict"].get("synthesized_speech_file")
+        ]
+        if missing_indexes:
+            logger.error(
+                f"Segments still missing audio after {max_attempts} retries ({tts_system}): {missing_indexes}. "
+                "Use the 'Regenerate selected row' button in the Dubbing Texts tab to retry individually."
+            )
+
+    def resynthesize_one_segment(
+        self,
+        segments: List[Dict],
+        segment_index: int,
+        override_text: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Resynthesize a single segment (in-place) with the currently
+        configured TTS and reference audio.
+
+        Args:
+            segments: The full list of cached translation segments.
+            segment_index: Index of the segment to resynthesize.
+            override_text: Optional text used instead of ``segment.translation``.
+
+        Returns:
+            The updated segment dict (also mutated in-place inside ``segments``).
+        """
+        from tts.models import TTSSegmentData
+
+        if not (0 <= segment_index < len(segments)):
+            raise IndexError(f"segment_index {segment_index} out of range (0..{len(segments)-1})")
+
+        segment_dict = segments[segment_index]
+        speaker = segment_dict.get("speaker") or "SPEAKER_00"
+
+        tts_system = self._get_tts_system_for_speaker(speaker)
+        tts_instance = self.tts_systems.get(tts_system) or self.default_tts
+        if tts_instance is None:
+            raise RuntimeError(f"TTS system '{tts_system}' is not initialised")
+
+        text_to_synthesize = (override_text or segment_dict.get("translation") or "").strip()
+        if not text_to_synthesize:
+            raise ValueError("Cannot resynthesize a segment with empty text")
+
+        voice_name = None
+        voice_config = self.config.get('voice_name')
+        if isinstance(voice_config, dict):
+            voice_name = voice_config.get(speaker, next(iter(voice_config.values()), "default"))
+        elif isinstance(voice_config, str):
+            voice_name = voice_config
+
+        segment_style_prompt = (self.voice_prompt or {}).get(speaker)
+
+        self.audio_chunks_dir.mkdir(parents=True, exist_ok=True)
+        output_path = str(self.audio_chunks_dir / f"{segment_index}.wav")
+
+        tts_segment_data_args: Dict[str, Any] = {
+            "speaker": speaker,
+            "text": text_to_synthesize,
+            "emotion": segment_dict.get("emotion", "Neutral"),
+            "style_prompt": segment_style_prompt,
+            "reference_audio_path": None,
+            "reference_text": None,
+            "voice": voice_name,
+            "speed": 1.0,
+            "target_duration": max(segment_dict.get("end", 0) - segment_dict.get("start", 0), 0.0),
+        }
+
+        segment_reference_min_duration = float(self.config.get('segment_reference_min_duration', 2.0) or 0.0)
+        segment_reference_min_duration_ms = max(int(segment_reference_min_duration * 1000), 0)
+
+        original_audio_segment: Optional[AudioSegment] = None
+        try:
+            audio_source_path = None
+            if os.path.exists(self.config.get("audio_artifacts_dir", "")):
+                candidate = Path(self.config.get("audio_artifacts_dir")) / "source.wav"
+                if candidate.is_file():
+                    audio_source_path = str(candidate)
+            if audio_source_path is None:
+                audio_source_path = self.config.get('input')
+            if audio_source_path and os.path.exists(audio_source_path):
+                original_audio_segment = AudioSegment.from_file(audio_source_path)
+
+            tts_segment_data_args, original_audio_segment = self._apply_reference_fallbacks(
+                tts_segment_data_args=tts_segment_data_args,
+                segment_dict=segment_dict,
+                speaker=speaker,
+                segment_index=segment_index,
+                original_audio_segment=original_audio_segment,
+                segment_reference_min_duration=segment_reference_min_duration,
+                segment_reference_min_duration_ms=segment_reference_min_duration_ms,
+            )
+        except Exception as exc:
+            logger.warning(f"Reference resolution failed for segment {segment_index}: {exc}")
+
+        segment_data = TTSSegmentData(**{**tts_segment_data_args, "text": text_to_synthesize, "output_path": output_path})
+
+        # Remove any stale zero-byte file so `os.path.exists` reflects reality.
+        try:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+        except OSError:
+            pass
+
+        max_attempts = 3
+        last_error: Optional[Exception] = None
+        for attempt in range(max_attempts):
+            logger.info(
+                f"Resynthesizing segment {segment_index} (speaker={speaker}, tts={tts_system}) "
+                f"attempt {attempt + 1}/{max_attempts}"
+            )
+            try:
+                tts_instance.synthesize(
+                    segments_data=[segment_data],
+                    language=self.config.get('target_language'),
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.error(f"Resynthesize attempt {attempt + 1} failed for segment {segment_index}: {exc}")
+                continue
+
+            if os.path.exists(output_path):
+                try:
+                    audio_info = AudioSegment.from_file(output_path)
+                except Exception as exc:
+                    last_error = exc
+                    logger.error(f"Resynthesize produced unreadable audio for segment {segment_index}: {exc}")
+                    try:
+                        os.remove(output_path)
+                    except OSError:
+                        pass
+                    continue
+                if len(audio_info) <= 0:
+                    try:
+                        os.remove(output_path)
+                    except OSError:
+                        pass
+                    continue
+
+                segment_dict['synthesized_speech_len'] = len(audio_info) / 1000.0
+                segment_dict['synthesized_speech_file'] = output_path
+                segment_dict['synthesized_text'] = text_to_synthesize
+                if override_text:
+                    segment_dict['translation'] = text_to_synthesize
+                return segment_dict
+
+        raise RuntimeError(
+            f"TTS ({tts_system}) did not produce an audio file for segment {segment_index} "
+            f"after {max_attempts} attempts. Last error: {last_error!r}. "
+            f"Reference audio: {segment_data.reference_audio_path!r}"
+        )
+
     def _save_transcription_file(self, transcription: List[Dict]) -> None:
         """Save transcription to a readable text file."""
         from src.utils.time_utils import format_seconds_to_hms
@@ -1808,6 +2253,7 @@ class SmartDubbing:
             else:
                 metadata["chosen_text"] = segment_dict[best_key]
             metadata["selected_track_type"] = best_key  # Update the selected track type
+            segment_dict["synthesized_text"] = metadata["chosen_text"]
 
             # Update cache if needed
             if self.cache_manager.use_cache and len(audio_info) > 0:
@@ -1939,12 +2385,26 @@ class SmartDubbing:
                     segment_file = segment.get('synthesized_speech_file')
                     if not segment_file:
                         segment_file = str(self.audio_chunks_dir / f"{segments.index(segment)}.wav")
+                    segment_audio = None
                     if segment_file and os.path.exists(segment_file):
-                        segment_audio = AudioSegment.from_file(segment_file)
-                    else:
-                        # Fallback: create silence with original duration
+                        try:
+                            candidate = AudioSegment.from_file(segment_file)
+                            if len(candidate) > 0:
+                                segment_audio = candidate
+                        except Exception as e:
+                            logger.warning(
+                                f"Could not read segment audio {segment_file}: {e}. Substituting silence."
+                            )
+                    if segment_audio is None:
+                        # Fallback: create silence with original duration when no
+                        # usable audio was produced. This preserves timing for the
+                        # rest of the track while making the gap obvious.
                         duration_ms = int((segment["end"] - segment["start"]) * 1000)
-                        segment_audio = AudioSegment.silent(duration=duration_ms)
+                        segment_audio = AudioSegment.silent(duration=max(duration_ms, 1))
+                        logger.warning(
+                            f"Segment #{segments.index(segment)} has no synthesized audio; "
+                            f"inserting {duration_ms}ms of silence."
+                        )
                     
                     combined_group_audio += segment_audio
                     segment_end_in_group_ms = len(combined_group_audio)

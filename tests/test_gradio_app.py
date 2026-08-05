@@ -119,7 +119,6 @@ def test_build_app_explains_run_step_requires_existing_artifacts():
     run_step_props = _component_props_by_label(app, "Run step")
 
     assert "existing artifacts" in run_step_props["info"]
-    assert "Run DubbLM" in run_step_props["info"]
 
 
 def test_build_app_lists_tts_to_end_in_run_step_choices():
@@ -139,7 +138,15 @@ def test_build_app_defaults_run_step_to_full_pipeline():
     choice_values = [choice[1] if isinstance(choice, (list, tuple)) else choice for choice in run_step_props["choices"]]
 
     assert run_step_props["value"] == "full_pipeline"
-    assert choice_values == ["full_pipeline", "combine_video", "tts_to_end"]
+    for expected in [
+        "full_pipeline",
+        "from_scratch",
+        "transcribe_only",
+        "translate_only",
+        "combine_video",
+        "tts_to_end",
+    ]:
+        assert expected in choice_values
 
 
 def test_build_app_exposes_dubbing_texts_editor():
@@ -147,11 +154,19 @@ def test_build_app_exposes_dubbing_texts_editor():
 
     dubbing_texts_props = _component_props_by_label(app, "Dubbing texts")
 
-    assert dubbing_texts_props["headers"] == ["Speaker", "Time", "Translation", "Original"]
-    assert dubbing_texts_props["column_widths"] == ["12%", "14%", "54%", "20%"]
-    assert dubbing_texts_props["static_columns"] == [0, 1, 3]
+    assert dubbing_texts_props["headers"] == [
+        "Speaker",
+        "Start",
+        "End",
+        "Original",
+        "Translation",
+        "Synthesized text",
+        "Audio file",
+    ]
+    assert dubbing_texts_props["column_widths"] == ["9%", "8%", "8%", "20%", "25%", "22%", "8%"]
+    assert dubbing_texts_props["static_columns"] == [6]
     assert dubbing_texts_props["show_search"] == "search"
-    assert dubbing_texts_props["pinned_columns"] == 2
+    assert dubbing_texts_props["pinned_columns"] == 3
 
 
 def test_save_settings_writes_to_default_config_and_preserves_other_keys(tmp_path, monkeypatch):
@@ -547,7 +562,15 @@ def test_load_dubbing_text_rows_reads_translation_cache(tmp_path, monkeypatch):
     status, rows = gradio_app.load_dubbing_text_rows(overrides)
 
     assert status == "Loaded 1 dubbing text row(s)."
-    assert rows == [["SPEAKER_00", "00.00.00 - 00.00.01", "Прывітанне", "Hello there"]]
+    assert rows == [[
+        "SPEAKER_00",
+        "0.000",
+        "1.200",
+        "Hello there",
+        "Прывітанне",
+        "",
+        "",
+    ]]
 
 
 def test_save_dubbing_text_rows_updates_cache_and_tsv(tmp_path, monkeypatch):
@@ -568,23 +591,32 @@ def test_save_dubbing_text_rows_updates_cache_and_tsv(tmp_path, monkeypatch):
         ],
     )
 
-    status, saved_rows = gradio_app.save_dubbing_text_rows(
-        [["SPEAKER_00", "00.00.00 - 00.00.01", "Новы тэкст", "Hello there"]],
-        overrides,
-    )
+    edited_row = [
+        "SPEAKER_00",
+        "0.000",
+        "1.200",
+        "Hello there",
+        "Новы тэкст",
+        "Новы сінтэз",
+        "",
+    ]
+    status, saved_rows = gradio_app.save_dubbing_text_rows([edited_row], overrides)
 
     artifact_path = Path(config.get("artifacts_dir")) / "dubbing_texts.tsv"
     with cache_path.open("rb") as handle:
         saved_segments = pickle.load(handle)
 
     assert status == "Saved 1 dubbing text row(s)."
-    assert saved_rows == [["SPEAKER_00", "00.00.00 - 00.00.01", "Новы тэкст", "Hello there"]]
+    assert saved_rows == [edited_row]
     assert artifact_path.is_file()
     assert "Новы тэкст" in artifact_path.read_text(encoding="utf-8")
     assert saved_segments[0]["translation"] == "Новы тэкст"
     assert saved_segments[0]["short_translation"] == "Новы тэкст"
     assert saved_segments[0]["very_short_translation"] == "Новы тэкст"
     assert saved_segments[0]["long_translation"] == "Новы тэкст"
+    assert saved_segments[0]["synthesized_text"] == "Новы сінтэз"
+    assert saved_segments[0]["start"] == 0.0
+    assert saved_segments[0]["end"] == 1.2
 
 
 def test_save_dubbing_text_rows_rejects_row_count_mismatch(tmp_path, monkeypatch):

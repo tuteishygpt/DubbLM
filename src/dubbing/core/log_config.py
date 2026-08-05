@@ -5,6 +5,36 @@ import sys
 import os
 from datetime import datetime
 
+
+_NOISY_PREFIXES: tuple[str, ...] = (
+    "numba",
+    "matplotlib",
+    "PIL",
+    "fsspec",
+    "urllib3",
+    "asyncio",
+    "gradio",
+    "gradio_client",
+    "httpx",
+    "httpcore",
+    "hpack",
+    "librosa",
+    "resampy",
+    "audioread",
+    "soundfile",
+    "filelock",
+    "speechbrain",
+)
+
+
+class NoisyPrefixFilter(logging.Filter):
+    """Drop DEBUG/INFO records emitted by known-noisy third-party loggers."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+        return not record.name.startswith(_NOISY_PREFIXES)
+
 def setup_logging(level=logging.INFO):
     """
     Set up logging for the application.
@@ -35,17 +65,59 @@ def setup_logging(level=logging.INFO):
         root_logger.handlers.clear()
 
     # Set logging level for noisy libraries to reduce verbosity
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("http").setLevel(logging.WARNING)
-    logging.getLogger("google_genai.models").setLevel(logging.WARNING)
-    logging.getLogger("speechbrain.utils.fetching").setLevel(logging.WARNING)
-    logging.getLogger("speechbrain.utils.parameter_transfer").setLevel(logging.WARNING)
-    logging.getLogger("speechbrain.utils.checkpoints").setLevel(logging.WARNING)
+    for noisy in (
+        "httpx",
+        "httpcore",
+        "http",
+        "urllib3",
+        "asyncio",
+        "google_genai.models",
+        "speechbrain.utils.fetching",
+        "speechbrain.utils.parameter_transfer",
+        "speechbrain.utils.checkpoints",
+        "matplotlib",
+        "matplotlib.font_manager",
+        "matplotlib.pyplot",
+        "matplotlib.backends",
+        "matplotlib.backends.backend_tkagg",
+        "matplotlib.backend_bases",
+        "PIL",
+        "PIL.PngImagePlugin",
+        "PIL.Image",
+        "fsspec",
+        "fsspec.local",
+        "hpack",
+        "gradio",
+        "gradio.processing_utils",
+        "gradio_client",
+        "filelock",
+        "numba",
+        "numba.core",
+        "numba.core.ssa",
+        "numba.core.byteflow",
+        "numba.core.interpreter",
+        "numba.core.typeinfer",
+        "numba.core.compiler",
+        "numba.core.rewrites",
+        "numba.core.lowering",
+        "numba.core.bytecode",
+        "numba.core.controlflow",
+        "librosa",
+        "resampy",
+        "soundfile",
+        "audioread",
+    ):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    # Apply noisy-prefix filter directly on the root logger so any handler
+    # added later (e.g. the streaming capture handler in runner.py) inherits
+    # the suppression automatically.
+    root_logger.addFilter(NoisyPrefixFilter())
 
     # Console Handler (prints INFO and above to stdout)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(level)
+    console_handler.addFilter(NoisyPrefixFilter())
     # Use a simpler format for the console
     console_formatter = logging.Formatter("%(asctime)s - %(message)s", datefmt='%H:%M:%S')
     console_handler.setFormatter(console_formatter)
@@ -54,6 +126,7 @@ def setup_logging(level=logging.INFO):
     # File Handler (prints DEBUG and above to a file)
     file_handler = logging.FileHandler(log_filename, 'a', 'utf-8')
     file_handler.setLevel(logging.DEBUG)
+    file_handler.addFilter(NoisyPrefixFilter())
     # Use a more detailed format for the file
     file_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     file_handler.setFormatter(file_formatter)

@@ -12,7 +12,7 @@ from typing import Any, Callable, Optional
 from dotenv import load_dotenv
 
 from .config import DubbingConfig
-from .log_config import setup_logging
+from .log_config import setup_logging, NoisyPrefixFilter
 
 
 LOGGER = logging.getLogger(__name__)
@@ -139,17 +139,65 @@ def _extract_output_path(step_result: Any) -> Optional[str]:
     return str(step_result)
 
 
+def run_dubbing_job_streaming(
+    overrides: dict[str, Any],
+    *,
+    dubbing_factory: Optional[Callable[[DubbingConfig], Any]] = None,
+    poll_interval: float = 0.5,
+):
+    """Run the dubbing job in a background thread and yield ``(status, logs)``
+    tuples as new log lines appear.
+
+    The final tuple carries the full :class:`DubbingJobResult` as a third
+    element so the UI wrapper can pick up ``output_file`` / ``report_file``.
+    """
+    import threading
+    import time
+
+    result_container: dict[str, Any] = {"result": None}
+    log_stream = io.StringIO()
+
+    if not logging.getLogger().handlers:
+        setup_logging()
+
+    def _worker() -> None:
+        result_container["result"] = run_dubbing_job(
+            overrides,
+            dubbing_factory=dubbing_factory,
+            _log_stream=log_stream,
+        )
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+
+    last_len = 0
+    while thread.is_alive():
+        thread.join(timeout=poll_interval)
+        current = log_stream.getvalue()
+        if len(current) != last_len:
+            last_len = len(current)
+            yield "Running…", current, None
+
+    final_result = result_container.get("result")
+    if final_result is None:
+        yield "Failed: worker thread ended without result", log_stream.getvalue(), None
+        return
+    yield final_result.status, final_result.logs, final_result
+
+
 def run_dubbing_job(
     overrides: dict[str, Any],
     *,
     dubbing_factory: Optional[Callable[[DubbingConfig], Any]] = None,
+    _log_stream: Optional[io.StringIO] = None,
 ) -> DubbingJobResult:
     """Run the configured dubbing job and capture logs for the caller."""
     if not logging.getLogger().handlers:
         setup_logging()
 
-    log_stream = io.StringIO()
+    log_stream = _log_stream if _log_stream is not None else io.StringIO()
     capture_handler = logging.StreamHandler(log_stream)
+    capture_handler.addFilter(NoisyPrefixFilter())
     capture_handler.setLevel(logging.DEBUG)
     capture_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s", datefmt="%H:%M:%S"))
 
@@ -198,6 +246,45 @@ def run_dubbing_job(
                 status="TTS resume step completed",
                 logs=log_stream.getvalue(),
                 output_file=output_path,
+            )
+
+        if config.get("run_step") == "transcribe_only":
+            output_path = _extract_output_path(
+                dubber.run_transcribe_only(
+                    save_original_subtitles=config.get("save_original_subtitles", False),
+                )
+            )
+            logging.getLogger(__name__).info("Transcription-only step complete: %s", output_path)
+            return DubbingJobResult(
+                status="Transcription step completed",
+                logs=log_stream.getvalue(),
+                output_file=output_path,
+            )
+
+        if config.get("run_step") == "translate_only":
+            output_path = _extract_output_path(
+                dubber.run_translate_only(
+                    save_original_subtitles=config.get("save_original_subtitles", False),
+                    save_translated_subtitles=config.get("save_translated_subtitles", False),
+                )
+            )
+            logging.getLogger(__name__).info("Translation-only step complete: %s", output_path)
+            return DubbingJobResult(
+                status="Translation step completed",
+                logs=log_stream.getvalue(),
+                output_file=output_path,
+            )
+
+        if config.get("run_step") == "from_scratch":
+            output_path = dubber.run_from_scratch(
+                save_original_subtitles=config.get("save_original_subtitles", False),
+                save_translated_subtitles=config.get("save_translated_subtitles", False),
+            )
+            logging.getLogger(__name__).info("From-scratch dubbing complete: %s", output_path)
+            return DubbingJobResult(
+                status="Completed (from scratch)",
+                logs=log_stream.getvalue(),
+                output_file=str(output_path),
             )
 
         output_path = dubber.run_pipeline(

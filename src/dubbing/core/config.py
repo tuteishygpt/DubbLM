@@ -383,9 +383,13 @@ class DubbingConfig:
         parser.add_argument('--watermark_text', type=str, help='Text to display under the watermark')
         parser.add_argument('--voice_auto_selection', type=lambda x: (str(x).lower() == 'true'), help='Enable automatic voice selection for TTS (True/False)')
         parser.add_argument('--enable_emotion_analysis', type=lambda x: (str(x).lower() == 'true'), help='Enable emotion analysis for speech synthesis (True/False)')
-        parser.add_argument('--run_step', type=str, choices=['full_pipeline', 'combine_video', 'tts_to_end'], 
+        parser.add_argument('--run_step', type=str,
+                            choices=['full_pipeline', 'from_scratch', 'transcribe_only', 'translate_only', 'combine_video', 'tts_to_end'],
                             help='Run only a specific, advanced pipeline step. This is intended for debugging or resuming a failed run where prior steps have successfully created their expected output files in the default locations. \
                                   Example: --run_step full_pipeline (Normal end-to-end run). \
+                                  Example: --run_step from_scratch (Clear cached artifacts and rerun the entire pipeline from zero). \
+                                  Example: --run_step transcribe_only (Diarize and transcribe only; save original subtitles if requested and exit). \
+                                  Example: --run_step translate_only (Diarize + transcribe + translate only; save subtitles if requested and exit). \
                                   Example: --run_step combine_video (Assumes audio/output.wav and potentially audio/background.wav exist from prior steps). \
                                   Example: --run_step tts_to_end (Assumes cached translation artifacts from a previous full run in the same project directory, then regenerates TTS and finishes the video). \
                                   Note: For most users, running the full pipeline or using --generate_speaker_report is recommended.')

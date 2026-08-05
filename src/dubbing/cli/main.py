@@ -106,6 +106,37 @@ def main():
                 sys.exit(1)
             sys.exit(0)
             
+        elif config.get('run_step') == 'transcribe_only':
+            logger.info("Running only diarization and transcription...")
+            output_path = dubber.run_transcribe_only(
+                save_original_subtitles=config.get('save_original_subtitles', False),
+            )
+            logger.info(f"Transcription complete. Saved to: {output_path}")
+
+        elif config.get('run_step') == 'translate_only':
+            logger.info("Running diarization, transcription, and translation...")
+            output_path = dubber.run_translate_only(
+                save_original_subtitles=config.get('save_original_subtitles', False),
+                save_translated_subtitles=config.get('save_translated_subtitles', False),
+            )
+            logger.info(f"Translation complete. Saved to: {output_path}")
+
+        elif config.get('run_step') == 'tts_to_end':
+            logger.info("Resuming pipeline from TTS step...")
+            output_path = dubber.run_from_tts(
+                save_original_subtitles=config.get('save_original_subtitles', False),
+                save_translated_subtitles=config.get('save_translated_subtitles', False),
+            )
+            logger.info(f"TTS resume complete. Output saved to: {output_path}")
+
+        elif config.get('run_step') == 'from_scratch':
+            logger.info("Running from scratch: clearing cache and reprocessing everything...")
+            output_path = dubber.run_from_scratch(
+                save_original_subtitles=config.get('save_original_subtitles', False),
+                save_translated_subtitles=config.get('save_translated_subtitles', False),
+            )
+            logger.info(f"Video dubbing complete. Output saved to: {output_path}")
+
         else:
             # Run the full pipeline
             output_path = dubber.run_pipeline(
