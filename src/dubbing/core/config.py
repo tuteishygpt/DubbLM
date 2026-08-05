@@ -32,6 +32,7 @@ class DubbingConfig:
     def __init__(self):
         """Initialize configuration with default values."""
         self.defaults = {
+            'transcription_model': None,
             'whisper_model': 'large-v3',
             'gemini_transcription_model': 'gemini-3-flash-preview',
             'keep_background': False,
@@ -356,6 +357,7 @@ class DubbingConfig:
         parser.add_argument('--omnivoice_preprocess_prompt', type=lambda x: (str(x).lower() == 'true'), help='Enable OmniVoice prompt preprocessing (True/False)')
         parser.add_argument('--omnivoice_postprocess_output', type=lambda x: (str(x).lower() == 'true'), help='Enable OmniVoice audio postprocessing (True/False)')
         parser.add_argument('--transcription_system', type=str, choices=['whisper', 'openai', 'pyannote_openai', 'whisperx', 'assemblyai', 'gemini', 'deepgram'], help='Transcription system to use')
+        parser.add_argument('--transcription_model', type=str, help='Model name for the selected transcription system')
         parser.add_argument('--gemini_transcription_model', type=str, help='Model name for Gemini transcription backend')
         parser.add_argument('--deepgram_model', type=str, help='Model name for Deepgram transcription backend (default: nova-3)')
         parser.add_argument('--translator_type', type=str, choices=['llm'], help='Translator type to use')

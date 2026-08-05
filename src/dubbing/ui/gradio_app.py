@@ -39,9 +39,7 @@ WORKFLOW_FIELDS = [
 ]
 
 SETTINGS_FIELDS = [
-    "whisper_model",
-    "gemini_transcription_model",
-    "deepgram_model",
+    "transcription_model",
     "transcription_system",
     "start_time",
     "duration",
@@ -100,6 +98,51 @@ TRANSLATION_TRACK_FIELDS = (
     "very_short_translation",
     "long_translation",
 )
+
+_TRANSCRIPTION_MODEL_CHOICES: dict[str, list[str]] = {
+    "whisper": ["large-v3", "large-v2", "large", "medium", "small", "base", "tiny"],
+    "openai": ["whisper-1"],
+    "pyannote_openai": ["large-v3", "large-v2", "large", "medium", "small", "base", "tiny"],
+    "whisperx": ["large-v3", "large-v2", "large", "medium", "small", "base", "tiny"],
+    "assemblyai": ["best", "nano"],
+    "gemini": ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+    "deepgram": ["nova-3", "nova-2", "nova", "enhanced", "base", "whisper"],
+}
+
+_TRANSCRIPTION_MODEL_DEFAULTS: dict[str, str] = {
+    "whisper": "large-v3",
+    "openai": "whisper-1",
+    "pyannote_openai": "large-v3",
+    "whisperx": "large-v3",
+    "assemblyai": "best",
+    "gemini": "gemini-3-flash-preview",
+    "deepgram": "nova-3",
+}
+
+
+def _get_model_choices(system: str) -> list[str]:
+    return _TRANSCRIPTION_MODEL_CHOICES.get(system, [])
+
+
+def _get_initial_transcription_model(defaults: dict) -> tuple[str, str, list[str]]:
+    system = str(defaults.get("transcription_system") or "whisper")
+    model = (
+        defaults.get("transcription_model")
+        or defaults.get("whisper_model")
+        or defaults.get("gemini_transcription_model")
+        or defaults.get("deepgram_model")
+        or _TRANSCRIPTION_MODEL_DEFAULTS.get(system, "")
+    )
+    choices = _get_model_choices(system)
+    return system, str(model), choices
+
+
+def _update_transcription_model_choices(system: str, current_model: str | None = None):
+    choices = _get_model_choices(system)
+    default = _TRANSCRIPTION_MODEL_DEFAULTS.get(system, "")
+    new_val = current_model if current_model and current_model in choices else default
+    return gr.update(choices=choices, value=new_val)
+
 
 
 def _load_yaml_mapping(config_path: str | Path) -> dict:
@@ -839,22 +882,21 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                 )
 
 
+
             with gr.Tab("Settings"):
                 gr.Markdown("## Transcription")
                 with gr.Row():
-                    whisper_model = gr.Textbox(label="Whisper model", value=defaults.get("whisper_model", "large-v3"))
-                    gemini_transcription_model = gr.Textbox(
-                        label="Gemini transcription model",
-                        value=defaults.get("gemini_transcription_model", "gemini-3-flash-preview"),
-                    )
-                    deepgram_model = gr.Textbox(
-                        label="Deepgram model",
-                        value=defaults.get("deepgram_model", "nova-3"),
-                    )
                     transcription_system = gr.Dropdown(
                         label="Transcription system",
                         choices=["whisper", "openai", "pyannote_openai", "whisperx", "assemblyai", "gemini", "deepgram"],
                         value=defaults.get("transcription_system", "whisper"),
+                    )
+                    _init_system, _init_model, _init_choices = _get_initial_transcription_model(defaults)
+                    transcription_model = gr.Dropdown(
+                        label="Model",
+                        choices=_init_choices,
+                        value=_init_model,
+                        allow_custom_value=True,
                     )
                     start_time = gr.Number(label="Start time (seconds)", precision=2, value=defaults.get("start_time"))
                     duration = gr.Number(label="Duration (seconds)", precision=2, value=defaults.get("duration"))
@@ -1044,9 +1086,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
 
                 input_components.extend(
                     [
-                        whisper_model,
-                        gemini_transcription_model,
-                        deepgram_model,
+                        transcription_model,
                         transcription_system,
                         start_time,
                         duration,
@@ -1203,6 +1243,12 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
             fn=_collect_values,
             inputs=input_components,
             outputs=[status, logs, output_file, report_file, artifacts_path],
+        )
+
+        transcription_system.change(
+            fn=_update_transcription_model_choices,
+            inputs=[transcription_system, transcription_model],
+            outputs=[transcription_model],
         )
 
         def _load_values_on_page_load():

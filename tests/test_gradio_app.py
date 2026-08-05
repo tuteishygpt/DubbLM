@@ -95,13 +95,13 @@ def test_build_app_lists_deepgram_in_transcription_system_choices():
     assert "deepgram" in choice_values
 
 
-def test_build_app_exposes_gemini_transcription_model_field(tmp_path):
+def test_build_app_exposes_transcription_model_field(tmp_path):
     config_path = tmp_path / "ui_defaults.yml"
     config_path.write_text(
         yaml.safe_dump(
             {
                 "transcription_system": "gemini",
-                "gemini_transcription_model": "gemini-2.5-flash",
+                "transcription_model": "gemini-2.5-flash",
             },
             sort_keys=False,
         ),
@@ -110,7 +110,7 @@ def test_build_app_exposes_gemini_transcription_model_field(tmp_path):
 
     app = build_app(config_path=str(config_path))
 
-    assert _component_value_by_label(app, "Gemini transcription model") == "gemini-2.5-flash"
+    assert _component_value_by_label(app, "Model") == "gemini-2.5-flash"
 
 
 def test_build_app_explains_run_step_requires_existing_artifacts():
@@ -289,20 +289,20 @@ def test_save_settings_drops_zero_duration(tmp_path, monkeypatch):
     assert "duration" not in saved_data
 
 
-def test_save_settings_persists_gemini_transcription_model(tmp_path, monkeypatch):
+def test_save_settings_persists_transcription_model(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     save_settings(
         {
             "transcription_system": "gemini",
-            "gemini_transcription_model": "gemini-2.5-flash",
+            "transcription_model": "gemini-2.5-flash",
         }
     )
 
     saved_data = yaml.safe_load((tmp_path / DEFAULT_CONFIG_PATH).read_text(encoding="utf-8"))
 
     assert saved_data["transcription_system"] == "gemini"
-    assert saved_data["gemini_transcription_model"] == "gemini-2.5-flash"
+    assert saved_data["transcription_model"] == "gemini-2.5-flash"
 
 
 def test_save_speaker_reference_to_library_copies_audio_and_writes_metadata(tmp_path, monkeypatch):

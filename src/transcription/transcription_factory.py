@@ -30,13 +30,18 @@ class TranscriptionFactory:
         Raises:
             ValueError: If the specified transcription system is not supported
         """
+        model = kwargs.pop("transcription_model", None)
+
         if transcription_system == "whisperx":
             from transcription.whisperx_transcriber import WhisperXTranscriber
 
+            whisperx_kwargs = dict(kwargs)
+            if model:
+                whisperx_kwargs["whisperx_model"] = model
             return WhisperXTranscriber(
                 source_language=source_language,
                 device=device,
-                **kwargs
+                **whisperx_kwargs
             )
         elif transcription_system in {"pyannote_openai", "openai", "whisper"}:
             from transcription.pyannote_openai_transcriber import PyAnnoteOpenAITranscriber
@@ -44,6 +49,8 @@ class TranscriptionFactory:
             backend_kwargs = dict(kwargs)
             if transcription_system in {"openai", "whisper"}:
                 backend_kwargs["transcription_system"] = transcription_system
+            if model:
+                backend_kwargs["whisper_model"] = model
 
             return PyAnnoteOpenAITranscriber(
                 source_language=source_language,
@@ -53,24 +60,30 @@ class TranscriptionFactory:
         elif transcription_system == "assemblyai":
             from transcription.assemblyai_transcriber import AssemblyAITranscriber
 
+            assembly_kwargs = dict(kwargs)
+            if model:
+                assembly_kwargs["speech_model"] = model
             return AssemblyAITranscriber(
                 source_language=source_language,
                 device=device,
-                **kwargs
+                **assembly_kwargs
             )
         elif transcription_system == "gemini":
             from transcription.gemini_transcriber import GeminiTranscriber
 
+            gemini_kwargs = dict(kwargs)
+            if model:
+                gemini_kwargs["gemini_transcription_model"] = model
             return GeminiTranscriber(
                 source_language=source_language,
                 device=device,
-                **kwargs
+                **gemini_kwargs
             )
         elif transcription_system == "deepgram":
             from transcription.deepgram_transcriber import DeepgramTranscriber
 
             deepgram_kwargs = dict(kwargs)
-            deepgram_model = deepgram_kwargs.pop("deepgram_model", "nova-3")
+            deepgram_model = model or deepgram_kwargs.pop("deepgram_model", "nova-3")
             return DeepgramTranscriber(
                 source_language=source_language,
                 device=device,

@@ -248,6 +248,7 @@ class SmartDubbing:
                 transcription_system=self.config.get('transcription_system', 'whisper'),
                 source_language=self.config.get('source_language'),
                 device=self.device,
+                transcription_model=self.config.get('transcription_model'),
                 whisper_model=self.config.get('whisper_model', 'large-v3'),
                 gemini_transcription_model=self.config.get('gemini_transcription_model', 'gemini-3-flash-preview'),
                 deepgram_model=self.config.get('deepgram_model', 'nova-3'),
