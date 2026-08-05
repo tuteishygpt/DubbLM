@@ -307,6 +307,147 @@ def _use_selected_library_reference(selected_row: object, current_rows: object):
     return f"{speaker_id} {action} from library.", updated_rows
 
 
+def delete_speaker_reference_from_library(
+    speaker_id: str,
+    library_path: str | Path | None = None,
+) -> bool:
+    speaker_id = str(speaker_id or "").strip()
+    if not speaker_id:
+        return False
+
+    library_dir = _get_speaker_reference_library_dir(library_path)
+    if not library_dir.exists():
+        return False
+
+    deleted = False
+    speaker_dir = library_dir / _sanitize_speaker_directory_name(speaker_id)
+    if speaker_dir.exists() and speaker_dir.is_dir():
+        shutil.rmtree(speaker_dir)
+        deleted = True
+
+    for s_dir in library_dir.iterdir():
+        if s_dir.is_dir():
+            meta_path = s_dir / "meta.yml"
+            if meta_path.is_file():
+                try:
+                    meta = yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}
+                    if str(meta.get("speaker_id") or "").strip() == speaker_id:
+                        shutil.rmtree(s_dir)
+                        deleted = True
+                except Exception:
+                    pass
+
+    return deleted
+
+
+def _delete_selected_library_reference(selected_row: object):
+    if not isinstance(selected_row, (list, tuple)) or len(selected_row) < 1:
+        return "Select one library row first.", load_speaker_reference_library() or [["", "", ""]]
+
+    speaker_id = str(selected_row[0]).strip()
+    if not speaker_id:
+        return "Selected library row has no speaker ID.", load_speaker_reference_library() or [["", "", ""]]
+
+    deleted = delete_speaker_reference_from_library(speaker_id)
+    library_rows = load_speaker_reference_library()
+    status_msg = f"Deleted speaker '{speaker_id}' from library." if deleted else f"Speaker '{speaker_id}' not found in library."
+    return status_msg, library_rows or [["", "", ""]]
+
+
+def _store_selected_mapping_info(evt: gr.SelectData, history: object):
+    if not getattr(evt, "selected", True):
+        return history
+    row_idx = evt.index[0] if isinstance(evt.index, (list, tuple)) else 0
+
+    history_list = list(history) if isinstance(history, list) else []
+    if history_list and history_list[-1] == row_idx:
+        return history_list
+
+    history_list.append(row_idx)
+    if len(history_list) > 2:
+        history_list = history_list[-2:]
+    return history_list
+
+
+def _delete_selected_mapping(mapping_history: object, current_rows: object):
+    normalized_rows = [
+        row for row in _normalize_table_rows(current_rows) if any(cell for cell in row)
+    ]
+    if not normalized_rows:
+        return "No mappings to delete.", [["", "", ""]], []
+
+    history_list = list(mapping_history) if isinstance(mapping_history, list) else []
+    idx = history_list[-1] if history_list else None
+
+    if idx is not None and 0 <= idx < len(normalized_rows):
+        deleted_spk = normalized_rows[idx][0]
+        del normalized_rows[idx]
+        msg = f"Deleted mapping for '{deleted_spk}'."
+    else:
+        msg = "Select a mapping row to delete first."
+
+    if not normalized_rows:
+        normalized_rows = [["", "", ""]]
+    return msg, normalized_rows, []
+
+
+def _move_mapping_row(direction: str, mapping_history: object, current_rows: object):
+    normalized_rows = [
+        row for row in _normalize_table_rows(current_rows) if any(cell for cell in row)
+    ]
+    if not normalized_rows or len(normalized_rows) < 2:
+        return "Need at least 2 rows to reorder.", normalized_rows or [["", "", ""]], mapping_history
+
+    history_list = list(mapping_history) if isinstance(mapping_history, list) else []
+    idx = history_list[-1] if history_list else None
+
+    if idx is None or not (0 <= idx < len(normalized_rows)):
+        return "Select a mapping row first.", normalized_rows, mapping_history
+
+    target_idx = idx - 1 if direction == "up" else idx + 1
+    if 0 <= target_idx < len(normalized_rows):
+        normalized_rows[idx], normalized_rows[target_idx] = (
+            normalized_rows[target_idx],
+            normalized_rows[idx],
+        )
+        msg = f"Moved row {idx + 1} ({normalized_rows[target_idx][0]}) {direction}."
+        return msg, normalized_rows, [target_idx]
+    else:
+        msg = f"Row is already at the {'top' if direction == 'up' else 'bottom'}."
+        return msg, normalized_rows, mapping_history
+
+
+def _swap_selected_mappings(mapping_history: object, current_rows: object):
+    normalized_rows = [
+        row for row in _normalize_table_rows(current_rows) if any(cell for cell in row)
+    ]
+    if len(normalized_rows) < 2:
+        return "Need at least 2 rows to swap.", normalized_rows or [["", "", ""]], mapping_history
+
+    history_list = list(mapping_history) if isinstance(mapping_history, list) else []
+    valid_indices = [i for i in history_list if isinstance(i, int) and 0 <= i < len(normalized_rows)]
+
+    if len(valid_indices) >= 2:
+        i1, i2 = valid_indices[-2], valid_indices[-1]
+        normalized_rows[i1], normalized_rows[i2] = (
+            normalized_rows[i2],
+            normalized_rows[i1],
+        )
+        msg = f"Swapped row {i1 + 1} ({normalized_rows[i2][0]}) and row {i2 + 1} ({normalized_rows[i1][0]})."
+        return msg, normalized_rows, [i1, i2]
+    elif len(valid_indices) == 1:
+        i1 = valid_indices[0]
+        i2 = i1 + 1 if i1 + 1 < len(normalized_rows) else i1 - 1
+        normalized_rows[i1], normalized_rows[i2] = (
+            normalized_rows[i2],
+            normalized_rows[i1],
+        )
+        msg = f"Swapped row {i1 + 1} ({normalized_rows[i2][0]}) with row {i2 + 1} ({normalized_rows[i1][0]})."
+        return msg, normalized_rows, [i1, i2]
+    else:
+        return "Select mapping row(s) to swap first.", normalized_rows, mapping_history
+
+
 def _speaker_reference_rows_from_mappings(
     reference_audio_mapping: object,
     reference_text_mapping: object,
@@ -628,6 +769,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
 
     with gr.Blocks(title="DubbLM", theme=gr.themes.Soft()) as app:
         selected_library_row = gr.State(None)
+        selected_mapping_history = gr.State([])
         gr.Markdown(
             """
             # DubbLM
@@ -792,7 +934,13 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     label="Speaker reference mappings",
                     value=defaults.get(SPEAKER_REFERENCE_FIELD),
                     type="array",
+                    interactive=True,
                 )
+                with gr.Row():
+                    move_up_button = gr.Button("Move Up", size="sm")
+                    move_down_button = gr.Button("Move Down", size="sm")
+                    swap_mappings_button = gr.Button("Swap selected rows", size="sm")
+                    delete_mapping_button = gr.Button("Delete selected mapping", size="sm", variant="stop")
                 gr.Markdown(f"Speaker reference library path: `{DEFAULT_SPEAKER_REFERENCE_LIBRARY_PATH}`")
                 with gr.Row():
                     library_speaker_id = gr.Textbox(label="Library speaker ID", placeholder="SPEAKER_01")
@@ -809,7 +957,9 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     interactive=False,
                     type="array",
                 )
-                use_selected_library_button = gr.Button("Use selected from library")
+                with gr.Row():
+                    use_selected_library_button = gr.Button("Use selected from library")
+                    delete_library_button = gr.Button("Delete selected from library", variant="stop")
                 with gr.Row():
                     enable_emotion_analysis = gr.Checkbox(
                         label="Enable emotion analysis",
@@ -991,6 +1141,32 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                 library_speaker_id,
             ],
         )
+        speaker_reference_rows.select(
+            fn=_store_selected_mapping_info,
+            inputs=[selected_mapping_history],
+            outputs=selected_mapping_history,
+        )
+        move_up_button.click(
+            fn=lambda hist, rows: _move_mapping_row("up", hist, rows),
+            inputs=[selected_mapping_history, speaker_reference_rows],
+            outputs=[status, speaker_reference_rows, selected_mapping_history],
+        )
+        move_down_button.click(
+            fn=lambda hist, rows: _move_mapping_row("down", hist, rows),
+            inputs=[selected_mapping_history, speaker_reference_rows],
+            outputs=[status, speaker_reference_rows, selected_mapping_history],
+        )
+        swap_mappings_button.click(
+            fn=_swap_selected_mappings,
+            inputs=[selected_mapping_history, speaker_reference_rows],
+            outputs=[status, speaker_reference_rows, selected_mapping_history],
+        )
+        delete_mapping_button.click(
+            fn=_delete_selected_mapping,
+            inputs=[selected_mapping_history, speaker_reference_rows],
+            outputs=[status, speaker_reference_rows, selected_mapping_history],
+        )
+
         speaker_reference_library.select(
             fn=_store_selected_library_row,
             outputs=selected_library_row,
@@ -999,6 +1175,11 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
             fn=_use_selected_library_reference,
             inputs=[selected_library_row, speaker_reference_rows],
             outputs=[status, speaker_reference_rows],
+        )
+        delete_library_button.click(
+            fn=_delete_selected_library_reference,
+            inputs=[selected_library_row],
+            outputs=[status, speaker_reference_library],
         )
         load_dubbing_texts_button.click(
             fn=_load_dubbing_text_values,

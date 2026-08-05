@@ -382,6 +382,74 @@ def test_build_app_lists_saved_speaker_reference_library_entries(tmp_path, monke
     ]
 
 
+def test_delete_speaker_reference_from_library(tmp_path, monkeypatch):
+    library_dir = tmp_path / "speaker_reference_library"
+    monkeypatch.setattr(gradio_app, "DEFAULT_SPEAKER_REFERENCE_LIBRARY_PATH", str(library_dir))
+
+    source_audio = tmp_path / "speaker01.wav"
+    source_audio.write_bytes(b"fake-audio")
+    gradio_app.save_speaker_reference_to_library(
+        speaker_id="SPEAKER_01",
+        source_audio_path=str(source_audio),
+        reference_text="Ref text",
+    )
+    assert (library_dir / "SPEAKER_01").exists()
+
+    deleted = gradio_app.delete_speaker_reference_from_library("SPEAKER_01")
+    assert deleted is True
+    assert not (library_dir / "SPEAKER_01").exists()
+    assert gradio_app.load_speaker_reference_library() == []
+
+
+def test_delete_selected_library_reference_ui_handler(tmp_path, monkeypatch):
+    library_dir = tmp_path / "speaker_reference_library"
+    monkeypatch.setattr(gradio_app, "DEFAULT_SPEAKER_REFERENCE_LIBRARY_PATH", str(library_dir))
+
+    source_audio = tmp_path / "speaker01.wav"
+    source_audio.write_bytes(b"fake-audio")
+    saved_path = gradio_app.save_speaker_reference_to_library(
+        speaker_id="SPEAKER_01",
+        source_audio_path=str(source_audio),
+        reference_text="Ref text",
+    )
+
+    status, library_rows = gradio_app._delete_selected_library_reference(["SPEAKER_01", saved_path, "Ref text"])
+    assert "Deleted speaker 'SPEAKER_01'" in status
+    assert library_rows == [["", "", ""]]
+
+
+def test_mapping_row_operations_delete_move_swap():
+    initial_rows = [
+        ["SPEAKER_00", "path/0.wav", "text 0"],
+        ["SPEAKER_01", "path/1.wav", "text 1"],
+        ["SPEAKER_02", "path/2.wav", "text 2"],
+    ]
+
+    # Test Move Down
+    msg, rows, hist = gradio_app._move_mapping_row("down", [0], initial_rows)
+    assert "Moved row 1" in msg
+    assert rows[0][0] == "SPEAKER_01"
+    assert rows[1][0] == "SPEAKER_00"
+
+    # Test Move Up
+    msg, rows, hist = gradio_app._move_mapping_row("up", [1], rows)
+    assert "Moved row 2" in msg
+    assert rows[0][0] == "SPEAKER_00"
+    assert rows[1][0] == "SPEAKER_01"
+
+    # Test Swap
+    msg, rows, hist = gradio_app._swap_selected_mappings([0, 2], initial_rows)
+    assert "Swapped row 1" in msg
+    assert rows[0][0] == "SPEAKER_02"
+    assert rows[2][0] == "SPEAKER_00"
+
+    # Test Delete mapping
+    msg, rows, hist = gradio_app._delete_selected_mapping([1], initial_rows)
+    assert "Deleted mapping for 'SPEAKER_01'" in msg
+    assert len(rows) == 2
+    assert [r[0] for r in rows] == ["SPEAKER_00", "SPEAKER_02"]
+
+
 def test_select_library_row_stores_only_one_selected_entry():
     selected_row = gradio_app._store_selected_library_row(
         SimpleNamespace(

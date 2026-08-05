@@ -693,6 +693,31 @@ def test_manual_speaker_reference_mapping_overrides_auto_segment_reference(tmp_p
     assert updated_args["reference_text"] == "Manual reference text"
 
 
+def test_adjust_and_combine_audio_grouped_handles_none_synthesized_speech_file(tmp_path):
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {"group_overflow_tolerance": 1.0}
+    dubber.audio_chunks_dir = tmp_path / "audio_chunks"
+    dubber.su_audio_chunks_dir = tmp_path / "su_audio_chunks"
+    dubber.audio_chunks_dir.mkdir(parents=True, exist_ok=True)
+    dubber.su_audio_chunks_dir.mkdir(parents=True, exist_ok=True)
+    dubber.debug_data = {}
+
+    segments = [
+        {
+            "speaker": "SPEAKER_00",
+            "start": 0.0,
+            "end": 2.0,
+            "text": "Hello",
+            "translation": "Привет",
+            "synthesized_speech_file": None,
+        },
+    ]
+
+    combined_audio, positions = dubber._adjust_and_combine_audio_grouped(segments)
+    assert len(combined_audio) >= 2000
+    assert len(positions) == 1
+
+
 def test_segment_reference_clip_takes_priority_over_speaker_wav_and_keeps_matching_text(tmp_path):
     dubber = SmartDubbing.__new__(SmartDubbing)
     dubber.config = {
@@ -921,6 +946,7 @@ def test_run_from_tts_uses_cached_translation_and_creates_video(tmp_path, monkey
     class CacheStub:
         def __init__(self):
             self.seen = []
+            self.cleared = []
             self.use_cache = True
 
         def generate_cache_key(self, *_args, **_kwargs):
@@ -942,6 +968,9 @@ def test_run_from_tts_uses_cached_translation_and_creates_video(tmp_path, monkey
                     "translation": "прывітанне",
                 }
             ]
+
+        def clear_cache(self, step_name=None):
+            self.cleared.append(step_name)
 
     dubber.performance_tracker = PerfStub()
     dubber.audio_processor = AudioProcessorStub()
@@ -965,6 +994,8 @@ def test_run_from_tts_uses_cached_translation_and_creates_video(tmp_path, monkey
     assert synth_calls[0][1] == {(0.0, 1.2): "SPEAKER_00"}
     assert synth_calls[0][2] == str(tmp_path / "source.wav")
     assert dubber.cache_manager.seen[0][0] == "translation"
+    assert "synthesized_speech" in dubber.cache_manager.cleared
+    assert "segment_synthesis" in dubber.cache_manager.cleared
     assert dubber.cache_manager.use_cache is True
 
 

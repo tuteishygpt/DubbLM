@@ -566,7 +566,29 @@ class SmartDubbing:
             original_use_cache = getattr(self.cache_manager, "use_cache", True)
             try:
                 self.cache_manager.use_cache = False
-                logger.info("Bypassing TTS caches for run_step=tts_to_end to force audio regeneration")
+                logger.info("Clearing TTS audio caches for run_step=tts_to_end to force fresh audio generation")
+                if hasattr(self.cache_manager, "clear_cache"):
+                    self.cache_manager.clear_cache("synthesized_speech")
+                    self.cache_manager.clear_cache("segment_synthesis")
+
+                output_audio_path = Path(self.config.get("translated_audio_path"))
+                if output_audio_path.exists():
+                    try:
+                        output_audio_path.unlink()
+                    except Exception as e:
+                        logger.warning(f"Could not delete existing translated audio file: {e}")
+
+                audio_chunks_dir = getattr(self, "audio_chunks_dir", Path(self.config.get("audio_chunks_dir", ""))) if self.config.get("audio_chunks_dir") else None
+                su_audio_chunks_dir = getattr(self, "su_audio_chunks_dir", Path(self.config.get("su_audio_chunks_dir", ""))) if self.config.get("su_audio_chunks_dir") else None
+
+                for chunk_dir in [audio_chunks_dir, su_audio_chunks_dir]:
+                    if chunk_dir and chunk_dir.exists():
+                        for item in chunk_dir.glob("*.wav"):
+                            try:
+                                item.unlink()
+                            except Exception as e:
+                                logger.warning(f"Could not delete chunk file {item}: {e}")
+
                 translated_audio_path = self.synthesize_speech(
                     segments_for_output,
                     speakers_rolls,
@@ -1887,7 +1909,7 @@ class SmartDubbing:
             # Store groups information for debug
             if self.config.get('debug_info', False):
                 speaker_groups_info[speaker] = speaker_groups
-                self.debug_data["speaker_groups"] = speaker_groups_info
+            self.debug_data["speaker_groups"] = speaker_groups_info
             
             # Process each group for this speaker
             for group_idx, group in enumerate(speaker_groups):
@@ -1912,8 +1934,10 @@ class SmartDubbing:
                             segment_start_in_group_ms = len(combined_group_audio)
                     
                     # Load segment audio
-                    segment_file = segment.get('synthesized_speech_file', str(self.audio_chunks_dir / f"{segments.index(segment)}.wav"))
-                    if os.path.exists(segment_file):
+                    segment_file = segment.get('synthesized_speech_file')
+                    if not segment_file:
+                        segment_file = str(self.audio_chunks_dir / f"{segments.index(segment)}.wav")
+                    if segment_file and os.path.exists(segment_file):
                         segment_audio = AudioSegment.from_file(segment_file)
                     else:
                         # Fallback: create silence with original duration
@@ -2037,9 +2061,10 @@ class SmartDubbing:
             logger.debug(f"Added speaker {speaker}'s track to the mix")
         
         # If we processed the full video, pad to match original length if necessary
-        if self.config.get('start_time') is None and self.config.get('duration') is None:
+        input_path = self.config.get('input')
+        if input_path and os.path.exists(str(input_path)) and self.config.get('start_time') is None and self.config.get('duration') is None:
             try:
-                total_original_ms = len(AudioSegment.from_file(self.config.get('input')))
+                total_original_ms = len(AudioSegment.from_file(input_path))
                 if len(final_audio) < total_original_ms:
                     final_audio += AudioSegment.silent(duration=total_original_ms - len(final_audio))
             except Exception as e:

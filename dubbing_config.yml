@@ -5,7 +5,7 @@ debug_diarize_only: false
 debug_tts: true
 whisper_model: large-v3
 keep_background: true
-no_cache: true
+no_cache: false
 remove_pauses: false
 normalize_audio: true
 dubbed_volume: 1
@@ -35,31 +35,14 @@ background_volume: 0.762341
 group_overflow_tolerance: 1
 gemini_transcription_model: gemini-3.1-pro-preview
 reference_audio_mapping:
-  SPEAKER_02: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_02\reference.mp3
-  SPEAKER_04: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_00\reference.wav
-  SPEAKER_01: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_01\reference.mp3
-  SPEAKER_00: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_00\reference.mp3
+  SPEAKER_00: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_00\reference.wav
+  SPEAKER_01: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_03\reference.mp3
 reference_text_mapping:
-  SPEAKER_02: 'Такога спеву-сугалосся, што тут над рэчкаю панёсся, ніхто не зложыць,
-    не зайграе.
-
-    Дарога праз масток ішла раз''езджаная, бітая і за млынам цяжка рвалася на ўзгорак,
-    адразу ж за самотнымі спарышамі ўзбярэжных алешын.
-
-    Работа ў іх – з дошкі ў сшыткі перапісваць, не задаючы пытанняў і мазгі не ўключаючы.
-
-    Без гэтай з''явы пыл і дым пераносіліся б на вялікія адлегласці.
-
-    Іх ужо не было на праспекце, але горы смецця нікуды не падзеліся.'
-  SPEAKER_04: Вытрываўшы жудасныя катаванні, ён не прызнаў паклёпніцкіх абвінавачванняў
-    і адмовіўся падаць прашэнне аб памілаванні.
-  SPEAKER_01: Гаўніна нейкае... Савецкая ўлада моцна спрычынілася да знішчэння гэтага
-    горада і збудавала на яго месцы такі, як ёй. Увага..
-  SPEAKER_00: '..and it''s like a bloodbath right now.
-
-    The moment I start to look at stuff that generative AI puts out, I am suddenly
-    infected with the thoughts and brains of a million billion people on this planet.
-    People don''t like AI, in my opinion, because it represents the removal of humans
-    from craft and creativity.'
+  SPEAKER_00: Стоит мне только взглянуть на то, что создает генеративный AI (ИИ),
+    как я тут же заражаюсь мыслями и умами миллионов, миллиардов людей на этой планете.
+    Люди не любят AI, на мой взгляд, потому что он означает вытеснение людей из ремесла
+    и творчества. Это означает миллиарды и миллиарды...
+  SPEAKER_01: И тут прямо какие-то Анадырь, Чита, и с этой стороны какие-то американские
+    города, стоят печати аэропортов. Очень живописно выглядит, где-то по-русски...
 duration: 300
 watermark_text: TuteishyGPT
