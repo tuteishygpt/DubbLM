@@ -69,10 +69,13 @@ class TranscriptionFactory:
         elif transcription_system == "deepgram":
             from transcription.deepgram_transcriber import DeepgramTranscriber
 
+            deepgram_kwargs = dict(kwargs)
+            deepgram_model = deepgram_kwargs.pop("deepgram_model", "nova-3")
             return DeepgramTranscriber(
                 source_language=source_language,
                 device=device,
-                **kwargs
+                model=deepgram_model,
+                **deepgram_kwargs
             )
         else:
             raise ValueError(f"Unsupported transcription system: {transcription_system}")

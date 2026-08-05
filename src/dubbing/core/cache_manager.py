@@ -78,10 +78,14 @@ class CacheManager:
         """
         # Generate MD5 hash of audio file
         md5_hash = hashlib.md5()
-        with open(audio_file, "rb") as f:
-            # Read in chunks to handle large files
-            for chunk in iter(lambda: f.read(4096), b""):
-                md5_hash.update(chunk)
+        try:
+            with open(audio_file, "rb") as f:
+                # Read in chunks to handle large files
+                for chunk in iter(lambda: f.read(4096), b""):
+                    md5_hash.update(chunk)
+        except FileNotFoundError:
+            # Fallback: hash the file path string if file doesn't exist yet
+            md5_hash.update(str(audio_file).encode())
         
         # Include processing parameters in the key to ensure uniqueness
         params = f"{source_language}_{target_language}_{whisper_model}"

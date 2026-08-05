@@ -250,6 +250,7 @@ class SmartDubbing:
                 device=self.device,
                 whisper_model=self.config.get('whisper_model', 'large-v3'),
                 gemini_transcription_model=self.config.get('gemini_transcription_model', 'gemini-3-flash-preview'),
+                deepgram_model=self.config.get('deepgram_model', 'nova-3'),
                 cache_manager=self.cache_manager,
                 artifacts_root=self.config.get("artifacts_dir"),
             )

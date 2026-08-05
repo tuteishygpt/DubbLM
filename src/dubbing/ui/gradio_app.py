@@ -41,6 +41,7 @@ WORKFLOW_FIELDS = [
 SETTINGS_FIELDS = [
     "whisper_model",
     "gemini_transcription_model",
+    "deepgram_model",
     "transcription_system",
     "start_time",
     "duration",
@@ -837,6 +838,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     ]
                 )
 
+
             with gr.Tab("Settings"):
                 gr.Markdown("## Transcription")
                 with gr.Row():
@@ -845,14 +847,19 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         label="Gemini transcription model",
                         value=defaults.get("gemini_transcription_model", "gemini-3-flash-preview"),
                     )
+                    deepgram_model = gr.Textbox(
+                        label="Deepgram model",
+                        value=defaults.get("deepgram_model", "nova-3"),
+                    )
                     transcription_system = gr.Dropdown(
                         label="Transcription system",
-                        choices=["whisper", "openai", "whisperx", "assemblyai", "gemini", "deepgram"],
+                        choices=["whisper", "openai", "pyannote_openai", "whisperx", "assemblyai", "gemini", "deepgram"],
                         value=defaults.get("transcription_system", "whisper"),
                     )
                     start_time = gr.Number(label="Start time (seconds)", precision=2, value=defaults.get("start_time"))
                     duration = gr.Number(label="Duration (seconds)", precision=2, value=defaults.get("duration"))
                     no_cache = gr.Checkbox(label="Disable cache", value=bool(defaults.get("no_cache", False)))
+
 
                 gr.Markdown("## Translation")
                 with gr.Row():
@@ -1039,6 +1046,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     [
                         whisper_model,
                         gemini_transcription_model,
+                        deepgram_model,
                         transcription_system,
                         start_time,
                         duration,

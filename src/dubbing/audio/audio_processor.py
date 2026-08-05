@@ -57,12 +57,12 @@ class AudioProcessor:
     def extract_audio(self, video_path: str, start_time: Optional[float] = None, 
                      duration: Optional[float] = None) -> str:
         """Extract audio from the input video file.
-        
+
         Args:
             video_path: Path to the video file
             start_time: Start time in seconds to begin extraction
             duration: Duration in seconds to extract
-            
+
         Returns:
             Path to the extracted audio file
         """
@@ -70,25 +70,35 @@ class AudioProcessor:
             logger.warning("Ignoring non-positive extraction duration; extracting until the end of the input.")
             duration = None
 
+        # Validate input file exists before doing anything
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(
+                f"Input video file not found: '{video_path}'. "
+                "The file may have been deleted or the path may be incorrect."
+            )
+
         # Start timing
         self.performance_tracker.start_timing("extract_audio")
         
         audio_file = str(self.audio_dir / "source.wav")
-        
-        # Set the total duration first
-        self._determine_video_duration(video_path, start_time, duration)
-        
         if start_time is not None or duration is not None:
             # Extract only the specified segment using ffmpeg
             ss_param = f"-ss {start_time}" if start_time is not None else ""
             t_param = f"-t {duration}" if duration is not None else ""
             
-            trim_cmd = f'ffmpeg -y {ss_param} -i "{video_path}" {t_param} -y -vn -acodec pcm_s16le -ar 16000 -ac 1 {audio_file}'
-            subprocess.run(trim_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            trim_cmd = f'ffmpeg -y {ss_param} -i "{video_path}" {t_param} -y -vn -acodec pcm_s16le -ar 16000 -ac 1 "{audio_file}"'
+            result = subprocess.run(trim_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 0:
+                ffmpeg_error = result.stderr.decode("utf-8", errors="replace").strip()
+                raise RuntimeError(
+                    f"ffmpeg failed to extract audio from '{video_path}' (exit code {result.returncode}).\n"
+                    f"Command: {trim_cmd}\n"
+                    f"ffmpeg stderr:\n{ffmpeg_error}"
+                )
             
             start_str = f"from {start_time}s" if start_time is not None else "from beginning"
             duration_str = f"for {duration}s" if duration is not None else "to the end"
-            logger.debug(f"Extracted audio segment {start_str} {duration_str} to {audio_file}")
+            logger.info(f"Extracted audio segment {start_str} {duration_str} to {audio_file}")
         else:
             # Extract full audio
             audio = AudioSegment.from_file(video_path, format="mp4")

@@ -200,3 +200,24 @@ def test_pyproject_declares_deepgram_dependency():
     dependencies = pyproject["project"]["dependencies"]
 
     assert any(dep.startswith("deepgram-sdk") for dep in dependencies)
+
+
+def test_transcription_factory_creates_deepgram_with_custom_model(monkeypatch):
+    from transcription.transcription_factory import TranscriptionFactory
+    import transcription.deepgram_transcriber as deepgram_transcriber
+
+    class FakeDeepgramClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+    monkeypatch.setattr(deepgram_transcriber, "DeepgramClient", FakeDeepgramClient)
+
+    transcriber = TranscriptionFactory.create_transcriber(
+        transcription_system="deepgram",
+        source_language="ru",
+        deepgram_model="nova-2",
+    )
+
+    assert transcriber.name == "Deepgram"
+    assert transcriber.model == "nova-2"

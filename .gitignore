@@ -101,6 +101,10 @@ tmp/
 
 *.yml
 
+# Credentials / secrets
+cred/
+*.json
+
 # Ignore Gemini voice stats file
 tts/samples/gemini/gemini_voice_stats.json
 
