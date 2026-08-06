@@ -672,6 +672,21 @@ class SmartDubbing:
         except Exception as e:
             logger.warning(f"Could not clear per-input cache: {e}")
 
+        # Also wipe rendered chunk wavs. Without this a from-scratch run that
+        # loses a segment mid-flight (e.g. OmniVoice AcceleratorError) would
+        # silently reuse the previous run's chunk with the same index — audio
+        # produced by a completely different TTS backend.
+        for chunk_dir in (
+            getattr(self, "audio_chunks_dir", None),
+            getattr(self, "su_audio_chunks_dir", None),
+        ):
+            if chunk_dir and Path(chunk_dir).exists():
+                for item in Path(chunk_dir).glob("*.wav"):
+                    try:
+                        item.unlink()
+                    except OSError as exc:
+                        logger.debug(f"Could not remove stale chunk {item}: {exc}")
+
         # Legacy fallback: older transcription backends write to ./cache/<step>/
         # without the input-hash prefix, so a targeted wipe is still needed.
         legacy_root = getattr(self.cache_manager, "cache_root", None)
@@ -1611,6 +1626,19 @@ class SmartDubbing:
                 
                 logger.debug(f"  Selected for synthesis: '{best_text[:50]}...' (Ratio: {best_ratio:.2f}, Deviation: {best_deviation:.2%})")
                 
+                # Remove any stale wav left over from a previous run so a
+                # silent TTS failure (e.g. OmniVoice AcceleratorError) can't
+                # be masked by an old file with the same index — otherwise
+                # ``os.path.exists(output_path)`` below would happily accept
+                # audio produced by a completely different TTS backend.
+                try:
+                    if os.path.exists(current_segment_output_path):
+                        os.remove(current_segment_output_path)
+                except OSError as exc:
+                    logger.debug(
+                        f"Could not remove stale chunk {current_segment_output_path}: {exc}"
+                    )
+
                 # Prepare segment for synthesis with chosen text
                 final_segment_data = TTSSegmentData(**{**tts_segment_data_args, "text": best_text, "output_path": current_segment_output_path})
                 segments_to_synthesize_by_pool[pool_key].append(final_segment_data)

@@ -1285,14 +1285,19 @@ class GeminiTTSWrapper(TTSInterface):
             logger.warning("Warning: No valid segments found.")
             return []
 
-        # Auto-pin voices for unmapped speakers with reference audio
+        # Auto-pin voices for unmapped speakers with reference audio.
+        # If the caller already supplied `voice` on the segment (e.g. via a
+        # per-speaker `voice_name` in `voices:`), respect it — never override
+        # a hard-configured voice with similarity matching.
         if self.config.enable_voice_matching and self.voice_matcher.audio_embedder:
             speaker_to_ref_path = {}
             for segment in valid_segments:
-                if (segment.speaker and segment.speaker not in self.voice_mapping and 
+                if segment.voice:
+                    continue
+                if (segment.speaker and segment.speaker not in self.voice_mapping and
                     segment.speaker not in speaker_to_ref_path and segment.reference_audio_path):
                     speaker_to_ref_path[segment.speaker] = segment.reference_audio_path
-            
+
             for speaker_id, ref_path in speaker_to_ref_path.items():
                 logger.debug(f"Auto-pinning voice for speaker '{speaker_id}'")
                 self.find_and_pin_voice_for_speaker(speaker_id, ref_path)
