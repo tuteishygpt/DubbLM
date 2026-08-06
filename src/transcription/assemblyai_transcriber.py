@@ -285,43 +285,61 @@ class AssemblyAITranscriber(BaseTranscriber):
                 except Exception as e:
                     logger.warning(f"Failed to clean up temporary MP3 file {temp_mp3_file}: {e}")
         
+    @staticmethod
+    def _canonicalize_speaker(raw: Any, mapping: Dict[str, str]) -> str:
+        """Map AssemblyAI's per-transcript speaker label (A/B/1/…) to SPEAKER_NN.
+
+        The mapping is built in order-of-appearance so downstream tooling that
+        expects zero-padded ``SPEAKER_00``/``SPEAKER_01`` labels (per-speaker
+        voice mapping, reference-audio library, glossary, prompts) works
+        regardless of which transcription backend produced the segments.
+        """
+        key = "" if raw is None else str(raw).strip()
+        if not key:
+            key = "__unknown__"
+        if key not in mapping:
+            mapping[key] = f"SPEAKER_{len(mapping):02d}"
+        return mapping[key]
+
     def _process_diarization_result(self, transcript) -> Dict[Tuple[float, float], str]:
         """
         Process AssemblyAI transcript to extract speaker diarization information.
-        
+
         Args:
             transcript: AssemblyAI transcript object with speaker information
-            
+
         Returns:
             Dictionary mapping time ranges to speaker IDs
         """
         speakers_rolls = {}
-        
+        speaker_mapping: Dict[str, str] = {}
+
         # AssemblyAI provides utterances with speaker labels
         if hasattr(transcript, 'utterances') and transcript.utterances:
-            for utterance in transcript.utterances:
+            utterances = sorted(transcript.utterances, key=lambda u: u.start)
+            for utterance in utterances:
                 start_time = utterance.start / 1000.0  # Convert ms to seconds
                 end_time = utterance.end / 1000.0      # Convert ms to seconds
-                speaker_id = f"SPEAKER_{utterance.speaker}"
-                
+                speaker_id = self._canonicalize_speaker(utterance.speaker, speaker_mapping)
+
                 speakers_rolls[(start_time, end_time)] = speaker_id
-        
+
         # If no utterances with speakers, fall back to words with speaker labels
         elif hasattr(transcript, 'words') and transcript.words:
             current_speaker = None
             current_start = None
             current_end = None
-            
+
             for word in transcript.words:
                 word_start = word.start / 1000.0  # Convert ms to seconds
                 word_end = word.end / 1000.0      # Convert ms to seconds
-                word_speaker = f"SPEAKER_{word.speaker}" if word.speaker else "SPEAKER_00"
-                
+                word_speaker = self._canonicalize_speaker(word.speaker, speaker_mapping)
+
                 if current_speaker != word_speaker:
                     # Save previous segment if exists
                     if current_speaker and current_start is not None and current_end is not None:
                         speakers_rolls[(current_start, current_end)] = current_speaker
-                    
+
                     # Start new segment
                     current_speaker = word_speaker
                     current_start = word_start
@@ -329,11 +347,11 @@ class AssemblyAITranscriber(BaseTranscriber):
                 else:
                     # Extend current segment
                     current_end = word_end
-            
+
             # Save last segment
             if current_speaker and current_start is not None and current_end is not None:
                 speakers_rolls[(current_start, current_end)] = current_speaker
-        
+
         logger.debug(f"Extracted {len(speakers_rolls)} speaker segments")
         return speakers_rolls
     
@@ -348,14 +366,16 @@ class AssemblyAITranscriber(BaseTranscriber):
             List of transcript segments with timing information
         """
         records = []
-        
+        speaker_mapping: Dict[str, str] = {}
+
         # Use utterances if available (preferred as they contain speaker info)
         if hasattr(transcript, 'utterances') and transcript.utterances:
-            for utterance in transcript.utterances:
+            utterances = sorted(transcript.utterances, key=lambda u: u.start)
+            for utterance in utterances:
                 text = utterance.text.strip()
                 start = utterance.start / 1000.0  # Convert ms to seconds
                 end = utterance.end / 1000.0      # Convert ms to seconds
-                speaker = f"SPEAKER_{utterance.speaker}"
+                speaker = self._canonicalize_speaker(utterance.speaker, speaker_mapping)
                 confidence = getattr(utterance, 'confidence', None)
                 
                 if text and start < end:  # Ensure valid segment

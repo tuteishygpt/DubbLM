@@ -9,6 +9,30 @@ from pathlib import Path
 from typing import Optional
 from pydub import AudioSegment
 
+
+def _sidecar_path(audio_file: str) -> Path:
+    return Path(audio_file).with_suffix(Path(audio_file).suffix + ".json")
+
+
+def _build_source_fingerprint(
+    video_path: str,
+    start_time: Optional[float],
+    duration: Optional[float],
+) -> dict:
+    try:
+        mtime = os.path.getmtime(video_path)
+        size = os.path.getsize(video_path)
+    except OSError:
+        mtime = None
+        size = None
+    return {
+        "video_path": os.path.abspath(video_path),
+        "video_mtime": mtime,
+        "video_size": size,
+        "start_time": start_time,
+        "duration": duration,
+    }
+
 from ..core.cache_manager import CacheManager
 from ..debug.performance_tracker import PerformanceTracker
 from ..core.log_config import get_logger
@@ -79,8 +103,20 @@ class AudioProcessor:
 
         # Start timing
         self.performance_tracker.start_timing("extract_audio")
-        
+
         audio_file = str(self.audio_dir / "source.wav")
+        fingerprint = _build_source_fingerprint(video_path, start_time, duration)
+        sidecar = _sidecar_path(audio_file)
+        if os.path.exists(audio_file) and sidecar.exists():
+            try:
+                stored = json.loads(sidecar.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                stored = None
+            if stored == fingerprint:
+                logger.info(f"Reusing existing extracted audio: {audio_file}")
+                self.performance_tracker.end_timing("extract_audio")
+                return audio_file
+
         if start_time is not None or duration is not None:
             # Extract only the specified segment using ffmpeg
             ss_param = f"-ss {start_time}" if start_time is not None else ""
@@ -105,9 +141,14 @@ class AudioProcessor:
             audio.export(audio_file, format="wav")
             logger.debug(f"Extracted full audio to {audio_file}")
         
+        try:
+            sidecar.write_text(json.dumps(fingerprint), encoding="utf-8")
+        except OSError as e:
+            logger.debug(f"Could not write source audio sidecar {sidecar}: {e}")
+
         # End timing
         self.performance_tracker.end_timing("extract_audio")
-        
+
         return audio_file
     
     def _determine_video_duration(self, video_path: str, start_time: Optional[float] = None, 
@@ -179,6 +220,13 @@ class AudioProcessor:
         step_name = "background_audio"
         background_audio_path = str(self.audio_dir / "background.wav")
         vocals_audio_path = str(self.audio_dir / "vocals.wav")
+
+        if os.path.exists(background_audio_path) and os.path.exists(vocals_audio_path):
+            logger.info(
+                "Reusing existing separated background/vocals from artifacts/audio/"
+            )
+            self.performance_tracker.end_timing("background_audio")
+            return background_audio_path, vocals_audio_path
 
         if self.cache_manager:
             cached_background = self.cache_manager.load_file_from_cache(
