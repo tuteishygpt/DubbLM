@@ -1641,6 +1641,7 @@ class SmartDubbing:
                     tts_system,
                     COMFORT_MIN_ADJUSTMENT_RATIO,
                     COMFORT_MAX_ADJUSTMENT_RATIO,
+                    pool_key=pool_key,
                 )
 
                 logger.debug(f"Batch synthesis completed for {len(segments_to_synthesize)} segments with {tts_system}")
@@ -1714,6 +1715,7 @@ class SmartDubbing:
                     tts_system,
                     COMFORT_MIN_ADJUSTMENT_RATIO,
                     COMFORT_MAX_ADJUSTMENT_RATIO,
+                    pool_key=pool_key,
                 )
         
         # Adjust timing and combine audio segments
@@ -1767,11 +1769,18 @@ class SmartDubbing:
         min_ratio: float,
         max_ratio: float,
         max_attempts: int = 2,
+        pool_key: Optional[tuple] = None,
     ) -> None:
         """Retry any segments for which the previous synthesis pass did not
         produce an audio file. Cloud TTS backends (OmniVoice, Gemini API) can
         silently drop segments on transient errors — one more attempt clears
         those up and stops empty WAVs from ending up in the final track.
+
+        Only segments belonging to ``pool_key`` are retried. Passing ``None``
+        preserves legacy behaviour (retry every metadata entry regardless of
+        pool) and is only there so older callers keep working; every new call
+        site sets a pool_key so segments routed to a different TTS client are
+        never synthesised by the wrong backend.
         """
         from tts.models import TTSSegmentData
 
@@ -1782,6 +1791,8 @@ class SmartDubbing:
         for attempt in range(max_attempts):
             still_missing: List[Dict[str, Any]] = []
             for metadata in segments_metadata:
+                if pool_key is not None and metadata.get("pool_key") != pool_key:
+                    continue
                 segment_dict = metadata["segment_dict"]
                 output_path = metadata["output_path"]
                 if segment_dict.get("synthesized_speech_file") and os.path.exists(output_path):
@@ -1853,11 +1864,12 @@ class SmartDubbing:
                         except Exception:
                             pass
 
-        # Log any that are still missing after all retries.
+        # Log any that are still missing after all retries (scoped to this pool).
         missing_indexes = [
             metadata["index"] + 1
             for metadata in segments_metadata
-            if not metadata["segment_dict"].get("synthesized_speech_file")
+            if (pool_key is None or metadata.get("pool_key") == pool_key)
+            and not metadata["segment_dict"].get("synthesized_speech_file")
         ]
         if missing_indexes:
             logger.error(

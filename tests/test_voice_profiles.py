@@ -174,6 +174,7 @@ def test_build_config_from_overrides_folds_legacy_fields_into_voices(tmp_path, m
         warnings.simplefilter("ignore", DeprecationWarning)
         config = build_config_from_overrides(
             {
+                "config": "",  # don't inherit repo dubbing_config.yml
                 "input": str(video_path),
                 "source_language": "en",
                 "target_language": "be",

@@ -165,6 +165,7 @@ def test_legacy_tts_system_mapping_still_routes(tmp_path, monkeypatch):
         warnings.simplefilter("ignore", DeprecationWarning)
         config = build_config_from_overrides(
             {
+                "config": "",  # don't inherit repo dubbing_config.yml
                 "input": str(video_path),
                 "source_language": "en",
                 "target_language": "be",
