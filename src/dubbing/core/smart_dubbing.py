@@ -1075,19 +1075,17 @@ class SmartDubbing:
         """Return a cached diarize+transcribe result or raise a clear error.
 
         Used by ``run_translate_only`` to guarantee we never re-run the
-        transcriber during a resume step. If the configured transcriber
-        cannot advertise a ``cache_step_name`` (e.g. legacy pyannote_openai
-        with its multi-step cache layout), fall back to a normal
-        ``diarize_and_transcribe`` call — it will still hit its own cache
-        internally, but we can't statically verify presence here.
+        transcriber during a resume step. Reproduces the exact cache_key that
+        ``SmartDubbing.diarize_and_transcribe`` writes — a full-pipeline or
+        ``transcribe_only`` run passes that key to the transcriber, so any
+        cached result lives under it. If the transcriber does not advertise
+        ``cache_step_name`` (legacy pyannote_openai with its multi-step cache
+        layout), fall back to a normal ``diarize_and_transcribe`` call so its
+        own internal cache is still consulted.
         """
         transcriber = self._require_transcriber()
         step_name = (getattr(transcriber, "cache_step_name", "") or "").strip()
 
-        # We can't reuse SmartDubbing.diarize_and_transcribe's cache_key helper
-        # because each transcriber composes its own cache key with backend-
-        # specific salt (speech_model, deepgram utterance_split, gemini model,
-        # …). Delegate the cache read to the transcriber itself.
         if not step_name:
             logger.warning(
                 "Transcriber %s does not advertise a cache_step_name; falling back "
@@ -1104,13 +1102,19 @@ class SmartDubbing:
             self._save_transcription_file(transcription)
             return speakers_rolls, transcription
 
-        # Ask the transcriber to build its own cache key, then check presence
-        # BEFORE calling diarize_and_transcribe. This way translate_only fails
-        # loudly instead of silently kicking off a full transcription pass.
-        cache_key_fn = getattr(transcriber, "default_cache_key", None)
-        cache_key = cache_key_fn(audio_file) if callable(cache_key_fn) else None
+        # Use the SAME cache_key that SmartDubbing.diarize_and_transcribe would
+        # compute on a full-pipeline / transcribe_only run — that's what any
+        # existing cache entry was written under.
+        cache_key = self.cache_manager.generate_cache_key(
+            audio_file,
+            self.config.get('source_language'),
+            self.config.get('target_language'),
+            self.config.get('whisper_model', 'large-v3'),
+            self.config.get('start_time'),
+            self.config.get('duration'),
+        )
 
-        if cache_key is None or not self.cache_manager.cache_exists(step_name, cache_key):
+        if not self.cache_manager.cache_exists(step_name, cache_key):
             raise FileNotFoundError(
                 f"run_step=translate_only requires cached diarization+transcription "
                 f"from a previous transcribe_only or full pipeline run in the same "

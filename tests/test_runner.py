@@ -1041,6 +1041,9 @@ def test_run_translate_only_requires_cached_transcription(tmp_path, monkeypatch)
     class CacheStub:
         use_cache = True
 
+        def generate_cache_key(self, *_args, **_kwargs):
+            return "cache-key"
+
         def cache_exists(self, step_name, cache_key):
             return False
 
@@ -1050,9 +1053,6 @@ def test_run_translate_only_requires_cached_transcription(tmp_path, monkeypatch)
 
         def __init__(self):
             self.called = False
-
-        def default_cache_key(self, _audio_file):
-            return "cache-key"
 
         def diarize_and_transcribe(self, *_args, **_kwargs):
             self.called = True
