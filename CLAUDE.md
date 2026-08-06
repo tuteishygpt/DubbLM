@@ -109,7 +109,9 @@ The Gradio "Dubbing Texts" tab loads/saves the cached translation pickle (`cache
 ## Config conventions
 
 - The `input` field in `dubbing_config.yml` is ignored — always pass `--input` on the CLI.
-- `voice_name`, `reference_audio_mapping`, `reference_text_mapping`, `tts_system_mapping`, `voice_prompt`, `glossary` are per-speaker dicts keyed by diarization label (`SPEAKER_00`, `SPEAKER_01`, …). In CLI/UI overrides they may arrive as JSON strings — `runner._normalize_override_value` decodes them.
+- **Per-speaker TTS profiles live under `voices:`.** Each entry (`SPEAKER_00`, `"*"`, …) is a `VoiceProfile` — `tts_system`, `model`, `fallback_model`, `voice_name`, `style_prompt`, `reference_audio`, `reference_text`, and provider-specific knobs in `params:`. `SmartDubbing` builds one TTS client per unique `(system, model, params)` combination — see `src/dubbing/core/voice_profiles.py` and `docs/superpowers/specs/per-voice-tts-profiles.md`.
+- Legacy per-speaker dicts (`voice_name` as dict, `reference_audio_mapping`, `reference_text_mapping`, `tts_system_mapping`, `voice_prompt`) still work: `normalize_voices` folds them into `voices` on load and logs a single deprecation warning. `voices:` takes precedence for the same speaker; other speakers fall back to legacy entries.
+- `glossary` is a per-speaker dict too but unrelated to TTS. In CLI/UI overrides these fields may arrive as JSON strings; `voices` also accepts YAML — `runner._normalize_override_value` decodes both.
 - `keep_background: true` runs source separation; the README and `docs/LAUNCH.md` both warn it's RAM-heavy on videos >30 min.
 
 ## Docs to consult

@@ -9,6 +9,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+import yaml
 from dotenv import load_dotenv
 
 from .config import DubbingConfig
@@ -24,6 +25,9 @@ _JSON_FIELDS = {
     "reference_audio_mapping",
     "reference_text_mapping",
 }
+# `voices` supports both YAML and JSON (JSON is a subset of YAML), so we parse it
+# with yaml.safe_load. Kept separate from _JSON_FIELDS to signal the format switch.
+_YAML_FIELDS = {"voices"}
 _LIST_TEXT_FIELDS = {"keep_original_audio_ranges"}
 
 
@@ -49,6 +53,10 @@ def _normalize_override_value(key: str, value: Any) -> Any:
 
     if key in _JSON_FIELDS and isinstance(value, str):
         return json.loads(value)
+
+    if key in _YAML_FIELDS and isinstance(value, str):
+        parsed = yaml.safe_load(value)
+        return parsed if isinstance(parsed, dict) else None
 
     if key in _LIST_TEXT_FIELDS and isinstance(value, str):
         return [line.strip() for line in value.splitlines() if line.strip()]

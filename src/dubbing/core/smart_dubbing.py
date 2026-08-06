@@ -27,6 +27,12 @@ warnings.filterwarnings("ignore")
 # Import our components
 from .config import DubbingConfig
 from .cache_manager import CacheManager
+from .voice_profiles import (
+    FALLBACK_SPEAKER,
+    VoiceProfile,
+    normalize_voices,
+    resolve_profile,
+)
 from ..audio.audio_processor import AudioProcessor
 from ..audio.speaker_processor import SpeakerProcessor
 from ..video.video_processor import VideoProcessor
@@ -78,10 +84,25 @@ class SmartDubbing:
         self.speakers_audio_dir = Path(self.config.get("speakers_audio_dir"))
         self.audio_chunks_dir = Path(self.config.get("audio_chunks_dir"))
         self.su_audio_chunks_dir = Path(self.config.get("su_audio_chunks_dir"))
+        # Legacy per-speaker mirrors (kept for backward-compat with a few call sites and tests).
         self.tts_system_mapping = self.config.get('tts_system_mapping') or {}
         self.voice_prompt = self.config.get('voice_prompt') or {}
         self.reference_audio_mapping = self.config.get('reference_audio_mapping') or {}
         self.reference_text_mapping = self.config.get('reference_text_mapping') or {}
+
+        # Unified per-speaker profiles. DubbingConfig.process_special_parameters folds legacy
+        # fields into this dict; when a plain dict-config is used (mostly in tests) we
+        # normalize on the fly so downstream code always sees VoiceProfile objects.
+        voices_cfg = self.config.get('voices')
+        if not isinstance(voices_cfg, dict) or not all(
+            isinstance(v, VoiceProfile) for v in voices_cfg.values()
+        ):
+            voices_cfg = normalize_voices(self.config.to_dict() if hasattr(self.config, "to_dict") else dict(self.config))
+            if hasattr(self.config, "set"):
+                self.config.set('voices', voices_cfg)
+            else:
+                self.config['voices'] = voices_cfg
+        self.voice_profiles: Dict[str, VoiceProfile] = voices_cfg
         
         # Speakers to mute (remove entirely from output)
         self.muted_speakers = set()
@@ -202,42 +223,130 @@ class SmartDubbing:
             self.translator_init_error = e
             logger.warning(f"Failed to initialize translator: {e}")
     
+    def _default_tts_system(self) -> str:
+        """The TTS backend used as fallback when a profile does not name one."""
+        return self.config.get('tts_system', 'coqui')
+
+    def _resolve_voice_profile(self, speaker: str) -> VoiceProfile:
+        """Resolve a speaker to its effective VoiceProfile (with `"*"` fallback)."""
+        return resolve_profile(
+            self.voice_profiles,
+            speaker,
+            tts_system_default=self._default_tts_system(),
+        )
+
+    def _profile_pool_key(self, profile: VoiceProfile) -> tuple:
+        """Client-pool identity for a profile, taking global TTS defaults into account."""
+        return (
+            (profile.tts_system or self._default_tts_system() or "").lower(),
+            profile.model or (self.config.get('tts_model') or ""),
+            profile.fallback_model or (self.config.get('tts_fallback_model') or ""),
+            tuple(sorted(profile.params.items())),
+        )
+
+    def _global_omnivoice_kwargs(self) -> Dict[str, Any]:
+        """Backend-specific globals still sourced from top-level config (legacy)."""
+        return {
+            "space_id": self.config.get('omnivoice_space_id'),
+            "api_name": self.config.get('omnivoice_api_name'),
+            "lang": self.config.get('omnivoice_lang'),
+            "instruct": self.config.get('omnivoice_instruct', ''),
+            "num_steps": self.config.get('omnivoice_num_steps'),
+            "guidance_scale": self.config.get('omnivoice_guidance_scale'),
+            "denoise": self.config.get('omnivoice_denoise'),
+            "speed": self.config.get('omnivoice_speed'),
+            "duration": self.config.get('omnivoice_duration'),
+            "preprocess_prompt": self.config.get('omnivoice_preprocess_prompt'),
+            "postprocess_output": self.config.get('omnivoice_postprocess_output'),
+        }
+
+    def _build_tts_client(self, profile: VoiceProfile) -> Any:
+        """Create a single TTS client for a normalized profile.
+
+        Voice/style mapping is not attached here — those are per-segment and are
+        threaded into TTSSegmentData at synth time. This function only handles
+        provider construction (system, model, provider-specific bootstrap kwargs).
+        """
+        tts_system = profile.tts_system or self._default_tts_system()
+        model = profile.model or self.config.get('tts_model')
+        fallback_model = profile.fallback_model or self.config.get('tts_fallback_model')
+
+        # Provider-specific bootstrap kwargs. Globals still come from the top-level
+        # config; per-profile `params` override them.
+        bootstrap: Dict[str, Any] = {}
+        if tts_system.lower() == "omnivoice":
+            bootstrap.update(self._global_omnivoice_kwargs())
+        bootstrap.update(profile.params or {})
+
+        return TTSFactory.create_tts(
+            tts_system=tts_system,
+            device=self.device,
+            voice_config=None,  # per-segment via TTSSegmentData
+            voice_prompt=None,  # per-segment via TTSSegmentData
+            prompt_prefix=self.config.get('tts_prompt_prefix'),
+            enable_voice_matching=self.config.get('voice_auto_selection', True),
+            debug_tts=self.config.get('debug_tts', False),
+            model=model,
+            fallback_model=fallback_model,
+            default_reference_audio=self.config.get('reference_audio'),
+            **bootstrap,
+        )
+
     def _initialize_tts_systems(self) -> None:
-        """Initialize TTS systems based on configuration."""
-        self.tts_systems = {}
+        """Instantiate one TTS client per unique (system, model, params) profile."""
+        # Client pool keyed by pool_key. Multiple speakers with identical settings
+        # share the same client.
+        self.tts_clients: Dict[tuple, Any] = {}
+        # Speaker -> pool_key resolution cache.
+        self._speaker_pool_key: Dict[str, tuple] = {}
         self.default_tts = None
-        self.tts_init_error = None
-        
-        try:
-            tts_instance = TTSFactory.create_tts(
-                tts_system=self.config.get('tts_system', 'coqui'),
-                device=self.device,
-                voice_config=self.config.get('voice_name'),
-                voice_prompt=self.config.get('voice_prompt', {}),
-                prompt_prefix=self.config.get('tts_prompt_prefix'),
-                enable_voice_matching=self.config.get('voice_auto_selection', True),
-                debug_tts=self.config.get('debug_tts', False),
-                model=self.config.get('tts_model'),
-                fallback_model=self.config.get('tts_fallback_model'),
-                default_reference_audio=self.config.get('reference_audio'),
-                space_id=self.config.get('omnivoice_space_id'),
-                api_name=self.config.get('omnivoice_api_name'),
-                lang=self.config.get('omnivoice_lang'),
-                instruct=self.config.get('omnivoice_instruct', ''),
-                num_steps=self.config.get('omnivoice_num_steps'),
-                guidance_scale=self.config.get('omnivoice_guidance_scale'),
-                denoise=self.config.get('omnivoice_denoise'),
-                speed=self.config.get('omnivoice_speed'),
-                duration=self.config.get('omnivoice_duration'),
-                preprocess_prompt=self.config.get('omnivoice_preprocess_prompt'),
-                postprocess_output=self.config.get('omnivoice_postprocess_output'),
-            )
-            self.tts_systems[self.config.get('tts_system', 'coqui')] = tts_instance
-            self.default_tts = tts_instance
-            logger.debug(f"Initialized {self.config.get('tts_system', 'coqui')} TTS system")
-        except Exception as e:
-            self.tts_init_error = e
-            logger.warning(f"Failed to initialize TTS: {e}")
+        self.tts_init_error: Optional[Exception] = None
+
+        # Build the effective set of profiles to instantiate: every named profile
+        # plus a fallback (`"*"` or synthesised from global TTS defaults).
+        profiles_to_build: Dict[tuple, VoiceProfile] = {}
+        for speaker, profile in self.voice_profiles.items():
+            resolved = self._resolve_voice_profile(speaker)
+            key = self._profile_pool_key(resolved)
+            profiles_to_build.setdefault(key, resolved)
+            self._speaker_pool_key[speaker] = key
+
+        fallback_profile = self._resolve_voice_profile(FALLBACK_SPEAKER)
+        fallback_key = self._profile_pool_key(fallback_profile)
+        profiles_to_build.setdefault(fallback_key, fallback_profile)
+
+        first_error: Optional[Exception] = None
+        for key, profile in profiles_to_build.items():
+            try:
+                client = self._build_tts_client(profile)
+                self.tts_clients[key] = client
+                logger.debug(
+                    "Initialized TTS client for pool_key=%s (system=%s, model=%s)",
+                    key, profile.tts_system, profile.model,
+                )
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+                logger.warning(
+                    "Failed to initialize TTS client for pool_key=%s (system=%s, model=%s): %s",
+                    key, profile.tts_system, profile.model, exc,
+                )
+
+        if first_error is not None and not self.tts_clients:
+            self.tts_init_error = first_error
+
+        # default_tts is the client for the "*" profile (or first available).
+        if fallback_key in self.tts_clients:
+            self.default_tts = self.tts_clients[fallback_key]
+        elif self.tts_clients:
+            self.default_tts = next(iter(self.tts_clients.values()))
+
+        # Backwards-compat mirror: `self.tts_systems` used to be a dict keyed by
+        # backend name. A few older call sites/tests still touch it, so mirror the
+        # default client under its backend name. New code should use tts_clients.
+        self.tts_systems: Dict[str, Any] = {}
+        if self.default_tts is not None:
+            self.tts_systems[fallback_profile.tts_system or self._default_tts_system()] = self.default_tts
     
     def _initialize_transcriber(self) -> None:
         """Initialize transcriber based on configuration."""
@@ -1175,8 +1284,8 @@ class SmartDubbing:
         segment_cache_path = self.cache_manager.get_cache_path("segment_synthesis")
         base_cache_prefix = self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))
         
-        # Check if any TTS systems are initialized
-        if not self.tts_systems:
+        # Check if any TTS clients are initialized
+        if not self.tts_clients:
             raise ValueError("No TTS systems are initialized properly")
         
         # Import TTSSegmentData for synthesis
@@ -1204,24 +1313,33 @@ class SmartDubbing:
             segment_reference_min_duration = 0.0
         segment_reference_min_duration_ms = max(int(segment_reference_min_duration * 1000), 0)
 
-        # Group segments by TTS system for batch processing
-        segments_by_tts_system = {}
-        segment_to_tts_mapping = {}
-        
+        # Group segments by (pool_key, profile) — profiles that share a pool_key
+        # share the same TTS client and are synthesised together in one batch call.
+        segments_by_pool_key: Dict[tuple, List[Tuple[int, Dict[str, Any]]]] = {}
+        pool_key_profile: Dict[tuple, VoiceProfile] = {}
+        segment_to_pool_key: Dict[int, tuple] = {}
+        pool_key_label: Dict[tuple, str] = {}
+
         for i, segment_dict in enumerate(segments):
             speaker = segment_dict["speaker"]
-            tts_system = self._get_tts_system_for_speaker(speaker)
-            
-            if tts_system not in segments_by_tts_system:
-                segments_by_tts_system[tts_system] = []
-            
-            segments_by_tts_system[tts_system].append((i, segment_dict))
-            segment_to_tts_mapping[i] = tts_system
-        
-        logger.debug(f"Segments grouped by TTS system: {[(tts_sys, len(segs)) for tts_sys, segs in segments_by_tts_system.items()]}")
-        
+            profile = self._resolve_voice_profile(speaker)
+            pool_key = self._profile_pool_key(profile)
+            segments_by_pool_key.setdefault(pool_key, []).append((i, segment_dict))
+            pool_key_profile.setdefault(pool_key, profile)
+            segment_to_pool_key[i] = pool_key
+            pool_key_label.setdefault(
+                pool_key,
+                f"{profile.tts_system or self._default_tts_system()}"
+                + (f":{profile.model}" if profile.model else ""),
+            )
+
+        logger.debug(
+            "Segments grouped by TTS pool: %s",
+            [(pool_key_label[k], len(v)) for k, v in segments_by_pool_key.items()],
+        )
+
         # First pass: Determine the best text version for each segment using estimation
-        segments_to_synthesize_by_tts = {tts_sys: [] for tts_sys in segments_by_tts_system.keys()}
+        segments_to_synthesize_by_pool: Dict[tuple, List[Any]] = {k: [] for k in segments_by_pool_key.keys()}
         segments_metadata = []
         
         # Initialize progress tracking
@@ -1230,47 +1348,48 @@ class SmartDubbing:
         
         logger.info(f"Estimating audio durations to select optimal text versions for {total_segments} segments...")
         
-        for tts_system, segment_list in segments_by_tts_system.items():
-            # Get the shared TTS instance for this system type
-            tts_instance = self.tts_systems.get(tts_system)
+        for pool_key, segment_list in segments_by_pool_key.items():
+            pool_profile = pool_key_profile[pool_key]
+            tts_system = pool_key_label[pool_key]
+            # Get the shared TTS instance for this pool
+            tts_instance = self.tts_clients.get(pool_key)
             if not tts_instance:
-                logger.warning(f"Warning: TTS system {tts_system} not available, using default")
+                logger.warning(f"Warning: TTS client for {tts_system} not available, using default")
                 tts_instance = self.default_tts
-            
+
             logger.debug(f"Processing {len(segment_list)} segments with {tts_system} TTS ...")
-            
+
             for i, segment_dict in segment_list:
-                # Determine speaker for this segment
                 speaker = segment_dict["speaker"]
-                
-                # Get the voice prompt for this speaker if available
-                segment_style_prompt = self.voice_prompt.get(speaker, None)
-                
-                # Get voice name if available (for OpenAI/Gemini TTS)
-                voice_name = None
-                voice_config = self.config.get('voice_name')
-                if isinstance(voice_config, dict):
-                    voice_name = voice_config.get(speaker, next(iter(voice_config.values()), "default"))
-                elif isinstance(voice_config, str):
-                    voice_name = voice_config
-                
+                profile = self._resolve_voice_profile(speaker)
+
+                segment_style_prompt = profile.style_prompt
+
+                voice_name = profile.voice_name
+                if voice_name is None:
+                    # Legacy fallback: bare string voice_name applies to every speaker.
+                    voice_cfg = self.config.get('voice_name')
+                    if isinstance(voice_cfg, str):
+                        voice_name = voice_cfg
+
                 # Store the voice information for debug
                 if self.config.get('debug_info', False):
                     self.debug_data["voices"][i] = {
                         "speaker": speaker,
                         "voice": voice_name,
                         "style_prompt": segment_style_prompt,
-                        "tts_system": tts_system
+                        "tts_system": profile.tts_system or self._default_tts_system(),
+                        "model": profile.model,
                     }
-                
+
                 # Prepare base TTSSegmentData & resolve reference audio/text first
                 tts_segment_data_args = {
                     "speaker": speaker,
                     "text": segment_dict["translation"],
                     "emotion": segment_dict.get("emotion", "Neutral"),
                     "style_prompt": segment_style_prompt,
-                    "reference_audio_path": None,
-                    "reference_text": None,
+                    "reference_audio_path": profile.reference_audio,
+                    "reference_text": profile.reference_text,
                     "voice": voice_name,
                     "speed": 1.0,
                     "target_duration": max(segment_dict["end"] - segment_dict["start"], 0.0),
@@ -1421,7 +1540,7 @@ class SmartDubbing:
                 
                 # Prepare segment for synthesis with chosen text
                 final_segment_data = TTSSegmentData(**{**tts_segment_data_args, "text": best_text, "output_path": current_segment_output_path})
-                segments_to_synthesize_by_tts[tts_system].append(final_segment_data)
+                segments_to_synthesize_by_pool[pool_key].append(final_segment_data)
                 segments_metadata.append({
                     "index": i,
                     "segment_dict": segment_dict,
@@ -1430,19 +1549,20 @@ class SmartDubbing:
                     "chosen_text": best_text,
                     "estimated_ratio": best_ratio,
                     "tts_system": tts_system,
+                    "pool_key": pool_key,
                     "segment_data_args": tts_segment_data_args,
                     "selected_track_type": best_track_type  # Store the selected track type
                 })
-        
-        # Second pass: Batch synthesize all segments by TTS system
-        for tts_system, segments_to_synthesize in segments_to_synthesize_by_tts.items():
+
+        # Second pass: Batch synthesize all segments by pool_key
+        for pool_key, segments_to_synthesize in segments_to_synthesize_by_pool.items():
             if not segments_to_synthesize:
                 continue
-            
-            # Get the shared TTS instance for this system type
-            tts_instance = self.tts_systems.get(tts_system)
+
+            tts_system = pool_key_label[pool_key]
+            tts_instance = self.tts_clients.get(pool_key)
             if not tts_instance:
-                logger.warning(f"Warning: TTS system {tts_system} not available, skipping segments")
+                logger.warning(f"Warning: TTS client for {tts_system} not available, skipping segments")
                 continue
             
             logger.info(f"Synthesizing {len(segments_to_synthesize)} segments with {tts_system} TTS ...")
@@ -1770,23 +1890,26 @@ class SmartDubbing:
         segment_dict = segments[segment_index]
         speaker = segment_dict.get("speaker") or "SPEAKER_00"
 
-        tts_system = self._get_tts_system_for_speaker(speaker)
-        tts_instance = self.tts_systems.get(tts_system) or self.default_tts
+        profile = self._resolve_voice_profile(speaker)
+        pool_key = self._profile_pool_key(profile)
+        tts_instance = self.tts_clients.get(pool_key) or self.default_tts
         if tts_instance is None:
-            raise RuntimeError(f"TTS system '{tts_system}' is not initialised")
+            raise RuntimeError(
+                f"TTS client for '{profile.tts_system or self._default_tts_system()}' is not initialised"
+            )
+        tts_system = profile.tts_system or self._default_tts_system()
 
         text_to_synthesize = (override_text or segment_dict.get("translation") or "").strip()
         if not text_to_synthesize:
             raise ValueError("Cannot resynthesize a segment with empty text")
 
-        voice_name = None
-        voice_config = self.config.get('voice_name')
-        if isinstance(voice_config, dict):
-            voice_name = voice_config.get(speaker, next(iter(voice_config.values()), "default"))
-        elif isinstance(voice_config, str):
-            voice_name = voice_config
+        voice_name = profile.voice_name
+        if voice_name is None:
+            voice_cfg = self.config.get('voice_name')
+            if isinstance(voice_cfg, str):
+                voice_name = voice_cfg
 
-        segment_style_prompt = (self.voice_prompt or {}).get(speaker)
+        segment_style_prompt = profile.style_prompt
 
         self.audio_chunks_dir.mkdir(parents=True, exist_ok=True)
         output_path = str(self.audio_chunks_dir / f"{segment_index}.wav")
@@ -1911,14 +2034,14 @@ class SmartDubbing:
         """Clean up temporary files and TTS systems."""
         logger.info("Cleaning up temporary files...")
         try:
-            # Call cleanup through the TTS systems
-            for tts_system, tts_instance in self.tts_systems.items():
+            # Call cleanup through each TTS client in the pool
+            for pool_key, tts_instance in getattr(self, "tts_clients", {}).items():
                 if tts_instance:
                     try:
                         tts_instance.cleanup()
-                        logger.info(f"Cleaned up {tts_system} TTS system")
+                        logger.info(f"Cleaned up TTS client pool_key={pool_key}")
                     except Exception as cleanup_e:
-                        logger.warning(f"Warning: Error cleaning up {tts_system} TTS: {cleanup_e}")
+                        logger.warning(f"Warning: Error cleaning up TTS client {pool_key}: {cleanup_e}")
             
             # Clean up temporary directories
             for temp_dir in [self.audio_chunks_dir, self.su_audio_chunks_dir]:
@@ -1935,43 +2058,43 @@ class SmartDubbing:
             logger.warning(f"Warning: Error during cleanup: {e}")
     
     def _get_tts_system_for_speaker(self, speaker_id: str) -> str:
+        """Return the TTS backend name a speaker is routed to.
+
+        Preserved for callers/tests that only need the backend name; new code
+        should use :meth:`_resolve_voice_profile` to get the full profile.
         """
-        Get the TTS system to use for a specific speaker.
-        
-        Args:
-            speaker_id: Speaker ID
-            
-        Returns:
-            TTS system name for the speaker
-        """
-        # Check for explicit speaker mapping first
-        if speaker_id in self.tts_system_mapping:
-            return self.tts_system_mapping[speaker_id]
-        
-        # Check for wildcard mapping
-        if "*" in self.tts_system_mapping:
-            return self.tts_system_mapping["*"]
-        
-        # Fall back to default TTS system
-        return self.config.get('tts_system', 'coqui')
+        return self._resolve_voice_profile(speaker_id).tts_system or self._default_tts_system()
 
     def _apply_configured_reference_mapping(self, tts_segment_data_args: Dict[str, Any], speaker: str) -> Dict[str, Any]:
-        """Apply manual per-speaker reference settings with priority over auto-generated references."""
-        audio_mapping = getattr(self, "reference_audio_mapping", None)
-        if audio_mapping is None:
-            audio_mapping = self.config.get("reference_audio_mapping") or {}
+        """Apply manual per-speaker reference settings with priority over auto-generated references.
 
-        text_mapping = getattr(self, "reference_text_mapping", None)
-        if text_mapping is None:
-            text_mapping = self.config.get("reference_text_mapping") or {}
+        Prefers the unified VoiceProfile; falls back to legacy per-speaker mappings on
+        the config or the SmartDubbing instance itself (older tests set those directly).
+        """
+        profile = None
+        profiles = getattr(self, "voice_profiles", None)
+        if isinstance(profiles, dict) and profiles:
+            profile = resolve_profile(profiles, speaker)
 
-        reference_audio_path = audio_mapping.get(speaker)
-        if reference_audio_path:
-            tts_segment_data_args["reference_audio_path"] = reference_audio_path
+        if profile and profile.reference_audio:
+            tts_segment_data_args["reference_audio_path"] = profile.reference_audio
+        else:
+            audio_mapping = getattr(self, "reference_audio_mapping", None)
+            if audio_mapping is None:
+                audio_mapping = self.config.get("reference_audio_mapping") or {}
+            reference_audio_path = audio_mapping.get(speaker)
+            if reference_audio_path:
+                tts_segment_data_args["reference_audio_path"] = reference_audio_path
 
-        reference_text = text_mapping.get(speaker)
-        if reference_text:
-            tts_segment_data_args["reference_text"] = reference_text
+        if profile and profile.reference_text:
+            tts_segment_data_args["reference_text"] = profile.reference_text
+        else:
+            text_mapping = getattr(self, "reference_text_mapping", None)
+            if text_mapping is None:
+                text_mapping = self.config.get("reference_text_mapping") or {}
+            reference_text = text_mapping.get(speaker)
+            if reference_text:
+                tts_segment_data_args["reference_text"] = reference_text
 
         return tts_segment_data_args
 

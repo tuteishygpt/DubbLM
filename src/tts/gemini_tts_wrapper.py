@@ -437,10 +437,17 @@ class GeminiAPIClient:
                 
                 if response and response.candidates and response.candidates[0].content:
                     for part in response.candidates[0].content.parts:
-                        if (hasattr(part, 'inline_data') and 
-                            part.inline_data.mime_type == "audio/L16;codec=pcm;rate=24000"):
-                            return part.inline_data.data
-                
+                        inline = getattr(part, "inline_data", None)
+                        if inline is None or not inline.data:
+                            continue
+                        mime = (inline.mime_type or "").lower().replace(" ", "")
+                        # Accept any 16-bit little-endian PCM at 24 kHz — different
+                        # Gemini TTS model IDs emit slightly different mime strings
+                        # ("audio/L16;codec=pcm;rate=24000" for 2.5-*-tts,
+                        #  "audio/l16;rate=24000;channels=1" for 3.1-flash-tts-preview).
+                        if "audio/l16" in mime and "rate=24000" in mime:
+                            return inline.data
+
                 logger.warning(f"Attempt {attempt + 1}/{self.config.max_retries}: No audio data in response for text: {content[:30]}...")
                 if attempt + 1 >= self.config.max_retries:
                     logger.error(f"Gemini API call failed after {self.config.max_retries} attempts.")

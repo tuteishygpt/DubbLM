@@ -62,6 +62,7 @@ SETTINGS_FIELDS = [
     "voice_auto_selection",
     "reference_audio",
     "reference_text",
+    "voices",
     "speaker_reference_rows",
     "tts_system_mapping",
     "tts_prompt_prefix",
@@ -86,6 +87,7 @@ ALL_FIELDS = WORKFLOW_FIELDS + SETTINGS_FIELDS
 NON_PERSISTED_FIELDS = {"input", "output", "config", "run_step", "generate_speaker_report"}
 PERSISTED_FIELDS = [field for field in ALL_FIELDS if field not in NON_PERSISTED_FIELDS]
 JSON_TEXT_FIELDS = {"glossary", "voice_prompt", "tts_system_mapping"}
+YAML_TEXT_FIELDS = {"voices"}
 LIST_TEXT_FIELDS = {"keep_original_audio_ranges"}
 SPEAKER_REFERENCE_FIELD = "speaker_reference_rows"
 SPEAKER_REFERENCE_HEADERS = ["Speaker ID", "Reference audio path", "Reference text"]
@@ -606,6 +608,13 @@ def load_ui_defaults(config_path: str = DEFAULT_CONFIG_PATH) -> dict[str, object
         if value is not None:
             defaults[field] = json.dumps(value, ensure_ascii=False, indent=2)
 
+    for field in YAML_TEXT_FIELDS:
+        value = defaults.get(field)
+        if isinstance(value, dict) and value:
+            defaults[field] = yaml.safe_dump(value, sort_keys=False, allow_unicode=True)
+        else:
+            defaults[field] = ""
+
     for field in LIST_TEXT_FIELDS:
         value = defaults.get(field)
         if isinstance(value, list):
@@ -659,6 +668,9 @@ def save_settings(
 
         if isinstance(value, str) and field in JSON_TEXT_FIELDS:
             value = json.loads(value)
+        elif isinstance(value, str) and field in YAML_TEXT_FIELDS:
+            parsed = yaml.safe_load(value)
+            value = parsed if isinstance(parsed, dict) else None
         elif isinstance(value, str) and field in LIST_TEXT_FIELDS:
             value = [line.strip() for line in value.splitlines() if line.strip()]
 
@@ -1227,11 +1239,17 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                 )
 
                 gr.Markdown("## TTS")
+                gr.Markdown(
+                    "Per-speaker profiles live under `voices:` below. The `TTS system` / "
+                    "`TTS model` / `Voice name` fields set the **defaults** used when a profile "
+                    "doesn't specify its own — think of them as the `*` fallback."
+                )
                 with gr.Row():
                     tts_system = gr.Dropdown(
                         label="TTS system",
                         choices=["coqui", "xtts", "openai", "f5_tts", "gemini", "bextts", "omnivoice"],
                         value=defaults.get("tts_system", "coqui"),
+                        info="Default backend used when a voice profile doesn't set one.",
                     )
                     tts_model = gr.Textbox(label="TTS model", value=defaults.get("tts_model"))
                     tts_fallback_model = gr.Textbox(label="Fallback TTS model", value=defaults.get("tts_fallback_model"))
@@ -1292,19 +1310,51 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         value=defaults.get("segment_reference_min_duration", 2.0),
                         precision=2,
                     )
-                tts_system_mapping = gr.Textbox(
-                    label="TTS system mapping JSON",
-                    lines=4,
-                    placeholder='{"SPEAKER_00": "gemini"}',
-                    value=defaults.get("tts_system_mapping"),
+                voices = gr.Textbox(
+                    label="Voices (YAML) — per-speaker TTS profiles",
+                    lines=14,
+                    placeholder=(
+                        "SPEAKER_00:\n"
+                        "  tts_system: gemini\n"
+                        "  model: gemini-2.5-flash-preview-tts\n"
+                        "  voice_name: Kore\n"
+                        "  style_prompt: calm, friendly\n"
+                        "SPEAKER_01:\n"
+                        "  tts_system: omnivoice\n"
+                        "  reference_audio: D:/path/to/reference.wav\n"
+                        "  reference_text: sample text\n"
+                        "  params:\n"
+                        "    num_steps: 32\n"
+                        '"*":\n'
+                        "  tts_system: omnivoice\n"
+                    ),
+                    info=(
+                        "Each key is a diarization speaker ID (SPEAKER_00, SPEAKER_01, …). "
+                        "Use `\"*\"` for the fallback profile applied to any speaker not listed. "
+                        "Fields not set here inherit from the defaults above. Provider-specific knobs "
+                        "go under `params:` (or directly at the top level of the profile — unknown "
+                        "keys fall through to params)."
+                    ),
+                    value=defaults.get("voices") or "",
                 )
+                with gr.Accordion("Legacy per-speaker fields (deprecated)", open=False):
+                    gr.Markdown(
+                        "These fields are folded into `voices` automatically on load. Editing them "
+                        "still works but new configs should use the `voices` block above."
+                    )
+                    tts_system_mapping = gr.Textbox(
+                        label="TTS system mapping JSON",
+                        lines=4,
+                        placeholder='{"SPEAKER_00": "gemini"}',
+                        value=defaults.get("tts_system_mapping"),
+                    )
+                    voice_prompt = gr.Textbox(
+                        label="Voice prompt JSON",
+                        lines=4,
+                        placeholder='{"SPEAKER_00": "calm, friendly"}',
+                        value=defaults.get("voice_prompt"),
+                    )
                 tts_prompt_prefix = gr.Textbox(label="TTS prompt prefix", lines=3, value=defaults.get("tts_prompt_prefix"))
-                voice_prompt = gr.Textbox(
-                    label="Voice prompt JSON",
-                    lines=4,
-                    placeholder='{"SPEAKER_00": "calm, friendly"}',
-                    value=defaults.get("voice_prompt"),
-                )
 
                 gr.Markdown("## Video / Audio")
                 with gr.Row():
@@ -1382,6 +1432,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         voice_auto_selection,
                         reference_audio,
                         reference_text,
+                        voices,
                         speaker_reference_rows,
                         tts_system_mapping,
                         tts_prompt_prefix,

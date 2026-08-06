@@ -84,6 +84,7 @@ class DubbingConfig:
             'output': None, 
             'keep_original_audio_ranges': None,
             'tts_system_mapping': None,
+            'voices': None,
             'tts_prompt_prefix': None,
             'remove_pauses': False,
             'min_pause_duration': 3,
@@ -279,6 +280,28 @@ class DubbingConfig:
 
         _parse_mapping_parameter('reference_audio_mapping')
         _parse_mapping_parameter('reference_text_mapping')
+
+        # Consolidate per-speaker fields (legacy mappings + new `voices` block)
+        # into a single dict[str, VoiceProfile].
+        raw_voices = self.config.get('voices')
+        if isinstance(raw_voices, str):
+            try:
+                parsed_voices = json.loads(raw_voices)
+                if isinstance(parsed_voices, dict):
+                    self.config['voices'] = parsed_voices
+                else:
+                    logger.warning(
+                        "Warning: 'voices' must decode to a JSON object. Ignoring."
+                    )
+                    self.config['voices'] = None
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    f"Warning: Could not parse voices JSON '{raw_voices}': {e}. Ignoring."
+                )
+                self.config['voices'] = None
+
+        from .voice_profiles import normalize_voices
+        self.config['voices'] = normalize_voices(self.config)
 
         # Clamp group_overflow_tolerance to [0.0, 1.0]
         tol = self.config.get('group_overflow_tolerance')
