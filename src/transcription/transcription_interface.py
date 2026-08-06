@@ -35,7 +35,30 @@ class TranscriptionInterface(ABC):
     def name(self) -> str:
         """Return the name of the transcription service implementation."""
         pass
-    
+
+    @property
+    def cache_step_name(self) -> str:
+        """Cache-step slug this transcriber writes to.
+
+        Used by resume modes (`translate_only`) to check whether a previous
+        `transcribe_only` / full run left cached diarization+transcription for
+        this input without re-running the transcriber.
+        Subclasses override with the same string they pass to
+        ``cache_manager.save_to_cache`` inside ``diarize_and_transcribe``.
+        """
+        return ""
+
+    def default_cache_key(self, audio_file: str) -> Optional[str]:
+        """Cache key this transcriber would use if called without an explicit key.
+
+        Mirrors the same salt (model, options) each backend's
+        ``diarize_and_transcribe`` adds when its caller passes ``cache_key=None``.
+        Overridden by concrete implementations; returning ``None`` means the
+        transcriber does not support cache-only lookup and callers should not
+        try.
+        """
+        return None
+
     @abstractmethod
     def diarize_and_transcribe(
         self,

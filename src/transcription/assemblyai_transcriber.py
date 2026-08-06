@@ -76,6 +76,13 @@ class AssemblyAITranscriber(BaseTranscriber):
     def name(self) -> str:
         """Return the name of the transcription service implementation."""
         return "AssemblyAI"
+
+    @property
+    def cache_step_name(self) -> str:
+        return "assemblyai_diarization_transcription"
+
+    def default_cache_key(self, audio_file: str) -> str:
+        return self._generate_cache_key(audio_file, f"_{self.speech_model}")
     
     def _convert_to_mp3(self, audio_file: str) -> str:
         """

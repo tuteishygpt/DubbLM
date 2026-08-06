@@ -64,6 +64,16 @@ class GeminiTranscriber(BaseTranscriber):
     def name(self) -> str:
         return "Gemini"
 
+    @property
+    def cache_step_name(self) -> str:
+        return "gemini_diarization_transcription"
+
+    def default_cache_key(self, audio_file: str) -> str:
+        return self._generate_cache_key(
+            audio_file,
+            f"_{self.gemini_transcription_model}_{TIMESTAMP_PRECISION_CACHE_VERSION}",
+        )
+
     def diarize_and_transcribe(
         self,
         audio_file: str,

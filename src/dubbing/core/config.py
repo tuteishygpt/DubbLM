@@ -412,7 +412,7 @@ class DubbingConfig:
                                   Example: --run_step full_pipeline (Normal end-to-end run). \
                                   Example: --run_step from_scratch (Clear cached artifacts and rerun the entire pipeline from zero). \
                                   Example: --run_step transcribe_only (Diarize and transcribe only; save original subtitles if requested and exit). \
-                                  Example: --run_step translate_only (Diarize + transcribe + translate only; save subtitles if requested and exit). \
+                                  Example: --run_step translate_only (Reuse cached diarization+transcription from a previous transcribe_only or full run, then translate; save subtitles if requested and exit. Fails if no cached transcription exists.). \
                                   Example: --run_step combine_video (Assumes audio/output.wav and potentially audio/background.wav exist from prior steps). \
                                   Example: --run_step tts_to_end (Assumes cached translation artifacts from a previous full run in the same project directory, then regenerates TTS and finishes the video). \
                                   Note: For most users, running the full pipeline or using --generate_speaker_report is recommended.')

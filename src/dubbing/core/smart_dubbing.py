@@ -735,22 +735,31 @@ class SmartDubbing:
         save_original_subtitles: bool = False,
         save_translated_subtitles: bool = False,
     ) -> str:
-        """Run diarization + transcription + translation only; then exit.
+        """Reuse cached diarization+transcription, then translate; then exit.
 
-        Cached artifacts for this input are wiped first so both the
-        transcription and translation steps run against fresh data. Fresh
-        results are still persisted so a follow-up `tts_to_end` can pick
-        them up.
+        Unlike ``run_transcribe_only`` / ``run_from_scratch``, this step
+        **requires** a previous ``transcribe_only`` (or full-pipeline) run to
+        have left a cached transcription for this input in the same project
+        directory. It never re-runs the transcriber — running it again in
+        ``translate_only`` would be a waste of AssemblyAI / Deepgram / Gemini
+        API credits and would break the promise of the resume mode.
+
+        Only the translation step runs afresh (so re-translating with new
+        prompts / glossary is cheap). Fresh translation results are still
+        persisted so a follow-up ``tts_to_end`` can pick them up.
 
         Returns the path to the saved translated subtitles when requested,
         otherwise the transcription file path.
+
+        Raises:
+            FileNotFoundError: if no cached diarization+transcription exists
+                for this input.
         """
-        logger.info("Running translation-only step")
+        logger.info("Running translation-only step (reusing cached transcription)")
         self.performance_tracker.start_timing("total")
-        self._reset_input_cache("run_step=translate_only")
         try:
             audio_file, _, _ = self._prepare_audio_inputs()
-            speakers_rolls, transcription = self.diarize_and_transcribe(audio_file)
+            speakers_rolls, transcription = self._load_cached_diarize_and_transcribe(audio_file)
             if speakers_rolls is None or len(speakers_rolls) == 0:
                 raise ValueError("No speakers found in the video")
 
@@ -1060,6 +1069,66 @@ class SmartDubbing:
         
         return report_file_path, samples_dir_path
     
+    def _load_cached_diarize_and_transcribe(
+        self, audio_file: str
+    ) -> Tuple[Dict[Tuple[float, float], str], List[Dict]]:
+        """Return a cached diarize+transcribe result or raise a clear error.
+
+        Used by ``run_translate_only`` to guarantee we never re-run the
+        transcriber during a resume step. If the configured transcriber
+        cannot advertise a ``cache_step_name`` (e.g. legacy pyannote_openai
+        with its multi-step cache layout), fall back to a normal
+        ``diarize_and_transcribe`` call — it will still hit its own cache
+        internally, but we can't statically verify presence here.
+        """
+        transcriber = self._require_transcriber()
+        step_name = (getattr(transcriber, "cache_step_name", "") or "").strip()
+
+        # We can't reuse SmartDubbing.diarize_and_transcribe's cache_key helper
+        # because each transcriber composes its own cache key with backend-
+        # specific salt (speech_model, deepgram utterance_split, gemini model,
+        # …). Delegate the cache read to the transcriber itself.
+        if not step_name:
+            logger.warning(
+                "Transcriber %s does not advertise a cache_step_name; falling back "
+                "to a normal diarize_and_transcribe call (its own cache is still consulted).",
+                transcriber.name,
+            )
+            speakers_rolls, transcription = transcriber.diarize_and_transcribe(
+                audio_file=audio_file,
+                cache_key=None,
+                use_cache=True,
+            )
+            self.debug_data["diarization"] = speakers_rolls
+            self.debug_data["transcription"] = transcription
+            self._save_transcription_file(transcription)
+            return speakers_rolls, transcription
+
+        # Ask the transcriber to build its own cache key, then check presence
+        # BEFORE calling diarize_and_transcribe. This way translate_only fails
+        # loudly instead of silently kicking off a full transcription pass.
+        cache_key_fn = getattr(transcriber, "default_cache_key", None)
+        cache_key = cache_key_fn(audio_file) if callable(cache_key_fn) else None
+
+        if cache_key is None or not self.cache_manager.cache_exists(step_name, cache_key):
+            raise FileNotFoundError(
+                f"run_step=translate_only requires cached diarization+transcription "
+                f"from a previous transcribe_only or full pipeline run in the same "
+                f"project directory, but no cache entry was found for step "
+                f"'{step_name}'. Run --run_step transcribe_only (or the full pipeline) "
+                f"first."
+            )
+
+        speakers_rolls, transcription = transcriber.diarize_and_transcribe(
+            audio_file=audio_file,
+            cache_key=cache_key,
+            use_cache=True,
+        )
+        self.debug_data["diarization"] = speakers_rolls
+        self.debug_data["transcription"] = transcription
+        self._save_transcription_file(transcription)
+        return speakers_rolls, transcription
+
     def diarize_and_transcribe(self, audio_file: str) -> Tuple[Dict[Tuple[float, float], str], List[Dict]]:
         """Perform speaker diarization and transcription."""
         transcriber = self._require_transcriber()

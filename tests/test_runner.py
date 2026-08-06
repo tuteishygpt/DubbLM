@@ -999,6 +999,84 @@ def test_run_from_tts_uses_cached_translation_and_creates_video(tmp_path, monkey
     assert dubber.cache_manager.use_cache is True
 
 
+def test_run_translate_only_requires_cached_transcription(tmp_path, monkeypatch):
+    """translate_only is a resume step: it must fail rather than silently
+    re-run the transcriber when the transcription cache is missing.
+
+    Regression guard for the previous behaviour where translate_only wiped the
+    cache and re-ran diarize+transcribe from scratch, burning API credits.
+    """
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"video")
+    _patch_projects_root(monkeypatch, tmp_path)
+    config = build_config_from_overrides(
+        {
+            "config": "",
+            "input": str(video_path),
+            "source_language": "en",
+            "target_language": "be",
+        }
+    )
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = config
+    dubber.debug_data = {"diarization": None, "transcription": None}
+    dubber.muted_speakers = set()
+    dubber.pause_adjustments = []
+
+    class PerfStub:
+        def start_timing(self, *_args, **_kwargs):
+            return None
+
+        def end_timing(self, *_args, **_kwargs):
+            return 0.0
+
+        def record_metric(self, *_args, **_kwargs):
+            return None
+
+    class AudioProcessorStub:
+        def extract_audio(self, *_args, **_kwargs):
+            return str(tmp_path / "source.wav")
+
+    class CacheStub:
+        use_cache = True
+
+        def cache_exists(self, step_name, cache_key):
+            return False
+
+    class TranscriberStub:
+        name = "AssemblyAI"
+        cache_step_name = "assemblyai_diarization_transcription"
+
+        def __init__(self):
+            self.called = False
+
+        def default_cache_key(self, _audio_file):
+            return "cache-key"
+
+        def diarize_and_transcribe(self, *_args, **_kwargs):
+            self.called = True
+            raise AssertionError("translate_only must not re-run the transcriber")
+
+    stub_transcriber = TranscriberStub()
+    dubber.performance_tracker = PerfStub()
+    dubber.audio_processor = AudioProcessorStub()
+    dubber.cache_manager = CacheStub()
+    dubber.transcriber = stub_transcriber
+    dubber.transcriber_init_error = None
+    dubber._cleanup = lambda: None
+
+    raised = False
+    try:
+        dubber.run_translate_only()
+    except FileNotFoundError as exc:
+        raised = True
+        assert "translate_only" in str(exc)
+        assert "transcribe_only" in str(exc)
+    assert raised, "Expected FileNotFoundError when transcription cache is missing"
+    assert stub_transcriber.called is False
+
+
 def test_run_from_tts_requires_cached_translation(tmp_path, monkeypatch):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")

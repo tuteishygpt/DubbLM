@@ -59,6 +59,16 @@ class DeepgramTranscriber(BaseTranscriber):
     def name(self) -> str:
         return "Deepgram"
 
+    @property
+    def cache_step_name(self) -> str:
+        return "deepgram_diarization_transcription"
+
+    def default_cache_key(self, audio_file: str) -> str:
+        return self._generate_cache_key(
+            audio_file,
+            f"_{self.model}_{self.utterance_split}_{DEEPGRAM_CACHE_VERSION}",
+        )
+
     def diarize_and_transcribe(
         self,
         audio_file: str,

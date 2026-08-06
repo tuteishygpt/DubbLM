@@ -54,6 +54,13 @@ class WhisperXTranscriber(BaseTranscriber):
     def name(self) -> str:
         """Return the name of the transcription service implementation."""
         return "WhisperX"
+
+    @property
+    def cache_step_name(self) -> str:
+        return "whisperx_diarization_transcription"
+
+    def default_cache_key(self, audio_file: str) -> str:
+        return self._generate_cache_key(audio_file, f"_{self.whisperx_model}")
     
     def diarize_and_transcribe(
         self,
