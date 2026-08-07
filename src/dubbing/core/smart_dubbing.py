@@ -1830,6 +1830,9 @@ class SmartDubbing:
                     
                     # Check if file was created successfully
                     if os.path.exists(output_path):
+                        # Trim tail silence before measuring duration so the
+                        # comfort-ratio check sees the real speech length.
+                        self._trim_trailing_silence(output_path)
                         audio_info = AudioSegment.from_file(output_path)
                         segment_dict['synthesized_speech_len'] = len(audio_info) / 1000.0
                         segment_dict['synthesized_speech_file'] = output_path
@@ -1909,6 +1912,7 @@ class SmartDubbing:
                         )
                         
                         if os.path.exists(output_path):
+                            self._trim_trailing_silence(output_path)
                             audio_info = AudioSegment.from_file(output_path)
                             segment_dict['synthesized_speech_len'] = len(audio_info) / 1000.0
                             segment_dict['synthesized_speech_file'] = output_path
@@ -2078,6 +2082,7 @@ class SmartDubbing:
                     continue
 
                 if os.path.exists(output_path):
+                    self._trim_trailing_silence(output_path)
                     try:
                         audio_info = AudioSegment.from_file(output_path)
                     except Exception as exc:
@@ -2232,6 +2237,7 @@ class SmartDubbing:
                 continue
 
             if os.path.exists(output_path):
+                self._trim_trailing_silence(output_path)
                 try:
                     audio_info = AudioSegment.from_file(output_path)
                 except Exception as exc:
@@ -2389,6 +2395,59 @@ class SmartDubbing:
 
         return tts_segment_data_args, original_audio_segment
     
+    @staticmethod
+    def _trim_trailing_silence(
+        audio_path: str,
+        silence_threshold_db: float = -40.0,
+        keep_tail_ms: int = 100,
+        window_ms: int = 10,
+    ) -> None:
+        """Trim silence at the end of a synthesized WAV in place.
+
+        Applied to every TTS backend right after the segment file is
+        written and before ``synthesized_speech_len`` is computed.
+        Without this, tail silence from the TTS is counted as speech,
+        which:
+          - makes ``ratio = original / actual`` look closer to 1 than
+            it really is, so the comfort-zone check skips alternative-
+            text resynthesis;
+          - leaves the group-level ``atempo`` stretching a hunk of
+            silence, producing the "audio ends early, then a pause"
+            artefact in the final track.
+        """
+        if not audio_path or not os.path.exists(audio_path):
+            return
+        try:
+            seg = AudioSegment.from_file(audio_path)
+        except Exception as exc:
+            logger.debug(f"Trailing silence trim skipped for {audio_path}: {exc}")
+            return
+        total_ms = len(seg)
+        if total_ms == 0:
+            return
+        last_active_end_ms = 0
+        for start in range(0, total_ms, window_ms):
+            window = seg[start:start + window_ms]
+            level = window.dBFS
+            if level == float('-inf'):
+                continue
+            if level > silence_threshold_db:
+                last_active_end_ms = start + window_ms
+        if last_active_end_ms == 0:
+            return
+        end_ms = min(total_ms, last_active_end_ms + keep_tail_ms)
+        if total_ms - end_ms < window_ms:
+            return
+        try:
+            seg[:end_ms].export(audio_path, format="wav")
+        except Exception as exc:
+            logger.debug(f"Trailing silence trim export failed for {audio_path}: {exc}")
+            return
+        logger.debug(
+            f"Trimmed {total_ms - end_ms}ms trailing silence from {audio_path} "
+            f"(kept {end_ms}ms of {total_ms}ms)"
+        )
+
     def _calculate_percentage_deviation(self, ratio: float, min_ratio_comfort: float, max_ratio_comfort: float) -> float:
         """
         Calculates the signed percentage deviation of a given ratio from the comfort zone.
@@ -2507,6 +2566,7 @@ class SmartDubbing:
                 if not os.path.exists(temp_output_path):
                     continue
 
+                self._trim_trailing_silence(temp_output_path)
                 audio_info = AudioSegment.from_file(temp_output_path)
                 actual_duration = len(audio_info) / 1000.0
 
@@ -2515,7 +2575,7 @@ class SmartDubbing:
                     continue
 
                 ratio = original_duration / actual_duration
-                
+
                 # Calculate deviation from target range
                 deviation_from_range = self._calculate_percentage_deviation(ratio, min_ratio, max_ratio)
                 
@@ -2579,6 +2639,7 @@ class SmartDubbing:
                             )
 
                             if os.path.exists(temp_output_path):
+                                self._trim_trailing_silence(temp_output_path)
                                 audio_info = AudioSegment.from_file(temp_output_path)
                                 actual_duration_llm = len(audio_info) / 1000.0
                                 if actual_duration_llm > 0:
@@ -2814,14 +2875,27 @@ class SmartDubbing:
                             for segment in group:
                                 self.debug_data.setdefault("speed_ratios", {})[segments.index(segment)] = ratio_clamped
                         
-                        # Apply tempo filter
+                        # Apply tempo filter — pass argv as a list so paths
+                        # with spaces (e.g. "prj/My Video/artifacts/...") do
+                        # not break the shell split and silently skip the
+                        # tempo adjustment, which would otherwise leave the
+                        # group short and pad the tail with silence.
                         tempo = 1.0 / ratio_clamped
-                        cmd = f"ffmpeg -y -i {tmp_in} -filter:a atempo={tempo} -vn {tmp_out}"
-                        result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        cmd = [
+                            "ffmpeg", "-y",
+                            "-i", tmp_in,
+                            "-filter:a", f"atempo={tempo}",
+                            "-vn", tmp_out,
+                        ]
+                        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         if result.returncode == 0:
                             adjusted_group_audio = AudioSegment.from_file(tmp_out)
                         else:
-                            logger.warning(f"Warning: Speed adjustment failed for group {speaker}_{group_idx}")
+                            stderr_tail = (result.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()[-3:]
+                            logger.warning(
+                                f"Warning: Speed adjustment failed for group {speaker}_{group_idx}: "
+                                + " | ".join(stderr_tail)
+                            )
                     except Exception as exc:
                         logger.warning(f"Warning: Speed adjustment failed for group {speaker}_{group_idx}: {exc}")
                 

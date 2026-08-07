@@ -129,6 +129,7 @@ class AudioFileUtils:
             return None
 
 
+
 class AudioValidator:
     """Validates the quality of generated audio samples."""
     
@@ -1096,7 +1097,7 @@ class GeminiTTSWrapper(TTSInterface):
 
         # Try with original model
         success, primary_silence, primary_best_path = self._attempt_segment_synthesis(
-            segment_data, temp_output_path, language, max_retries_per_model, max_silence_ratio=0.01
+            segment_data, temp_output_path, language, max_retries_per_model, max_silence_ratio=0.04
         )
 
         if success:
