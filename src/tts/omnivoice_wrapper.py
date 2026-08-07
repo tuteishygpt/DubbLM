@@ -74,7 +74,7 @@ class OmniVoiceWrapper(TTSInterface):
         debug_tts: bool = False,
         lang: Optional[str] = None,
         instruct: str = "",
-        num_steps: int = 32,
+        num_steps: int = 64,
         guidance_scale: float = 2.0,
         denoise: bool = True,
         speed: float = 1.0,

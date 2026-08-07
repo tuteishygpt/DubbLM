@@ -46,7 +46,7 @@ class DubbingConfig:
             'omnivoice_api_name': '/_clone_fn',
             'omnivoice_lang': None,
             'omnivoice_instruct': '',
-            'omnivoice_num_steps': 32,
+            'omnivoice_num_steps': 64,
             'omnivoice_guidance_scale': 2.0,
             'omnivoice_denoise': True,
             'omnivoice_speed': 1.0,
