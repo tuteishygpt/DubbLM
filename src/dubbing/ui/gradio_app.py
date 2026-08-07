@@ -36,6 +36,12 @@ WORKFLOW_FIELDS = [
     "keep_background",
     "include_original_audio",
     "remove_pauses",
+    # Isolated per-speaker tracks — UI-only intermediate fields. Combined
+    # into ``isolated_tracks`` (dict) inside ``_collect_overrides``. Not
+    # persisted; the file list changes per run.
+    "isolated_tracks_files",
+    "isolated_tracks_labels",
+    "inner_transcription_system",
 ]
 
 SETTINGS_FIELDS = [
@@ -84,7 +90,15 @@ SETTINGS_FIELDS = [
 ]
 
 ALL_FIELDS = WORKFLOW_FIELDS + SETTINGS_FIELDS
-NON_PERSISTED_FIELDS = {"input", "output", "config", "run_step", "generate_speaker_report"}
+NON_PERSISTED_FIELDS = {
+    "input",
+    "output",
+    "config",
+    "run_step",
+    "generate_speaker_report",
+    "isolated_tracks_files",
+    "isolated_tracks_labels",
+}
 PERSISTED_FIELDS = [field for field in ALL_FIELDS if field not in NON_PERSISTED_FIELDS]
 JSON_TEXT_FIELDS = {"glossary", "voice_prompt", "tts_system_mapping"}
 YAML_TEXT_FIELDS = {"voices"}
@@ -702,6 +716,54 @@ def save_settings(
 def _collect_overrides(*values) -> dict[str, object]:
     overrides = dict(zip(ALL_FIELDS, values))
     overrides = _expand_speaker_reference_rows(overrides)
+    overrides = _expand_isolated_tracks(overrides)
+    return overrides
+
+
+def _expand_isolated_tracks(overrides: dict[str, object]) -> dict[str, object]:
+    """Fold the two UI-only inputs (multi-file upload + comma-separated labels)
+    into the single ``isolated_tracks`` mapping the pipeline expects.
+
+    The `inner_transcription_system` value stays as-is (it's a regular config
+    key). UI-only fields are removed so they don't reach ``DubbingConfig``.
+    """
+    files = overrides.pop("isolated_tracks_files", None)
+    labels_raw = overrides.pop("isolated_tracks_labels", None)
+
+    if not files:
+        # Nothing uploaded — leave `isolated_tracks` alone (falls back to
+        # whatever YAML or previous state provided).
+        return overrides
+
+    # `files` is a list from gr.File(file_count="multiple"); paths are
+    # tempfile._TemporaryFileWrapper-like objects or plain strings.
+    file_paths: list[str] = []
+    for item in files:
+        if isinstance(item, str):
+            file_paths.append(item)
+        elif hasattr(item, "name"):
+            file_paths.append(str(item.name))
+        else:
+            file_paths.append(str(item))
+
+    labels: list[str]
+    if isinstance(labels_raw, str) and labels_raw.strip():
+        labels = [label.strip() for label in labels_raw.split(",") if label.strip()]
+    else:
+        labels = []
+
+    if not labels:
+        # Fall back to file stem so the mapping is still useful.
+        labels = [Path(p).stem for p in file_paths]
+
+    if len(labels) != len(file_paths):
+        raise ValueError(
+            f"Isolated tracks: got {len(file_paths)} files but "
+            f"{len(labels)} speaker labels. Provide one label per file, "
+            f"comma-separated, in the same order."
+        )
+
+    overrides["isolated_tracks"] = dict(zip(labels, file_paths))
     return overrides
 
 
@@ -1144,6 +1206,33 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         value=bool(defaults.get("remove_pauses", False)),
                     )
 
+                gr.Markdown("### Isolated speaker tracks (optional)")
+                gr.Markdown(
+                    "Upload one clean audio file per speaker to bypass automatic "
+                    "diarization. Speaker labels below (comma-separated, in the "
+                    "same order as files) must match the keys used in your "
+                    "`voices:` mapping. Leave empty for the standard pipeline.\n\n"
+                    "**Tip:** to upload several files at once, hold **Ctrl** "
+                    "(or **Shift**) in the file picker and select them all, "
+                    "or drag multiple files together onto the upload area."
+                )
+                with gr.Row():
+                    isolated_tracks_files = gr.File(
+                        label="Isolated per-speaker audio files",
+                        file_count="multiple",
+                        type="filepath",
+                    )
+                    isolated_tracks_labels = gr.Textbox(
+                        label="Speaker labels (comma-separated)",
+                        placeholder="SPEAKER_00, SPEAKER_01",
+                    )
+                    inner_transcription_system = gr.Dropdown(
+                        label="Inner transcription (per track)",
+                        choices=["deepgram", "assemblyai", "gemini"],
+                        value=defaults.get("inner_transcription_system", "deepgram"),
+                        info="Backend applied to each isolated track. Only used when files are uploaded above.",
+                    )
+
                 input_components.extend(
                     [
                         input_file,
@@ -1158,6 +1247,9 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         keep_background,
                         include_original_audio,
                         remove_pauses,
+                        isolated_tracks_files,
+                        isolated_tracks_labels,
+                        inner_transcription_system,
                     ]
                 )
 

@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import threading
 import traceback
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -18,12 +19,18 @@ from .log_config import setup_logging, NoisyPrefixFilter
 
 LOGGER = logging.getLogger(__name__)
 
+# Global lock: prevents two pipeline jobs from running concurrently.
+# Concurrent runs share audio_chunks_dir and other project-level paths,
+# which causes race conditions and wasted API quota.
+_PIPELINE_LOCK = threading.Lock()
+
 _JSON_FIELDS = {
     "glossary",
     "tts_system_mapping",
     "voice_prompt",
     "reference_audio_mapping",
     "reference_text_mapping",
+    "isolated_tracks",
 }
 # `voices` supports both YAML and JSON (JSON is a subset of YAML), so we parse it
 # with yaml.safe_load. Kept separate from _JSON_FIELDS to signal the format switch.
@@ -159,9 +166,6 @@ def run_dubbing_job_streaming(
     The final tuple carries the full :class:`DubbingJobResult` as a third
     element so the UI wrapper can pick up ``output_file`` / ``report_file``.
     """
-    import threading
-    import time
-
     result_container: dict[str, Any] = {"result": None}
     log_stream = io.StringIO()
 
@@ -199,7 +203,12 @@ def run_dubbing_job(
     dubbing_factory: Optional[Callable[[DubbingConfig], Any]] = None,
     _log_stream: Optional[io.StringIO] = None,
 ) -> DubbingJobResult:
-    """Run the configured dubbing job and capture logs for the caller."""
+    """Run the configured dubbing job and capture logs for the caller.
+
+    Only one job may run at a time. If a job is already in progress, this
+    function returns immediately with a ``Failed`` status instead of starting
+    a second concurrent run that would corrupt shared project artifacts.
+    """
     if not logging.getLogger().handlers:
         setup_logging()
 
@@ -211,6 +220,16 @@ def run_dubbing_job(
 
     root_logger = logging.getLogger()
     root_logger.addHandler(capture_handler)
+
+    # Reject concurrent runs before acquiring the lock so the caller gets an
+    # immediate response rather than silently queuing behind the active job.
+    if not _PIPELINE_LOCK.acquire(blocking=False):
+        root_logger.removeHandler(capture_handler)
+        LOGGER.warning("Dubbing job rejected: another job is already running.")
+        return DubbingJobResult(
+            status="Failed: another dubbing job is already running. Please wait for it to finish.",
+            logs=log_stream.getvalue(),
+        )
 
     try:
         load_dotenv(override=True)
@@ -312,4 +331,5 @@ def run_dubbing_job(
             logs=log_stream.getvalue(),
         )
     finally:
+        _PIPELINE_LOCK.release()
         root_logger.removeHandler(capture_handler)

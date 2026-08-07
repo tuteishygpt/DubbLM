@@ -697,6 +697,7 @@ class SmartDubbing:
             "gemini_diarization_transcription",
             "deepgram_diarization_transcription",
             "assemblyai_diarization_transcription",
+            "isolated_tracks_transcription",
             "chunked_processing",
             "segment_transcription",
             "diarization",
@@ -1098,6 +1099,24 @@ class SmartDubbing:
         layout), fall back to a normal ``diarize_and_transcribe`` call so its
         own internal cache is still consulted.
         """
+        # Isolated-tracks path publishes its own step_name outside of any
+        # transcriber. Reproduce the same cache_key the write path used;
+        # miss → fall back to a fresh isolated run (its own cache is a no-op
+        # then, so we just recompute).
+        isolated_tracks = self.config.get('isolated_tracks')
+        if isolated_tracks:
+            step_name = "isolated_tracks_transcription"
+            cache_key = self._isolated_tracks_cache_key(audio_file, isolated_tracks)
+            if not self.cache_manager.cache_exists(step_name, cache_key):
+                raise FileNotFoundError(
+                    f"run_step=translate_only requires cached isolated-tracks "
+                    f"diarization+transcription from a previous transcribe_only or "
+                    f"full pipeline run in the same project directory, but no cache "
+                    f"entry was found for step '{step_name}'. Run "
+                    f"--run_step transcribe_only (or the full pipeline) first."
+                )
+            return self._diarize_and_transcribe_isolated(audio_file, isolated_tracks)
+
         transcriber = self._require_transcriber()
         step_name = (getattr(transcriber, "cache_step_name", "") or "").strip()
 
@@ -1150,8 +1169,15 @@ class SmartDubbing:
 
     def diarize_and_transcribe(self, audio_file: str) -> Tuple[Dict[Tuple[float, float], str], List[Dict]]:
         """Perform speaker diarization and transcription."""
+        # Opt-in isolated-tracks path: only active when the user supplies
+        # per-speaker isolated audio files. Skips the standard transcriber
+        # entirely; the standard path below is left untouched.
+        isolated_tracks = self.config.get('isolated_tracks')
+        if isolated_tracks:
+            return self._diarize_and_transcribe_isolated(audio_file, isolated_tracks)
+
         transcriber = self._require_transcriber()
-            
+
         # Generate cache key
         cache_key = self.cache_manager.generate_cache_key(
             audio_file,
@@ -1161,22 +1187,135 @@ class SmartDubbing:
             self.config.get('start_time'),
             self.config.get('duration')
         )
-        
+
         # Perform diarization and transcription
         speakers_rolls, transcription = transcriber.diarize_and_transcribe(
             audio_file=audio_file,
             cache_key=cache_key,
             use_cache=self.cache_manager.use_cache
         )
-        
+
         # Store for debug
         self.debug_data["diarization"] = speakers_rolls
         self.debug_data["transcription"] = transcription
-        
+
         # Save transcription to file
         self._save_transcription_file(transcription)
-        
+
         return speakers_rolls, transcription
+
+    def _isolated_tracks_cache_key(
+        self,
+        audio_file: str,
+        isolated_tracks: Dict[str, str],
+    ) -> str:
+        """Cache key for the isolated-tracks path.
+
+        Includes the main audio_file hash (to stay consistent with the
+        CacheManager's input-hash directory layout) plus a fingerprint of
+        every isolated track file, the inner transcription system, and the
+        language pair. That way, swapping a track or the inner backend
+        invalidates the cache automatically.
+        """
+        inner_system = self.config.get('inner_transcription_system', 'deepgram')
+        base_key = self.cache_manager.generate_cache_key(
+            audio_file,
+            self.config.get('source_language'),
+            self.config.get('target_language'),
+            self.config.get('whisper_model', 'large-v3'),
+            self.config.get('start_time'),
+            self.config.get('duration'),
+        )
+
+        fingerprint = hashlib.md5()
+        for speaker in sorted(isolated_tracks.keys()):
+            path = isolated_tracks[speaker]
+            fingerprint.update(speaker.encode('utf-8'))
+            fingerprint.update(b'=')
+            try:
+                stat = os.stat(path)
+                fingerprint.update(str(stat.st_size).encode('utf-8'))
+                fingerprint.update(str(int(stat.st_mtime)).encode('utf-8'))
+            except OSError:
+                fingerprint.update(str(path).encode('utf-8'))
+            fingerprint.update(b';')
+        fingerprint.update(inner_system.encode('utf-8'))
+
+        return f"{base_key}_isolated_{fingerprint.hexdigest()[:16]}"
+
+    def _diarize_and_transcribe_isolated(
+        self,
+        audio_file: str,
+        isolated_tracks: Dict[str, str],
+    ) -> Tuple[Dict[Tuple[float, float], str], List[Dict]]:
+        """Isolated-tracks branch of ``diarize_and_transcribe``.
+
+        Delegates to ``dubbing.audio.isolated_tracks.run_isolated_tracks``
+        and caches the result under ``isolated_tracks_transcription`` so
+        ``translate_only`` / ``tts_to_end`` can resume without re-running
+        VAD or the inner transcriber.
+        """
+        from dubbing.audio.isolated_tracks import run_isolated_tracks
+
+        step_name = "isolated_tracks_transcription"
+        cache_key = self._isolated_tracks_cache_key(audio_file, isolated_tracks)
+
+        if (
+            self.cache_manager.use_cache
+            and self.cache_manager.cache_exists(step_name, cache_key)
+        ):
+            logger.debug("Loading isolated-tracks diarization+transcription from cache...")
+            cached = self.cache_manager.load_from_cache(step_name, cache_key)
+            if cached is not None:
+                speakers_rolls = cached["diarization"]
+                transcription = cached["transcription"]
+                self.debug_data["diarization"] = speakers_rolls
+                self.debug_data["transcription"] = transcription
+                self._save_transcription_file(transcription)
+                return speakers_rolls, transcription
+            logger.warning("Corrupt isolated-tracks cache entry, recomputing.")
+
+        inner_system = self.config.get('inner_transcription_system', 'deepgram')
+        logger.info(
+            "Isolated-tracks path: %d tracks, inner_transcription_system=%s",
+            len(isolated_tracks),
+            inner_system,
+        )
+
+        speakers_rolls, transcription = run_isolated_tracks(
+            tracks=isolated_tracks,
+            inner_system=inner_system,
+            source_language=self.config.get('source_language'),
+            device=self.config.get('device'),
+            cache_manager=self.cache_manager,
+            inner_kwargs=self._isolated_inner_kwargs(inner_system),
+            start_time=self.config.get('start_time'),
+            duration=self.config.get('duration'),
+        )
+
+        self.cache_manager.save_to_cache(
+            step_name,
+            cache_key,
+            {"diarization": speakers_rolls, "transcription": transcription},
+        )
+
+        self.debug_data["diarization"] = speakers_rolls
+        self.debug_data["transcription"] = transcription
+        self._save_transcription_file(transcription)
+        return speakers_rolls, transcription
+
+    def _isolated_inner_kwargs(self, inner_system: str) -> Dict[str, Any]:
+        """Extra kwargs for the inner transcriber used by isolated-tracks."""
+        if inner_system == "deepgram":
+            model = self.config.get("deepgram_model")
+            return {"deepgram_model": model} if model else {}
+        if inner_system == "gemini":
+            model = self.config.get("gemini_transcription_model")
+            return {"gemini_transcription_model": model} if model else {}
+        if inner_system == "assemblyai":
+            model = self.config.get("transcription_model")
+            return {"speech_model": model} if model else {}
+        return {}
     
     def translate_segments(self, transcription: List[Dict], audio_file: str) -> List[Dict]:
         """Translate segments using the translator."""

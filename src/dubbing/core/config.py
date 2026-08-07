@@ -93,7 +93,9 @@ class DubbingConfig:
             'dubbed_volume': 1.0,
             'background_volume': 0.562341,
             'group_overflow_tolerance': 1.0,
-            'segment_reference_min_duration': 2.0
+            'segment_reference_min_duration': 2.0,
+            'isolated_tracks': None,
+            'inner_transcription_system': 'deepgram',
         }
         
         # Required parameters that must come from CLI
@@ -122,8 +124,38 @@ class DubbingConfig:
         # Override config with CLI arguments that are not None and actually present
         arg_dict = vars(args)
         for key, value in arg_dict.items():
-            if key != 'config' and hasattr(args, key) and value is not None:
+            if key == 'config':
+                continue
+            if key == '_isolated_track_pairs':
+                # Parsed separately below
+                continue
+            if hasattr(args, key) and value is not None:
                 self.config[key] = value
+
+        # Fold --isolated_track LABEL=PATH pairs into a dict. Overrides YAML
+        # only when at least one pair is provided on the CLI.
+        pairs = arg_dict.get('_isolated_track_pairs')
+        if pairs:
+            tracks: Dict[str, str] = {}
+            for pair in pairs:
+                if '=' not in pair:
+                    logger.warning(
+                        "Warning: --isolated_track expects LABEL=PATH, got '%s'. Skipping.",
+                        pair,
+                    )
+                    continue
+                label, path = pair.split('=', 1)
+                label = label.strip()
+                path = path.strip()
+                if not label or not path:
+                    logger.warning(
+                        "Warning: --isolated_track has empty label or path in '%s'. Skipping.",
+                        pair,
+                    )
+                    continue
+                tracks[label] = path
+            if tracks:
+                self.config['isolated_tracks'] = tracks
     
     def validate(self) -> None:
         """Validate required configuration parameters."""
@@ -280,6 +312,45 @@ class DubbingConfig:
 
         _parse_mapping_parameter('reference_audio_mapping')
         _parse_mapping_parameter('reference_text_mapping')
+        _parse_mapping_parameter('isolated_tracks')
+
+        # Validate isolated_tracks: strip empties, verify files exist
+        isolated_tracks = self.config.get('isolated_tracks')
+        if isinstance(isolated_tracks, dict) and isolated_tracks:
+            validated = {}
+            for speaker, path in isolated_tracks.items():
+                if not path:
+                    continue
+                speaker_label = str(speaker).strip()
+                path_str = str(path).strip()
+                if not speaker_label or not path_str:
+                    continue
+                if not os.path.exists(path_str):
+                    logger.error(
+                        "Isolated track for speaker '%s' not found: %s",
+                        speaker_label,
+                        path_str,
+                    )
+                    sys.exit(1)
+                validated[speaker_label] = path_str
+            self.config['isolated_tracks'] = validated or None
+            if validated:
+                logger.info(
+                    "Isolated speaker tracks enabled for %d speakers: %s",
+                    len(validated),
+                    ", ".join(validated.keys()),
+                )
+        else:
+            self.config['isolated_tracks'] = None
+
+        # Validate inner_transcription_system
+        inner_sys = self.config.get('inner_transcription_system')
+        if inner_sys not in {'deepgram', 'assemblyai', 'gemini'}:
+            logger.warning(
+                "Warning: invalid inner_transcription_system '%s'. Falling back to 'deepgram'.",
+                inner_sys,
+            )
+            self.config['inner_transcription_system'] = 'deepgram'
 
         # Consolidate per-speaker fields (legacy mappings + new `voices` block)
         # into a single dict[str, VoiceProfile].
@@ -429,6 +500,23 @@ class DubbingConfig:
         parser.add_argument('--background_volume', type=float, help='Gain multiplier for background track when keep_background=true (e.g., 0.56 ≈ -5 dB)')
         parser.add_argument('--group_overflow_tolerance', type=float, help='Allowed overflow beyond group timeframe when combining segments (0..1, default 1.0)')
         parser.add_argument('--segment_reference_min_duration', type=float, help='Minimum segment length in seconds required to export dedicated reference audio clips')
+        parser.add_argument(
+            '--isolated_track',
+            action='append',
+            dest='_isolated_track_pairs',
+            metavar='LABEL=PATH',
+            help='Provide an isolated per-speaker audio track. May be repeated: '
+                 '--isolated_track SPEAKER_00=path/spk0.wav --isolated_track SPEAKER_01=path/spk1.wav. '
+                 'When any tracks are supplied, diarization/transcription switches to the '
+                 'isolated-tracks path (see --inner_transcription_system). Speaker labels '
+                 'flow through to the standard voices: mapping unchanged.',
+        )
+        parser.add_argument(
+            '--inner_transcription_system',
+            type=str,
+            choices=['deepgram', 'assemblyai', 'gemini'],
+            help='Transcription backend used per isolated track (default: deepgram). Ignored if no --isolated_track is provided.',
+        )
 
         return parser
 
