@@ -46,6 +46,24 @@ except ImportError:
 logger = get_logger(__name__)
 
 
+DEFAULT_LLM_MODELS = {
+    "gemini": "models/gemini-2.5-flash-preview-04-17",
+    "openrouter": "anthropic/claude-3.7-sonnet:thinking",
+}
+
+
+def _cache_fingerprint(dimensions: Dict[str, Any]) -> str:
+    """Return a deterministic, compact fingerprint for JSON cache dimensions."""
+    serialized = json.dumps(
+        dimensions,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:20]
+
+
 def _normalize_gemini_model_name(model_name: str) -> str:
     return model_name.removeprefix("models/")
 
@@ -103,10 +121,8 @@ class LLMTranslator(TranslationInterface):
         # Set default model names based on provider
         if model_name:
             self.model_name = model_name
-        elif llm_provider == "gemini":
-            self.model_name = "models/gemini-2.5-flash-preview-04-17"
-        elif llm_provider == "openrouter":
-            self.model_name = "anthropic/claude-3.7-sonnet:thinking"
+        elif llm_provider in DEFAULT_LLM_MODELS:
+            self.model_name = DEFAULT_LLM_MODELS[llm_provider]
         
         # Configure refinement model settings
         self.refinement_llm_provider = refinement_llm_provider or llm_provider
@@ -131,6 +147,13 @@ class LLMTranslator(TranslationInterface):
         
         self.llm = None
         self.refinement_llm = None
+
+    def _render_glossary_entries(self) -> str:
+        """Render glossary entries in the same deterministic order as cache keys."""
+        return "\n".join(
+            f'- "{term}" → "{self.glossary[term]}"'
+            for term in sorted(self.glossary)
+        )
         
     def initialize(self) -> None:
         """Initialize the LLM translation system."""
@@ -361,7 +384,20 @@ Input:
             except Exception as e:
                 logger.error(f"Error saving translation cache: {e}")
     
-    def _generate_cache_key(self, chunk_text: str, source_language: str, target_language: str) -> str:
+    def _generate_cache_key(
+        self,
+        chunk_text: str,
+        source_language: str,
+        target_language: str,
+        *,
+        context_before: str = "",
+        context_after: str = "",
+        source_summary: Optional[str] = None,
+        domain: str = "",
+        tone: str = "",
+        themes: Optional[List[str]] = None,
+        terminology: Optional[List[str]] = None,
+    ) -> str:
         """
         Generate a unique cache key for a chunk based on its content and languages.
         
@@ -373,11 +409,28 @@ Input:
         Returns:
             A unique hash string to use as cache key
         """
-        # Combine the parameters that fully define a translation
-        # Include prompt prefix in the key so cache varies when extra context changes
-        cache_data = f"{chunk_text}|{source_language}|{target_language}|{self.llm_provider}|{self.model_name}|{self.temperature}|{(self.prompt_prefix or '')}"
-        # Create a hash of this data
-        return hashlib.md5(cache_data.encode("utf-8")).hexdigest()
+        dimensions = {
+            "schema_version": "translation_chunk_v2",
+            "chunk_text": chunk_text,
+            "source_language": source_language,
+            "target_language": target_language,
+            "primary": {
+                "provider": self.llm_provider,
+                "model": self.model_name,
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+            },
+            "glossary": self.glossary or {},
+            "prompt_prefix": self.prompt_prefix or "",
+            "context_before": context_before,
+            "context_after": context_after,
+            "source_summary": source_summary or "",
+            "domain": domain,
+            "tone": tone,
+            "themes": list(themes or []),
+            "terminology": list(terminology or []),
+        }
+        return f"translation_chunk_v2_{_cache_fingerprint(dimensions)}"
     
     def _format_time(self, seconds: float) -> str:
         """Convert seconds to HH:MM:SS format."""
@@ -420,7 +473,7 @@ Input:
 
         glossary_section = ""
         if self.glossary:
-            glossary_entries = "\n".join([f"- \"{term}\" → \"{translation}\"" for term, translation in self.glossary.items()])
+            glossary_entries = self._render_glossary_entries()
             glossary_section = f"""
 # Translation glossary (MUST be followed. Adapt for grammar):
 <glossary>
@@ -956,6 +1009,22 @@ Example JSON output:
             
         chunk_text = chunk["text"]
         original_speaker_texts = chunk["original_speaker_texts"]
+
+        context_before = chunks[i-2].get("translation", chunks[i-2]["text"]) if i > 1 else ""
+        context_before += "\n" + (chunks[i-1].get("translation", chunks[i-1]["text"]) if i > 0 else "")
+        context_after = chunks[i+1]["text"] if i < len(chunks)-1 else ""
+        cache_key = self._generate_cache_key(
+            chunk_text,
+            source_language,
+            target_language,
+            context_before=context_before,
+            context_after=context_after,
+            source_summary=source_summary,
+            domain=context_info["domain"],
+            tone=context_info["tone"],
+            themes=context_info["themes"],
+            terminology=context_info["terminology"],
+        )
         
         # Short-circuit: if source and target languages are the same, skip LLM translation
         # and pass through original text while still allowing later refinement.
@@ -977,7 +1046,6 @@ Example JSON output:
             chunk["execution_time"] = chunk_end_time - chunk_start_time
 
             if enable_cache:
-                cache_key = self._generate_cache_key(chunk_text, source_language, target_language)
                 self.translation_cache[cache_key] = {
                     "translated_pairs": translated_pairs,
                     "translation": chunk["translation"],
@@ -988,7 +1056,6 @@ Example JSON output:
 
         # Check cache first if enabled
         if enable_cache:
-            cache_key = self._generate_cache_key(chunk_text, source_language, target_language)
             cached_result = self.translation_cache.get(cache_key)
             
             if cached_result:
@@ -1005,12 +1072,6 @@ Example JSON output:
             else:
                 cache_stats["misses"] += 1
         
-        # Get surrounding context
-        context_before = chunks[i-2].get("translation", chunks[i-2]["text"]) if i > 1 else ""
-        context_before += "\n" + (chunks[i-1].get("translation", chunks[i-1]["text"]) if i > 0 else "")
-
-        context_after = chunks[i+1]["text"] if i < len(chunks)-1 else ""
-        
         # Include source summary in the prompt if available
         summary_section = ""
         if source_summary:
@@ -1024,7 +1085,7 @@ Example JSON output:
         # Add glossary section to the prompt if glossary exists
         glossary_section = ""
         if self.glossary:
-            glossary_entries = "\n".join([f"- \"{term}\" → \"{translation}\"" for term, translation in self.glossary.items()])
+            glossary_entries = self._render_glossary_entries()
             glossary_section = f"""
 # Translation glossary (MUST be followed. Adapt for grammar):
 <glossary>
@@ -1383,8 +1444,6 @@ IMPORTANT: Respond in JSON format with an array of objects containing speaker an
             
             # Cache the successful translation if caching is enabled
             if enable_cache:
-                cache_key = self._generate_cache_key(chunk_text, source_language, target_language)
-                
                 # Store translation in cache
                 self.translation_cache[cache_key] = {
                     "translated_pairs": translated_pairs,
@@ -1554,7 +1613,7 @@ IMPORTANT: Respond in JSON format with an array of objects containing speaker an
         # Add glossary section to the refinement prompt if glossary exists
         glossary_section = ""
         if self.glossary:
-            glossary_entries = "\n".join([f"- \"{term}\" → \"{translation}\"" for term, translation in self.glossary.items()])
+            glossary_entries = self._render_glossary_entries()
             glossary_section = f"""
 # Translation glossary (MUST be followed. Adapt for grammar):
 <glossary>
@@ -2093,7 +2152,7 @@ IMPORTANT: The glossary provides base forms of translations. When using a term f
         # Build glossary section if available
         glossary_section = ""
         if self.glossary:
-            glossary_entries = "\n".join([f"- \"{term}\" → \"{translation}\"" for term, translation in self.glossary.items()])
+            glossary_entries = self._render_glossary_entries()
             glossary_section = f"""
 # Translation glossary (MUST be followed. Adapt for grammar):
 <glossary>

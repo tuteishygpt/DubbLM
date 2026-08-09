@@ -555,6 +555,16 @@ def _create_translation_cache(tmp_path, monkeypatch, *, segments):
     return overrides, config, cache_path
 
 
+def _snapshot_cache_path(config):
+    cache_manager = CacheManager(use_cache=True, input_file=config.get("input"))
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = config
+    dubber.cache_manager = cache_manager
+    audio_path = Path(config.get("audio_artifacts_dir")) / "source.wav"
+    snapshot_key = dubber._build_dubbing_text_snapshot_key(str(audio_path))
+    return cache_manager.get_cache_path("dubbing_texts") / f"{snapshot_key}.pkl"
+
+
 def test_load_dubbing_text_rows_reads_translation_cache(tmp_path, monkeypatch):
     overrides, _config, _cache_path = _create_translation_cache(
         tmp_path,
@@ -644,9 +654,7 @@ def test_load_dubbing_text_rows_prefers_transient_run_snapshot(tmp_path, monkeyp
             "synthesized_speech_file": str(audio_file),
         }
     ]
-    snapshot_path = (
-        cache_path.parent.parent / "dubbing_texts" / cache_path.name
-    )
+    snapshot_path = _snapshot_cache_path(config)
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     with snapshot_path.open("wb") as handle:
         pickle.dump(
@@ -691,7 +699,7 @@ def test_save_transient_snapshot_does_not_overwrite_translation_cache(
             }
         ],
     )
-    snapshot_path = cache_path.parent.parent / "dubbing_texts" / cache_path.name
+    snapshot_path = _snapshot_cache_path(config)
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     with snapshot_path.open("wb") as handle:
         pickle.dump(
@@ -753,7 +761,7 @@ def test_regenerate_transient_snapshot_does_not_overwrite_translation_cache(
             }
         ],
     )
-    snapshot_path = cache_path.parent.parent / "dubbing_texts" / cache_path.name
+    snapshot_path = _snapshot_cache_path(config)
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     with snapshot_path.open("wb") as handle:
         pickle.dump(

@@ -882,7 +882,7 @@ class GeminiTTSWrapper(TTSInterface):
         voice_stats = self.sample_manager.duration_database.get_or_create_stats(voice_name)
         
         # Analyze text
-        text = segment_data.text.strip()
+        text = segment_data.text.strip().replace("\u0301", "")
         word_count = TextAnalysisUtils.count_words(text)
         char_count = TextAnalysisUtils.count_characters(text)
         complexity_factor = TextAnalysisUtils.estimate_speech_complexity(text)

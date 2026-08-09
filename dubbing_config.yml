@@ -4,7 +4,7 @@ debug_info: false
 debug_diarize_only: false
 debug_tts: true
 whisper_model: large-v3
-keep_background: true
+keep_background: false
 no_cache: false
 remove_pauses: false
 normalize_audio: true
@@ -12,7 +12,7 @@ dubbed_volume: 1
 use_two_pass_encoding: false
 tts_system: omnivoice
 omnivoice_space_id: k2-fsa/OmniVoice
-segment_reference_min_duration: 1
+segment_reference_min_duration: 2
 transcription_system: assemblyai
 translator_type: llm
 llm_provider: gemini
@@ -23,16 +23,15 @@ refinement_model_name: gemini-3.1-pro-preview
 refinement_temperature: 1.8
 refinement_persona: ai_buddy
 save_original_subtitles: false
-save_translated_subtitles: false
+save_translated_subtitles: true
 voice_auto_selection: true
 include_original_audio: false
 start_time: 0
 refinement_max_tokens: 0
-enable_emotion_analysis: false
+enable_emotion_analysis: true
 min_pause_duration: 3
 keyframe_buffer: 0.2
 background_volume: 0.762341
-group_overflow_tolerance: 1
 gemini_transcription_model: gemini-3.1-pro-preview
 voices:
   SPEAKER_00:
@@ -43,7 +42,19 @@ voices:
   SPEAKER_01:
     tts_system: omnivoice
     reference_audio: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_03\reference.mp3
-    reference_text: И тут прямо какие-то Анадырь, Чита, и с этой стороны какие-то американские
-      города, стоят печати аэропортов. Очень живописно выглядит, где-то по-русски...
-duration: 800
+    reference_text: И тут прямо какие-то Анадырь, Чита, и с этой стороны какие-то
+      американские города, стоят печати аэропортов. Очень живописно выглядит, где-то
+      по-русски...
+duration: 180
 transcription_model: best
+inner_transcription_system: assemblyai
+emotion_provider: gemini
+emotion_model: gemini-3.1-flash-lite
+timing_short_segment_threshold: 1.5
+timing_short_segment_max_speed: 1.08
+timing_max_speed: 1.15
+timing_max_overflow: 0.25
+semantic_split_enabled: true
+tts_preferred_segment_duration: 15.0
+tts_hard_segment_duration: 35.0
+semantic_split_search_window: 10.0

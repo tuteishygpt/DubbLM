@@ -20,6 +20,7 @@ import shutil
 import subprocess
 from typing import Dict, List, Tuple, Optional, Any, Literal, Union
 from pathlib import Path
+from urllib.parse import quote
 from dotenv import load_dotenv
 from pydub import AudioSegment
 
@@ -46,6 +47,7 @@ from .log_config import get_logger
 
 # Import existing factories and interfaces
 from tts.tts_factory import TTSFactory
+from translation.llm_translator import DEFAULT_LLM_MODELS
 from translation.translator_factory import TranslatorFactory
 from transcription.transcription_factory import TranscriptionFactory
 
@@ -229,16 +231,20 @@ class SmartDubbing:
         self.translator = None
         self.translator_init_error = None
         try:
+            settings = self._effective_translation_cache_dimensions()
+            primary = settings["primary"]
+            refinement = settings["refinement"]
             self.translator = TranslatorFactory.create_translator(
-                translator_type=self.config.get('translator_type', 'llm'),
-                llm_provider=self.config.get('llm_provider', 'gemini'),
-                model_name=self.config.get('llm_model_name'),
-                temperature=self.config.get('llm_temperature', 0.5),
-                refinement_llm_provider=self.config.get('refinement_llm_provider'),
-                refinement_model_name=self.config.get('refinement_model_name'),
-                refinement_temperature=self.config.get('refinement_temperature', 1.0),
-                refinement_max_tokens=self.config.get('refinement_max_tokens'),
-                refinement_persona=self.config.get('refinement_persona', 'normal'),
+                translator_type=settings["translator_type"],
+                llm_provider=primary["provider"],
+                model_name=primary["model"],
+                temperature=primary["temperature"],
+                max_tokens=primary["max_tokens"],
+                refinement_llm_provider=refinement["provider"],
+                refinement_model_name=refinement["model"],
+                refinement_temperature=refinement["temperature"],
+                refinement_max_tokens=refinement["max_tokens"],
+                refinement_persona=refinement["persona"],
                 translation_prompt_prefix=self.config.get('translation_prompt_prefix'),
                 glossary=self.config.get('glossary'),
                 cache_manager=self.cache_manager
@@ -509,44 +515,161 @@ class SmartDubbing:
 
         return audio_file, background_audio_path, segment_reference_audio_file
 
+    @staticmethod
+    def _cache_fingerprint(dimensions: Dict[str, Any]) -> str:
+        """Return a deterministic fingerprint for JSON-compatible dimensions."""
+        serialized = json.dumps(
+            dimensions,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:20]
+
+    def _shared_audio_transcription_identity(self, audio_file: str) -> str:
+        """Return the shared audio/transcription identity used by text caches."""
+        source_language = self.config.get("source_language")
+        target_language = self.config.get("target_language")
+        whisper_model = self.config.get("whisper_model", "large-v3")
+        start_time = self.config.get("start_time")
+        duration = self.config.get("duration")
+        return self.cache_manager.generate_cache_key(
+            audio_file,
+            source_language,
+            target_language,
+            whisper_model,
+            start_time,
+            duration,
+        )
+
+    def _effective_translation_cache_dimensions(self) -> Dict[str, Any]:
+        """Resolve translation settings exactly as ``LLMTranslator`` receives them."""
+        primary_provider = self.config.get("llm_provider") or "gemini"
+        primary_model = (
+            self.config.get("llm_model_name")
+            or DEFAULT_LLM_MODELS.get(primary_provider)
+        )
+        primary_temperature = self.config.get("llm_temperature", 0.5)
+        if primary_temperature is None:
+            primary_temperature = 0.5
+        primary_max_tokens = self.config.get("llm_max_tokens", 16384)
+        if primary_max_tokens is None:
+            primary_max_tokens = 16384
+
+        refinement_provider = (
+            self.config.get("refinement_llm_provider") or primary_provider
+        )
+        refinement_model = (
+            self.config.get("refinement_model_name") or primary_model
+        )
+        refinement_temperature = self.config.get("refinement_temperature", 1.0)
+        if refinement_temperature is None:
+            refinement_temperature = 1.0
+        refinement_max_tokens = (
+            self.config.get("refinement_max_tokens") or primary_max_tokens
+        )
+
+        return {
+            "schema_version": "translation_v2",
+            "translator_type": self.config.get("translator_type") or "llm",
+            "primary": {
+                "provider": primary_provider,
+                "model": primary_model,
+                "temperature": primary_temperature,
+                "max_tokens": primary_max_tokens,
+            },
+            "refinement": {
+                "provider": refinement_provider,
+                "model": refinement_model,
+                "temperature": refinement_temperature,
+                "max_tokens": refinement_max_tokens,
+                "persona": self.config.get("refinement_persona") or "normal",
+            },
+            "glossary": self.config.get("glossary") or {},
+            "prompt_prefix": self._build_translation_prompt_prefix(
+                self.config.get("translation_prompt_prefix")
+            ),
+            "semantic_plan_fingerprint": getattr(
+                self, "_semantic_plan_fingerprint", None
+            ),
+        }
+
     def _build_dubbing_text_snapshot_key(self, audio_file: str) -> str:
         """Compute the stable, plan-independent key used by the text editor."""
-        effective_prompt_prefix = self._build_translation_prompt_prefix(
-            self.config.get("translation_prompt_prefix")
-        )
-        prompt_prefix_hash = hashlib.md5(
-            effective_prompt_prefix.encode("utf-8")
-        ).hexdigest()[:12]
+        audio_identity = self._shared_audio_transcription_identity(audio_file)
+        dimensions = {
+            "schema_version": "dubbing_texts_v2",
+            "prompt_prefix": self._build_translation_prompt_prefix(
+                self.config.get("translation_prompt_prefix")
+            ),
+        }
         return (
-            f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}"
-            f"_{self.config.get('target_language')}_{prompt_prefix_hash}"
+            f"dubbing_texts_v2_{audio_identity}_"
+            f"{self._cache_fingerprint(dimensions)}"
         )
 
     def _build_translation_cache_key(self, audio_file: str) -> str:
         """Compute the plan-aware translation cache key used by the pipeline."""
-        base_key = self._build_dubbing_text_snapshot_key(audio_file)
-        semantic_fingerprint = getattr(self, "_semantic_plan_fingerprint", None)
-        semantic_suffix = f"_semantic_{semantic_fingerprint}" if semantic_fingerprint else ""
-        return f"{base_key}{semantic_suffix}"
+        snapshot_identity = self._build_dubbing_text_snapshot_key(audio_file)
+        settings = self._effective_translation_cache_dimensions()
+        return (
+            f"translation_v2_{snapshot_identity}_"
+            f"{self._cache_fingerprint(settings)}"
+        )
 
     def _build_emotions_cache_key(
         self,
         audio_file: str,
+        segments: List[Dict[str, Any]],
         provider: Optional[str] = None,
         model: Optional[str] = None,
     ) -> str:
-        """Compute the plan-aware emotion-analysis cache identity."""
+        """Compute the input- and algorithm-aware emotion-analysis identity."""
         provider = str(provider or self.config.get("emotion_provider") or "gemini").lower()
         model = str(model or self.config.get("emotion_model") or "gemini-3.1-flash-lite")
-        cache_extra = f"{provider}_{model}" if provider == "gemini" else provider
-        base_key = self.cache_manager.generate_cache_key(
-            audio_file, "", "", cache_extra
+        audio_identity = self.cache_manager.generate_cache_key(
+            audio_file, "", "", "analysis-audio-v2"
         )
-        semantic_fingerprint = getattr(self, "_semantic_plan_fingerprint", None)
-        semantic_suffix = (
-            f"_semantic_{semantic_fingerprint}" if semantic_fingerprint else ""
+
+        if provider == "gemini":
+            namespace = f"gemini_{quote(model, safe='.-_')}"
+            algorithm = {
+                "prompt": EMOTION_ANALYSIS_PROMPT,
+                "temperature": 0.2,
+                "accepted_labels": ["Neutral", "Angry", "Happy", "Sad"],
+            }
+        elif provider == "speechbrain":
+            namespace = "speechbrain"
+            algorithm = {
+                "source": "speechbrain/emotion-recognition-wav2vec2-IEMOCAP",
+                "pymodule_file": "custom_interface.py",
+                "classname": "CustomEncoderWav2vec2Classifier",
+                "label_mapping": {
+                    "neu": "Neutral",
+                    "ang": "Angry",
+                    "hap": "Happy",
+                    "sad": "Sad",
+                    "None": None,
+                },
+                "style_mapping": SOFT_STYLE_BY_EMOTION,
+            }
+        else:
+            namespace = quote(provider, safe=".-_")
+            algorithm = {"fallback_emotion": "Neutral"}
+
+        dimensions = {
+            "schema_version": "emotions_v2",
+            "segments": segments,
+            "semantic_plan_fingerprint": getattr(
+                self, "_semantic_plan_fingerprint", None
+            ),
+            "algorithm": algorithm,
+        }
+        return (
+            f"emotions_v2_{namespace}_{audio_identity}_"
+            f"{self._cache_fingerprint(dimensions)}"
         )
-        return f"{base_key}_{cache_extra}{semantic_suffix}"
 
     def _restore_semantic_plan_fingerprint(self, audio_file: str) -> None:
         """Restore the semantic identity needed by resume cache keys."""
@@ -1057,7 +1180,10 @@ class SmartDubbing:
                         self.config.get("emotion_model") or "gemini-3.1-flash-lite"
                     )
                     emotions_key = self._build_emotions_cache_key(
-                        audio_file, emotion_provider, emotion_model
+                        audio_file,
+                        segments_for_output,
+                        emotion_provider,
+                        emotion_model,
                     )
                     if self.cache_manager.cache_exists("emotions", emotions_key):
                         segments_for_output = self._load_required_cached_step(
@@ -1893,7 +2019,9 @@ class SmartDubbing:
         provider = str(self.config.get("emotion_provider") or "gemini").lower()
         model = str(self.config.get("emotion_model") or "gemini-3.1-flash-lite")
 
-        cache_key = self._build_emotions_cache_key(audio_file, provider, model)
+        cache_key = self._build_emotions_cache_key(
+            audio_file, segments, provider, model
+        )
         step_name = "emotions"
 
         if self.cache_manager.cache_exists(step_name, cache_key):

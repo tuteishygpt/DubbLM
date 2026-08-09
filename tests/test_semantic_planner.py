@@ -648,7 +648,6 @@ def test_translation_cache_key_includes_semantic_plan_fingerprint():
     with_plan_b = dubber._build_translation_cache_key("source.wav")
 
     assert without_plan != with_plan_a != with_plan_b
-    assert "plan-a" in with_plan_a
 
 
 def test_raw_tts_cache_key_includes_semantic_plan_fingerprint():
@@ -686,13 +685,19 @@ def test_emotions_cache_key_includes_provider_model_and_semantic_plan_fingerprin
     dubber.cache_manager = Cache()
     dubber.config = {}
     dubber._semantic_plan_fingerprint = "plan-a"
-    first = dubber._build_emotions_cache_key("source.wav", "gemini", "model-a")
+    segments = [{"start": 0.0, "end": 1.0, "translation": "target"}]
+    first = dubber._build_emotions_cache_key(
+        "source.wav", segments, "gemini", "model-a"
+    )
     dubber._semantic_plan_fingerprint = "plan-b"
-    second = dubber._build_emotions_cache_key("source.wav", "gemini", "model-a")
-    third = dubber._build_emotions_cache_key("source.wav", "gemini", "model-b")
+    second = dubber._build_emotions_cache_key(
+        "source.wav", segments, "gemini", "model-a"
+    )
+    third = dubber._build_emotions_cache_key(
+        "source.wav", segments, "gemini", "model-b"
+    )
 
     assert first != second != third
-    assert "plan-a" in first
     assert "model-b" in third
 
 
@@ -1023,14 +1028,13 @@ def test_cached_translation_refreshes_latest_dubbing_text_snapshot():
         for step, _key, data in dubber.cache_manager.saved
         if step == "dubbing_texts"
     ]
-    assert snapshot_writes == [
-        {
-            "version": 1,
-            "segments": segments,
-            "translation_cache_reusable": True,
-            "translation_cache_key": "base_be_f6f3cf3be291_semantic_plan-a",
-        }
-    ]
+    assert len(snapshot_writes) == 1
+    assert snapshot_writes[0]["version"] == 1
+    assert snapshot_writes[0]["segments"] == segments
+    assert snapshot_writes[0]["translation_cache_reusable"] is True
+    assert snapshot_writes[0]["translation_cache_key"] == (
+        dubber._build_translation_cache_key("source.wav")
+    )
 
 
 def test_plan_dependent_cache_rejects_a_partially_missing_fingerprint():
