@@ -799,7 +799,7 @@ def _expand_isolated_tracks(overrides: dict[str, object]) -> dict[str, object]:
 
 def _build_dubbing_text_context(
     overrides: dict[str, object],
-) -> tuple[DubbingConfig, Path, Path, Path]:
+) -> tuple[DubbingConfig, Path, Path, Path, Path]:
     config = build_config_from_overrides(overrides)
     audio_path = Path(config.get("audio_artifacts_dir")) / "source.wav"
     if not audio_path.is_file():
@@ -814,8 +814,10 @@ def _build_dubbing_text_context(
     dubber.cache_manager = cache_manager
     cache_key = dubber._build_translation_cache_key(str(audio_path))
     cache_path = cache_manager.get_cache_path("translation") / f"{cache_key}.pkl"
+    snapshot_key = dubber._build_dubbing_text_snapshot_key(str(audio_path))
+    snapshot_path = cache_manager.get_cache_path("dubbing_texts") / f"{snapshot_key}.pkl"
     artifact_path = Path(config.get("artifacts_dir")) / "dubbing_texts.tsv"
-    return config, cache_path, artifact_path, audio_path
+    return config, cache_path, snapshot_path, artifact_path, audio_path
 
 
 def _seed_segments_from_transcription(
@@ -890,15 +892,58 @@ def _seed_segments_from_transcription(
 
 
 def _load_or_seed_segments(
-    config: DubbingConfig, cache_path: Path, audio_path: Path
-) -> tuple[list[dict[str, object]], bool]:
-    """Return cached translation segments; if the pickle is missing, seed
-    them from the transcription cache. The second return value is ``True``
-    when a fresh seed was created (i.e. no translation pickle yet).
-    """
+    config: DubbingConfig, cache_path: Path, snapshot_path: Path, audio_path: Path
+) -> tuple[list[dict[str, object]], str, bool, Path]:
+    """Load editable segments from pipeline cache, latest-run snapshot, or transcription."""
+    if snapshot_path.is_file():
+        with snapshot_path.open("rb") as handle:
+            payload = pickle.load(handle)
+        if isinstance(payload, list):
+            return payload, "snapshot", False, cache_path
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            raise ValueError(f"Unexpected Dubbing Texts snapshot in {snapshot_path}")
+        segments = payload.get("segments")
+        if not isinstance(segments, list):
+            raise ValueError(f"Dubbing Texts snapshot has no segment list: {snapshot_path}")
+        reusable = payload.get("translation_cache_reusable") is True
+        translation_cache_key = payload.get("translation_cache_key")
+        if reusable and isinstance(translation_cache_key, str) and translation_cache_key:
+            cache_path = cache_path.parent / f"{translation_cache_key}.pkl"
+        else:
+            reusable = False
+        return segments, "snapshot", reusable, cache_path
     if cache_path.is_file():
-        return _load_cached_translation_segments(cache_path), False
-    return _seed_segments_from_transcription(config, audio_path), True
+        return _load_cached_translation_segments(cache_path), "translation", True, cache_path
+    transcription_reusable = not (
+        config.get("isolated_tracks")
+        and config.get("semantic_split_enabled", True)
+    )
+    return (
+        _seed_segments_from_transcription(config, audio_path),
+        "transcription",
+        transcription_reusable,
+        cache_path,
+    )
+
+
+def _write_dubbing_text_snapshot(
+    snapshot_path: Path,
+    segments: list[dict[str, object]],
+    *,
+    translation_cache_reusable: bool,
+    translation_cache_path: Path,
+) -> None:
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "segments": segments,
+        "translation_cache_reusable": translation_cache_reusable,
+        "translation_cache_key": (
+            translation_cache_path.stem if translation_cache_reusable else None
+        ),
+    }
+    with snapshot_path.open("wb") as handle:
+        pickle.dump(payload, handle)
 
 
 def _format_seconds(value: object) -> str:
@@ -1020,8 +1065,16 @@ def _write_dubbing_text_artifact(artifact_path: Path, rows: list[list[str]]) -> 
 
 def load_dubbing_text_rows(overrides: dict[str, object]) -> tuple[str, list[list[str]]]:
     try:
-        config, cache_path, _artifact_path, audio_path = _build_dubbing_text_context(overrides)
-        cached_segments, seeded = _load_or_seed_segments(config, cache_path, audio_path)
+        (
+            config,
+            cache_path,
+            snapshot_path,
+            _artifact_path,
+            audio_path,
+        ) = _build_dubbing_text_context(overrides)
+        cached_segments, source, _reusable, _active_cache_path = _load_or_seed_segments(
+            config, cache_path, snapshot_path, audio_path
+        )
         rows = _segments_to_dubbing_text_rows(cached_segments)
         missing_indexes = [
             i for i, row in enumerate(rows)
@@ -1033,10 +1086,15 @@ def load_dubbing_text_rows(overrides: dict[str, object]) -> tuple[str, list[list
             "`Regenerate selected row` to re-run TTS for it."
             if missing_indexes else ""
         )
-        if seeded:
+        if source == "transcription":
             status = (
                 f"Loaded {len(rows)} row(s) from current transcription — no translations yet. "
                 "Edit the `Translation` column and click `Save texts` to create the translation cache."
+                + missing_note
+            )
+        elif source == "snapshot":
+            status = (
+                f"Loaded {len(rows)} dubbing text row(s) from the latest run snapshot."
                 + missing_note
             )
         else:
@@ -1049,8 +1107,16 @@ def load_dubbing_text_rows(overrides: dict[str, object]) -> tuple[str, list[list
 def save_dubbing_text_rows(rows: object, overrides: dict[str, object]) -> tuple[str, list[list[str]]]:
     normalized_rows = _normalize_dubbing_text_rows(rows)
     try:
-        config, cache_path, artifact_path, audio_path = _build_dubbing_text_context(overrides)
-        cached_segments, seeded = _load_or_seed_segments(config, cache_path, audio_path)
+        (
+            config,
+            cache_path,
+            snapshot_path,
+            artifact_path,
+            audio_path,
+        ) = _build_dubbing_text_context(overrides)
+        cached_segments, source, reusable, active_cache_path = _load_or_seed_segments(
+            config, cache_path, snapshot_path, audio_path
+        )
         if len(normalized_rows) != len(cached_segments):
             raise ValueError(
                 f"Edited row count ({len(normalized_rows)}) does not match cached segment count ({len(cached_segments)})."
@@ -1061,11 +1127,22 @@ def save_dubbing_text_rows(rows: object, overrides: dict[str, object]) -> tuple[
 
         saved_rows = [_segment_to_dubbing_text_row(seg) for seg in cached_segments]
 
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with cache_path.open("wb") as handle:
-            pickle.dump(cached_segments, handle)
+        _write_dubbing_text_snapshot(
+            snapshot_path,
+            cached_segments,
+            translation_cache_reusable=reusable,
+            translation_cache_path=active_cache_path,
+        )
+        if reusable:
+            active_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with active_cache_path.open("wb") as handle:
+                pickle.dump(cached_segments, handle)
         _write_dubbing_text_artifact(artifact_path, saved_rows)
-        prefix = "Created translation cache with" if seeded else "Saved"
+        prefix = (
+            "Created translation cache with"
+            if source == "transcription" and reusable
+            else "Saved"
+        )
         return f"{prefix} {len(saved_rows)} dubbing text row(s).", saved_rows
     except Exception as exc:
         return f"Failed: {exc}", normalized_rows
@@ -1089,8 +1166,16 @@ def regenerate_dubbing_text_row(
                 "Click a cell in the table first so a row is selected, then click Regenerate."
             )
 
-        config, cache_path, artifact_path, audio_path = _build_dubbing_text_context(overrides)
-        cached_segments, _seeded = _load_or_seed_segments(config, cache_path, audio_path)
+        (
+            config,
+            cache_path,
+            snapshot_path,
+            artifact_path,
+            audio_path,
+        ) = _build_dubbing_text_context(overrides)
+        cached_segments, _source, reusable, active_cache_path = _load_or_seed_segments(
+            config, cache_path, snapshot_path, audio_path
+        )
         if len(normalized_rows) != len(cached_segments):
             raise ValueError(
                 f"Edited row count ({len(normalized_rows)}) does not match cached segment count ({len(cached_segments)}). "
@@ -1133,9 +1218,16 @@ def regenerate_dubbing_text_row(
             override_text=override_text,
         )
 
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with cache_path.open("wb") as handle:
-            pickle.dump(cached_segments, handle)
+        _write_dubbing_text_snapshot(
+            snapshot_path,
+            cached_segments,
+            translation_cache_reusable=reusable,
+            translation_cache_path=active_cache_path,
+        )
+        if reusable:
+            active_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with active_cache_path.open("wb") as handle:
+                pickle.dump(cached_segments, handle)
         saved_rows = [_segment_to_dubbing_text_row(seg) for seg in cached_segments]
         _write_dubbing_text_artifact(artifact_path, saved_rows)
         audio_file = segment_dict.get("synthesized_speech_file") or "(missing)"

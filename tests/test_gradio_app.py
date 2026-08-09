@@ -170,10 +170,11 @@ def test_build_app_exposes_dubbing_texts_editor():
         "Original",
         "Translation",
         "Synthesized text",
+        "Style instructions",
         "Audio file",
     ]
-    assert dubbing_texts_props["column_widths"] == ["9%", "8%", "8%", "20%", "25%", "22%", "8%"]
-    assert dubbing_texts_props["static_columns"] == [6]
+    assert dubbing_texts_props["column_widths"] == ["8%", "7%", "7%", "18%", "22%", "18%", "13%", "7%"]
+    assert dubbing_texts_props["static_columns"] == [7]
     assert dubbing_texts_props["show_search"] == "search"
     assert dubbing_texts_props["pinned_columns"] == 3
 
@@ -526,6 +527,7 @@ def _patch_projects_root(monkeypatch, tmp_path):
 
 
 def _create_translation_cache(tmp_path, monkeypatch, *, segments):
+    monkeypatch.chdir(tmp_path)
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")
     _patch_projects_root(monkeypatch, tmp_path)
@@ -570,13 +572,14 @@ def test_load_dubbing_text_rows_reads_translation_cache(tmp_path, monkeypatch):
 
     status, rows = gradio_app.load_dubbing_text_rows(overrides)
 
-    assert status == "Loaded 1 dubbing text row(s)."
+    assert status.startswith("Loaded 1 dubbing text row(s).")
     assert rows == [[
         "SPEAKER_00",
         "0.000",
         "1.200",
         "Hello there",
         "Прывітанне",
+        "",
         "",
         "",
     ]]
@@ -607,6 +610,212 @@ def test_load_dubbing_text_rows_reads_current_transcription_after_transcribe_onl
         ["SPEAKER_01", "2.000", "3.000", "Second line", "Second line", "", "", ""],
     ]
     assert not cache_path.exists()
+
+
+def test_load_dubbing_text_rows_prefers_transient_run_snapshot(tmp_path, monkeypatch):
+    overrides, config, cache_path = _create_translation_cache(
+        tmp_path,
+        monkeypatch,
+        segments=[
+            {
+                "speaker": "SPEAKER_00",
+                "start": 0.0,
+                "end": 1.0,
+                "text": "Stale original",
+                "translation": "Стары кэш",
+            }
+        ],
+    )
+    Path(config.get("transcription_path")).write_text(
+        "[00.00.00-00.00.01] SPEAKER_00: Hello there\n",
+        encoding="utf-8",
+    )
+    audio_file = Path(config.get("audio_artifacts_dir")) / "chunk.wav"
+    AudioSegment.silent(duration=500).export(audio_file, format="wav")
+    snapshot_segments = [
+        {
+            "speaker": "SPEAKER_00",
+            "start": 0.0,
+            "end": 1.0,
+            "text": "Hello there",
+            "translation": "Прывітанне",
+            "synthesized_text": "Вітаю",
+            "style_prompt": "Say warmly:",
+            "synthesized_speech_file": str(audio_file),
+        }
+    ]
+    snapshot_path = (
+        cache_path.parent.parent / "dubbing_texts" / cache_path.name
+    )
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    with snapshot_path.open("wb") as handle:
+        pickle.dump(
+            {
+                "version": 1,
+                "segments": snapshot_segments,
+                "translation_cache_reusable": False,
+                "translation_cache_key": None,
+            },
+            handle,
+        )
+
+    status, rows = gradio_app.load_dubbing_text_rows(overrides)
+
+    assert status == "Loaded 1 dubbing text row(s) from the latest run snapshot."
+    assert rows == [[
+        "SPEAKER_00",
+        "0.000",
+        "1.000",
+        "Hello there",
+        "Прывітанне",
+        "Вітаю",
+        "Say warmly:",
+        str(audio_file),
+    ]]
+    snapshot_path.unlink()
+
+
+def test_save_transient_snapshot_does_not_overwrite_translation_cache(
+    tmp_path, monkeypatch
+):
+    overrides, config, cache_path = _create_translation_cache(
+        tmp_path,
+        monkeypatch,
+        segments=[
+            {
+                "speaker": "SPEAKER_00",
+                "start": 0.0,
+                "end": 1.0,
+                "text": "Stable original",
+                "translation": "Стабільны кэш",
+            }
+        ],
+    )
+    snapshot_path = cache_path.parent.parent / "dubbing_texts" / cache_path.name
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    with snapshot_path.open("wb") as handle:
+        pickle.dump(
+            {
+                "version": 1,
+                "segments": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "start": 0.0,
+                        "end": 1.0,
+                        "text": "Latest original",
+                        "translation": "Апошні пераклад",
+                        "synthesized_text": "Апошні TTS",
+                        "style_prompt": "Say calmly:",
+                    }
+                ],
+                "translation_cache_reusable": False,
+                "translation_cache_key": None,
+            },
+            handle,
+        )
+    edited_row = [
+        "SPEAKER_00",
+        "0.000",
+        "1.000",
+        "Latest original",
+        "Адрэдагаваны пераклад",
+        "Адрэдагаваны TTS",
+        "Say warmly:",
+        "",
+    ]
+
+    status, saved_rows = gradio_app.save_dubbing_text_rows([edited_row], overrides)
+
+    with cache_path.open("rb") as handle:
+        translation_segments = pickle.load(handle)
+    with snapshot_path.open("rb") as handle:
+        snapshot_payload = pickle.load(handle)
+    assert status == "Saved 1 dubbing text row(s)."
+    assert saved_rows == [edited_row]
+    assert translation_segments[0]["translation"] == "Стабільны кэш"
+    assert snapshot_payload["translation_cache_reusable"] is False
+    assert snapshot_payload["segments"][0]["translation"] == "Адрэдагаваны пераклад"
+
+
+def test_regenerate_transient_snapshot_does_not_overwrite_translation_cache(
+    tmp_path, monkeypatch
+):
+    overrides, config, cache_path = _create_translation_cache(
+        tmp_path,
+        monkeypatch,
+        segments=[
+            {
+                "speaker": "SPEAKER_00",
+                "start": 0.0,
+                "end": 1.0,
+                "text": "Stable original",
+                "translation": "Стабільны кэш",
+            }
+        ],
+    )
+    snapshot_path = cache_path.parent.parent / "dubbing_texts" / cache_path.name
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    with snapshot_path.open("wb") as handle:
+        pickle.dump(
+            {
+                "version": 1,
+                "segments": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "start": 0.0,
+                        "end": 1.0,
+                        "text": "Latest original",
+                        "translation": "Апошні пераклад",
+                        "synthesized_text": "Апошні TTS",
+                        "style_prompt": "Say calmly:",
+                    }
+                ],
+                "translation_cache_reusable": False,
+                "translation_cache_key": None,
+            },
+            handle,
+        )
+
+    real_smart_dubbing = gradio_app.SmartDubbing
+
+    class FakeSmartDubbing(real_smart_dubbing):
+        def __init__(self, current_config):
+            self.config = current_config
+            self.speakers_audio_dir = Path(current_config.get("speakers_audio_dir"))
+            self.speaker_processor = object()
+
+        def resynthesize_one_segment(self, segments, segment_index, override_text=None):
+            output_path = Path(self.config.get("audio_chunks_dir")) / f"{segment_index}.wav"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            AudioSegment.silent(duration=250).export(output_path, format="wav")
+            segments[segment_index]["synthesized_text"] = override_text
+            segments[segment_index]["synthesized_speech_file"] = str(output_path)
+            return str(output_path)
+
+    monkeypatch.setattr(gradio_app, "SmartDubbing", FakeSmartDubbing)
+    edited_row = [
+        "SPEAKER_00",
+        "0.000",
+        "1.000",
+        "Latest original",
+        "Апошні пераклад",
+        "Новы TTS",
+        "Say calmly:",
+        "",
+    ]
+
+    status, _saved_rows = gradio_app.regenerate_dubbing_text_row(
+        [edited_row], 0, overrides
+    )
+
+    with cache_path.open("rb") as handle:
+        translation_segments = pickle.load(handle)
+    with snapshot_path.open("rb") as handle:
+        snapshot_payload = pickle.load(handle)
+    assert status.startswith("Regenerated row 0:")
+    assert translation_segments[0]["translation"] == "Стабільны кэш"
+    assert snapshot_payload["translation_cache_reusable"] is False
+    assert snapshot_payload["segments"][0]["synthesized_text"] == "Новы TTS"
 
 
 def test_load_dubbing_text_rows_preserves_transcription_milliseconds(
@@ -658,6 +867,7 @@ def test_save_dubbing_text_rows_updates_cache_and_tsv(tmp_path, monkeypatch):
         "Hello there",
         "Новы тэкст",
         "Новы сінтэз",
+        "",
         "",
     ]
     status, saved_rows = gradio_app.save_dubbing_text_rows([edited_row], overrides)

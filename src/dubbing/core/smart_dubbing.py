@@ -509,20 +509,25 @@ class SmartDubbing:
 
         return audio_file, background_audio_path, segment_reference_audio_file
 
-    def _build_translation_cache_key(self, audio_file: str) -> str:
-        """Compute the translation cache key used by translate_segments()."""
+    def _build_dubbing_text_snapshot_key(self, audio_file: str) -> str:
+        """Compute the stable, plan-independent key used by the text editor."""
         effective_prompt_prefix = self._build_translation_prompt_prefix(
             self.config.get("translation_prompt_prefix")
         )
         prompt_prefix_hash = hashlib.md5(
             effective_prompt_prefix.encode("utf-8")
         ).hexdigest()[:12]
-        semantic_fingerprint = getattr(self, "_semantic_plan_fingerprint", None)
-        semantic_suffix = f"_semantic_{semantic_fingerprint}" if semantic_fingerprint else ""
         return (
             f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}"
-            f"_{self.config.get('target_language')}_{prompt_prefix_hash}{semantic_suffix}"
+            f"_{self.config.get('target_language')}_{prompt_prefix_hash}"
         )
+
+    def _build_translation_cache_key(self, audio_file: str) -> str:
+        """Compute the plan-aware translation cache key used by the pipeline."""
+        base_key = self._build_dubbing_text_snapshot_key(audio_file)
+        semantic_fingerprint = getattr(self, "_semantic_plan_fingerprint", None)
+        semantic_suffix = f"_semantic_{semantic_fingerprint}" if semantic_fingerprint else ""
+        return f"{base_key}{semantic_suffix}"
 
     def _build_emotions_cache_key(
         self,
@@ -737,14 +742,41 @@ class SmartDubbing:
             upscale_sharpen=self.config.get('upscale_sharpen', True),
         )
 
+    def _persist_dubbing_text_snapshot(
+        self, segments: List[Dict], audio_file: str
+    ) -> None:
+        """Persist the latest real segment state for the Dubbing Texts editor."""
+        translation_cache_reusable = getattr(
+            self, "_semantic_plan_cache_persistable", True
+        )
+        try:
+            snapshot_key = self._build_dubbing_text_snapshot_key(audio_file)
+            snapshot_payload = {
+                "version": 1,
+                "segments": segments,
+                "translation_cache_reusable": translation_cache_reusable,
+                "translation_cache_key": (
+                    self._build_translation_cache_key(audio_file)
+                    if translation_cache_reusable
+                    else None
+                ),
+            }
+            self.cache_manager.save_to_cache(
+                "dubbing_texts", snapshot_key, snapshot_payload
+            )
+        except Exception as e:
+            logger.warning(f"Could not persist Dubbing Texts snapshot: {e}")
+
     def _persist_synthesis_results(
         self, segments: List[Dict], audio_file: str
     ) -> None:
-        """Write post-synthesis segment state (with `synthesized_text` /
-        `synthesized_speech_file`) back to the translation cache so the UI
-        editor can display and reuse them.
-        """
-        if not getattr(self, "_semantic_plan_cache_persistable", True):
+        """Persist post-synthesis editor state and reusable pipeline state."""
+        self._persist_dubbing_text_snapshot(segments, audio_file)
+
+        translation_cache_reusable = getattr(
+            self, "_semantic_plan_cache_persistable", True
+        )
+        if not translation_cache_reusable:
             return
         try:
             cache_key = self._build_translation_cache_key(audio_file)
@@ -1840,6 +1872,7 @@ class SmartDubbing:
         
         # Store for debug
         self.debug_data["translation"] = translated_segments
+        self._persist_dubbing_text_snapshot(translated_segments, audio_file)
         
         return translated_segments
 

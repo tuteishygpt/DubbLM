@@ -937,6 +937,102 @@ def test_translate_segments_accepts_one_consistent_semantic_fingerprint():
     assert dubber._semantic_plan_fingerprint == "plan-a"
 
 
+def test_transient_semantic_plan_still_persists_dubbing_text_snapshot():
+    from dubbing.core.smart_dubbing import SmartDubbing
+
+    segments = [
+        {
+            "speaker": "SPEAKER_00",
+            "translation": "Пераклад",
+            "synthesized_text": "Тэкст для TTS",
+            "synthesized_speech_file": "chunk.wav",
+        }
+    ]
+
+    class Cache:
+        def __init__(self):
+            self.saved = []
+
+        def generate_cache_key(self, *_args):
+            return "base"
+
+        def save_to_cache(self, step_name, cache_key, data):
+            self.saved.append((step_name, cache_key, data))
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {"source_language": "en", "target_language": "be"}
+    dubber.cache_manager = Cache()
+    dubber._semantic_plan_cache_persistable = False
+
+    dubber._persist_synthesis_results(segments, "source.wav")
+
+    assert [step for step, _key, _data in dubber.cache_manager.saved] == [
+        "dubbing_texts"
+    ]
+    assert dubber.cache_manager.saved[0][2] == {
+        "version": 1,
+        "segments": segments,
+        "translation_cache_reusable": False,
+        "translation_cache_key": None,
+    }
+
+
+def test_cached_translation_refreshes_latest_dubbing_text_snapshot():
+    from dubbing.core.smart_dubbing import SmartDubbing
+
+    segments = [
+        {
+            "semantic_unit_id": "unit-a",
+            "semantic_plan_fingerprint": "plan-a",
+            "speaker": "SPEAKER_00",
+            "translation": "Пераклад",
+        }
+    ]
+
+    class Cache:
+        def __init__(self):
+            self.saved = []
+
+        def generate_cache_key(self, *_args):
+            return "base"
+
+        def cache_exists(self, *_args):
+            return True
+
+        def load_from_cache(self, *_args):
+            return segments
+
+        def save_to_cache(self, step_name, cache_key, data):
+            self.saved.append((step_name, cache_key, data))
+
+    class Performance:
+        def record_metric(self, *_args):
+            pass
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {"source_language": "en", "target_language": "be"}
+    dubber.cache_manager = Cache()
+    dubber.performance_tracker = Performance()
+    dubber.debug_data = {}
+    dubber._semantic_plan_cache_persistable = True
+
+    assert dubber.translate_segments(segments, "source.wav") == segments
+
+    snapshot_writes = [
+        data
+        for step, _key, data in dubber.cache_manager.saved
+        if step == "dubbing_texts"
+    ]
+    assert snapshot_writes == [
+        {
+            "version": 1,
+            "segments": segments,
+            "translation_cache_reusable": True,
+            "translation_cache_key": "base_be_f6f3cf3be291_semantic_plan-a",
+        }
+    ]
+
+
 def test_plan_dependent_cache_rejects_a_partially_missing_fingerprint():
     from dubbing.core.smart_dubbing import SmartDubbing
 
