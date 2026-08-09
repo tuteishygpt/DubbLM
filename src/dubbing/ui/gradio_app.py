@@ -6,6 +6,7 @@ import csv
 import json
 import logging
 import pickle
+import re
 import shutil
 from pathlib import Path
 
@@ -818,24 +819,56 @@ def _build_dubbing_text_context(
 
 
 def _seed_segments_from_transcription(
-    config: DubbingConfig, audio_path: Path
+    config: DubbingConfig, _audio_path: Path
 ) -> list[dict[str, object]]:
-    """Build dubbing-texts segments from a cached transcription when no
-    `translation` pickle exists yet (e.g. after `transcribe_only`).
-    """
-    dubber = SmartDubbing(config)
-    _speakers_rolls, transcription = dubber.diarize_and_transcribe(str(audio_path))
-    if not transcription:
-        raise RuntimeError(
-            "Transcription cache is empty. Run `transcribe_only` (or the full pipeline) first."
+    """Build editable segments from the current ``transcribe_only`` artifact."""
+    transcription_path = Path(config.get("transcription_path", ""))
+    if not transcription_path.is_file():
+        raise FileNotFoundError(
+            f"Current transcription not found: {transcription_path}. "
+            "Run `transcribe_only` or the full pipeline first."
         )
+
+    line_pattern = re.compile(
+        r"^\[(?P<start>\d{2}\.\d{2}\.\d{2})-"
+        r"(?P<end>\d{2}\.\d{2}\.\d{2})\]\s+"
+        r"(?P<speaker>[^:]+):\s?(?P<text>.*)$"
+    )
+
+    def parse_timestamp(value: str) -> float:
+        hours, minutes, seconds = (int(part) for part in value.split("."))
+        return float(hours * 3600 + minutes * 60 + seconds)
+
+    transcription: list[dict[str, object]] = []
+    for line_number, raw_line in enumerate(
+        transcription_path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = line_pattern.match(line)
+        if match is None:
+            raise ValueError(
+                f"Unexpected transcription format at {transcription_path}:{line_number}."
+            )
+        transcription.append(
+            {
+                "speaker": match.group("speaker").strip() or "SPEAKER_00",
+                "start": parse_timestamp(match.group("start")),
+                "end": parse_timestamp(match.group("end")),
+                "text": match.group("text"),
+            }
+        )
+
+    if not transcription:
+        raise RuntimeError(f"Current transcription is empty: {transcription_path}")
 
     segments: list[dict[str, object]] = []
     for entry in transcription:
-        text = str(entry.get("text", "") or "").strip()
-        speaker = str(entry.get("speaker", "") or "SPEAKER_00")
-        start = float(entry.get("start", 0.0) or 0.0)
-        end = float(entry.get("end", 0.0) or 0.0)
+        text = str(entry["text"] or "").strip()
+        speaker = str(entry["speaker"] or "SPEAKER_00")
+        start = float(entry["start"] or 0.0)
+        end = float(entry["end"] or 0.0)
         segments.append(
             {
                 "speaker": speaker,
@@ -999,7 +1032,7 @@ def load_dubbing_text_rows(overrides: dict[str, object]) -> tuple[str, list[list
         )
         if seeded:
             status = (
-                f"Loaded {len(rows)} row(s) from transcription cache — no translations yet. "
+                f"Loaded {len(rows)} row(s) from current transcription — no translations yet. "
                 "Edit the `Translation` column and click `Save texts` to create the translation cache."
                 + missing_note
             )

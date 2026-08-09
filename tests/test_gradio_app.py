@@ -582,6 +582,33 @@ def test_load_dubbing_text_rows_reads_translation_cache(tmp_path, monkeypatch):
     ]]
 
 
+def test_load_dubbing_text_rows_reads_current_transcription_after_transcribe_only(
+    tmp_path, monkeypatch
+):
+    overrides, config, cache_path = _create_translation_cache(
+        tmp_path,
+        monkeypatch,
+        segments=[],
+    )
+    cache_path.unlink()
+    Path(config.get("transcription_path")).write_text(
+        "[00.00.00-00.00.01] SPEAKER_00: Hello there\n"
+        "[00.00.02-00.00.03] SPEAKER_01: Second line\n",
+        encoding="utf-8",
+    )
+
+    status, rows = gradio_app.load_dubbing_text_rows(overrides)
+
+    assert status.startswith(
+        "Loaded 2 row(s) from current transcription — no translations yet."
+    )
+    assert rows == [
+        ["SPEAKER_00", "0.000", "1.000", "Hello there", "Hello there", "", "", ""],
+        ["SPEAKER_01", "2.000", "3.000", "Second line", "Second line", "", "", ""],
+    ]
+    assert not cache_path.exists()
+
+
 def test_save_dubbing_text_rows_updates_cache_and_tsv(tmp_path, monkeypatch):
     overrides, config, cache_path = _create_translation_cache(
         tmp_path,
