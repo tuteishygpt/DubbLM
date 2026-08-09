@@ -79,7 +79,8 @@ Replace the hard 15-second recursive split with a semantic segment planner:
 The planner first rebuilds a continuity chain from adjacent VAD regions for the
 same isolated speaker. A short acoustic pause is retained as metadata; it does
 not force a boundary. The old `max_duration * 1.5` merge cap must not prevent a
-30-second thought from being considered as one chain.
+30-second thought from being considered as one chain. A speaker change is
+always a semantic boundary.
 
 For each chain, candidate cuts are produced from word boundaries. Candidates
 are ranked in this order:
@@ -98,23 +99,71 @@ subordinating conjunction, preposition, determiner, or construction such as
 `I think that` or `if we've laid off`.
 
 Obvious boundaries are classified locally from punctuation, pause, speaker,
-and incomplete-tail rules. Ambiguous candidate boundaries are evaluated in one
+and incomplete-tail rules. Ambiguous candidate boundaries are evaluated in a
 batched structured LLM request using the source text on both sides. The
-classifier returns `CUT`, `CONTINUE`, or `UNCERTAIN` plus confidence and a
-reason code. It must not rewrite the transcript. If the configured LLM is
-unavailable, malformed, or times out, the deterministic ranking is used and a
-diagnostic records the fallback. A second ASR provider is deliberately not
-required.
+classifier must not rewrite the transcript. A second ASR provider is
+deliberately not required.
 
-The planner chooses the highest-ranked valid candidate inside the search
-window, with distance from the preferred duration as a tie-breaker. If there
-is no valid boundary, it extends the unit until the next valid boundary or the
-hard maximum. Crossing the preferred duration is always preferable to cutting
-an unfinished sentence.
+### Exact boundary selection
 
-If a chain reaches the hard maximum without any valid semantic boundary, the
-planner makes a forced cut at the strongest safe acoustic/clause candidate and
-marks both sides with a shared `continuation_id` and
+Planning proceeds left-to-right. For a unit beginning at `unit_start`, define:
+
+```text
+target = unit_start + preferred_duration
+hard_end = min(chain_end, unit_start + hard_duration)
+effective_window = min(configured_search_window,
+                       preferred_duration,
+                       hard_duration - preferred_duration)
+search_start = max(unit_start, target - effective_window)
+search_end = min(hard_end, target + effective_window)
+```
+
+An oversized search-window setting is therefore deterministically clamped; it
+can never move a normal cut beyond the hard limit. Candidate times are the end
+of the word/segment on the left. The following local decisions apply:
+
+- `HARD_CONTINUE`: the left text has an incomplete tail. This veto overrides
+  sentence punctuation and an LLM `CUT`.
+- `LOCAL_CUT_SENTENCE`: sentence-final punctuation and no incomplete tail.
+- `LOCAL_CUT_CLAUSE`: soft punctuation, no incomplete tail, and a source pause
+  of at least 0.2 seconds.
+- `AMBIGUOUS`: every other ASR/VAD boundary near a possible cut.
+
+Incomplete-tail detection normalizes case and trailing punctuation, then checks
+the final source-language tokens against versioned language-specific rule
+tables. The English table includes subordinating conjunctions, coordinating
+conjunctions, prepositions, determiners, and explicit multi-token tails such as
+`I think that` and `if we've laid off`. Unsupported languages use only
+language-neutral punctuation and send non-obvious candidates to the LLM.
+
+The LLM returns `CUT`, `CONTINUE`, or `UNCERTAIN` with confidence in `[0, 1]`.
+`CUT >= 0.75` makes an ambiguous candidate eligible; `CONTINUE >= 0.60` vetoes
+it. Low-confidence results, `UNCERTAIN`, missing results, and malformed results
+fall back per candidate to the local decision. `HARD_CONTINUE` always wins.
+
+Eligible candidates in `[search_start, search_end]` are ordered by this exact
+tuple, ascending:
+
+```text
+(-decision_priority, -semantic_rank, abs(candidate_time - target),
+ -source_pause, source_word_or_segment_index)
+```
+
+An accepted LLM `CUT` has decision priority 3, a local complete sentence 2,
+and a local complete clause 1. Sentence, clause, and plain-boundary semantic
+ranks are 3, 2, and 1. If the window has no eligible candidate, scan eligible
+candidates in `(search_end, hard_end]` with the same ordering. If the remaining
+chain ends by `hard_end`, emit it unsplit rather than inventing a bad cut.
+
+If the chain continues past `hard_end` and no eligible candidate exists, a cut
+is mandatory. Choose among all word boundaries at or before `hard_end` by
+`(-source_pause, -punctuation_rank, -candidate_time, source_word_index)`. This
+forced rule may override `HARD_CONTINUE`, but only to guarantee the configured
+hard maximum. If no complete word ends by `hard_end`, raise
+`SemanticSegmentationError` with the speaker, offending word/segment, and
+timestamps rather than silently exceed the invariant.
+
+The forced cut marks both sides with a shared `continuation_id` and
 `boundary_type=technical_continuation`. Such a cut:
 
 - adds no synthetic pause;
@@ -124,9 +173,71 @@ marks both sides with a shared `continuation_id` and
 
 Normal semantic cuts use `boundary_type=semantic`. Each planned unit retains
 the contributing VAD-region IDs and word range so its start and end are still
-derived from recognized word timestamps. The translation and TTS stages
-consume the planned semantic units, while debug output preserves their lineage
-back to the raw VAD regions.
+derived from recognized word timestamps.
+
+For ASR backends without word timestamps, ASR/VAD segment boundaries are the
+only candidates and the same selection algorithm applies with segment indexes.
+An individual no-word-timestamp segment longer than the hard maximum is
+indivisible and raises `SemanticSegmentationError`, explaining that a
+word-timestamp backend is required or semantic splitting must be disabled. A
+second ASR is never started implicitly.
+
+### LLM integration contract
+
+`LLMTranslator` exposes `classify_semantic_boundaries(request)`. It uses the
+already initialized primary translation `llm`, `llm_provider`, and `model_name`;
+it does not create another client. `SmartDubbing` passes this optional callable
+to `run_isolated_tracks`, which passes it into the planner. A non-LLM translator
+or unavailable callable selects deterministic-only mode.
+
+Candidates are batched in stable source order, at most 50 candidates and 12,000
+input characters per request. Each request uses the source-language code and:
+
+```json
+{"candidates": [{"id": "stable-id", "left": "...", "right": "...", "pause": 0.644}]}
+```
+
+The response schema is:
+
+```json
+{"boundaries": [{"id": "stable-id", "decision": "CUT", "confidence": 0.92, "reason_code": "complete_sentence"}]}
+```
+
+Candidate IDs are unique within a request. Duplicate, unknown, missing, or
+invalid response entries fall back independently; they do not discard valid
+siblings. Calls use a 30-second timeout. Provider errors and timeouts fall back
+for the affected batch and are marked transient. The prompt and parser are
+versioned as `semantic_boundary_prompt_v1`.
+
+### Boundary preservation and lineage
+
+The translation and TTS stages consume the planned semantic units. Both
+`LLMTranslator._optimize_segments` passes must treat `lock_boundary_before` as
+a merge veto and preserve all semantic metadata. Translation chunking may put
+multiple locked units in one context request, but decomposition and refinement
+must return one translation per stable `semantic_unit_id`; it may not merge IDs
+or produce a unit over the hard maximum. Missing or duplicate IDs fail that
+translation batch through its existing retry/fallback path.
+
+Every planned unit has this minimum schema:
+
+```text
+semantic_unit_id: sha256(planner_version, speaker, first_source_index,
+                         last_source_index, start_ms, end_ms)[:16]
+speaker: original isolated-track label
+start/end: recognized word or ASR/VAD-segment timestamps
+source_word_range: [first_index, end_exclusive] or null
+source_segment_ids: ordered stable ASR segment IDs
+vad_region_ids: ordered IDs such as SPEAKER_00:v000013
+lock_boundary_before: true except for the first unit in a chain
+boundary_before: {candidate_id, type, source_pause, decision, confidence,
+                  reason_code, classifier_mode}
+continuation_id: null or sha256(chain_id, forced_cut_source_index)[:16]
+```
+
+Raw VAD region IDs and ASR word/segment indexes are assigned before any merge
+or split and never renumbered. Merging concatenates ordered lineage; splitting
+slices it. Debug output preserves this lineage through translation and TTS.
 
 For the motivating artifact, the expected planning decisions are:
 
@@ -229,12 +340,23 @@ Validation rules:
 - Speed multipliers must be at least `1.0`.
 - Preferred duration must be positive, hard duration must be greater than or
   equal to preferred duration, and the search window must be non-negative.
+- `semantic_split_enabled` accepts booleans plus the existing normalized
+  `true`/`false` and `1`/`0` forms. Other values fall back to `true` with a
+  warning.
+- The effective search window is clamped by the formula in Exact boundary
+  selection; the stored user value is retained for display.
 - Invalid YAML/programmatic values, including NaN and infinity, fall back to
   defaults with a warning.
 - Gradio uses numeric fields with appropriate precision.
 
 One shared normalization helper applies these rules to YAML, CLI, Gradio-loaded
 defaults, and programmatic overrides so entry points cannot disagree.
+
+When `semantic_split_enabled=false`, the isolated-track path uses the existing
+legacy `_merge_close_segments` followed by `_split_long_segments`, with
+`tts_preferred_segment_duration` as its fixed maximum. The hard duration,
+search window, LLM classifier, semantic metadata, and semantic-plan cache are
+not used. This compatibility mode is logged explicitly.
 
 The legacy `group_overflow_tolerance` setting is retained for one compatibility
 cycle as a deprecated, ignored alias. Loading a non-default value logs a warning
@@ -249,7 +371,7 @@ constants. They are not exposed in the interface in this iteration.
 ### Timing configuration
 
 `src/dubbing/core/config.py` owns defaults, validation, and CLI arguments.
-`src/dubbing/ui/gradio_app.py` exposes the four settings and includes them in
+`src/dubbing/ui/gradio_app.py` exposes all eight settings and includes them in
 the existing ordered input component list.
 
 ### Edge-silence trimming
@@ -324,6 +446,34 @@ the final track. The segment cache also records whether a file is raw under the
 new trimming contract; legacy entries use the compatibility behavior described
 above.
 
+Split isolated-track caching into two layers:
+
+1. `isolated_tracks_raw_transcription` is keyed by track fingerprints, VAD/ASR
+   provider and model, language, trim range, and `isolated_raw_v1`. It stores
+   stable VAD IDs plus raw words/segments before semantic planning.
+2. `isolated_tracks_semantic_plan` is keyed by the raw fingerprint, all four
+   semantic settings, `semantic_planner_v1`, incomplete-tail rule-table
+   version, prompt/parser version, source language, and LLM provider/model (or
+   `deterministic-only`). Its value stores the plan and a
+   `semantic_plan_fingerprint`, computed from canonical JSON containing the
+   resulting ordered boundaries and lineage.
+
+The `semantic_plan_fingerprint` is included in translation, translated-segment
+resume data, raw per-unit TTS identity, final `synthesized_speech`, and
+`tts_to_end` resume validation. A cached translation or final track whose
+fingerprint is absent or different is rejected and rebuilt. The legacy combined
+isolated-transcription cache is readable only when semantic splitting is
+disabled; it is never promoted to a semantic plan without replanning.
+
+Successful LLM classifications are cached per candidate-payload hash under
+`semantic_boundary_classification`, including provider, model, source language,
+and prompt/parser version. Deterministic-only results are stable and may be
+persisted. Timeout, provider error, or malformed-response fallback is transient:
+the run continues, but neither the semantic-plan cache nor translation/final
+artifacts derived from that transient plan are persisted. Raw transcription
+and successful per-candidate classifications remain reusable. This prevents a
+temporary LLM failure from becoming a sticky segmentation result.
+
 ## Diagnostics
 
 Generate `artifacts/debug/timing_alignment.tsv` when debug information is
@@ -342,6 +492,15 @@ enabled. Each row contains:
 Warnings identify segments that remain beyond the allowed overflow after the
 maximum permitted speed adjustment.
 
+Also generate `artifacts/debug/semantic_boundaries.jsonl`. One record per
+candidate contains its stable ID, speaker, source indexes, left/right context,
+candidate time, measured source pause, local decision, LLM decision and
+confidence when present, final decision, reason code, classifier mode, fallback
+reason, chosen/not-chosen state, semantic unit ID, boundary type, lineage, and
+continuation ID. The timing TSV includes `semantic_unit_id`,
+`semantic_plan_fingerprint`, and `continuation_id` so a generated waveform can
+be traced back to the exact plan.
+
 ## Error handling
 
 - If FFmpeg tempo adjustment fails, use the unmodified trimmed clip, record
@@ -351,6 +510,11 @@ maximum permitted speed adjustment.
 - Zero-length recognized ranges are valid and use the next anchor as available
   slack. Invalid ranges fail validation before synthesis.
 - Audio is never silently cut merely to satisfy the overflow limit.
+- An indivisible no-word-timestamp segment over the semantic hard maximum fails
+  before translation with an actionable `SemanticSegmentationError`.
+- A transient boundary-classifier failure uses deterministic per-candidate
+  fallback and disables persistence of downstream plan-dependent caches for
+  that run.
 
 ## Testing
 
@@ -376,18 +540,38 @@ Add focused tests covering:
 12. Final-cache keys change with every timing setting and the algorithm version,
     while raw segment caches remain reusable.
 13. Raw and legacy cached chunks produce defined trimming diagnostics.
-14. A same-speaker 30-second chain can cross the 15-second preferred duration
-    and cuts at a complete sentence rather than after `I think that`.
-15. Rows equivalent to 6--8 produce `JOIN, KEEP`, while rows equivalent to
-    13--15 never cut after the incomplete `that` boundary.
+14. Check in `tests/fixtures/semantic_boundaries_matthew.json` containing the
+    exact source text, timestamps, word timestamps, stable ASR/VAD IDs, and
+    speaker labels for motivating rows 6--8 and 13--15. Its expected plan
+    specifies 6→7 `CONTINUE`, 7→8 `CUT`, 13→14 `CONTINUE`, and 14→15
+    `CONTINUE`, plus the expected resegmented unit text, start/end timestamps,
+    source ranges, and lineage.
+15. Run that exact fixture through both accepted LLM results and
+    deterministic-only fallback. Assert that no chosen boundary follows
+    `I think that`, every output unit is at most 35 seconds, unit text is a
+    lossless ordered reconstruction of the fixture words, starts/ends come from
+    fixture timestamps, and all source/VAD IDs occur exactly once in lineage.
 16. Sentence-final punctuation is considered even with a word gap below 0.4
-    seconds; a long VAD pause after an incomplete tail is rejected.
-17. No semantic candidate before the hard maximum produces a marked technical
-    continuation with no added pause.
-18. LLM `CUT`, `CONTINUE`, malformed response, timeout, and unavailable-provider
-    paths all produce deterministic, cached outcomes and diagnostics.
-19. Configuration, CLI, Gradio defaults, validation, and persistence cover all
-    four semantic-split settings.
+    seconds; a long VAD pause after an incomplete tail is a `HARD_CONTINUE`,
+    including when the LLM returns high-confidence `CUT`.
+17. Exact search-window and tie-break tests cover candidates on both interval
+    edges, equal scores, clamped oversized windows, extension beyond the soft
+    target, and a forced cut at or before 35 seconds when every candidate is
+    vetoed.
+18. LLM `CUT`, `CONTINUE`, low confidence, `UNCERTAIN`, missing ID, duplicate
+    ID, unknown ID, malformed response, timeout, unavailable classifier, and
+    mixed-validity batch paths produce the defined per-candidate outcomes.
+19. Wordless multi-segment input uses segment-boundary fallback; an indivisible
+    segment over 35 seconds raises the specified error without starting another
+    ASR provider.
+20. Both translation optimization passes and refinement preserve locked
+    semantic boundaries, IDs, lineage, and the 35-second invariant.
+21. Raw transcription, successful classification, semantic plan, translation,
+    raw TTS, final assembly, and resume cache tests prove the fingerprint rules;
+    transient LLM fallback persists only raw transcription and successful
+    candidate classifications.
+22. Configuration, CLI, Gradio defaults, validation, disabled legacy mode, and
+    persistence cover all four semantic-split settings.
 
 The existing full test suite remains the regression gate. A real-artifact check
 compares `transcription.srt`, generated chunks, and final output duration for the
