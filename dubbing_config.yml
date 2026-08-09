@@ -1,0 +1,49 @@
+source_language: en
+target_language: ru
+debug_info: false
+debug_diarize_only: false
+debug_tts: true
+whisper_model: large-v3
+keep_background: true
+no_cache: false
+remove_pauses: false
+normalize_audio: true
+dubbed_volume: 1
+use_two_pass_encoding: false
+tts_system: omnivoice
+omnivoice_space_id: k2-fsa/OmniVoice
+segment_reference_min_duration: 1
+transcription_system: assemblyai
+translator_type: llm
+llm_provider: gemini
+llm_model_name: gemini-3.1-pro-preview
+llm_temperature: 1
+refinement_llm_provider: gemini
+refinement_model_name: gemini-3.1-pro-preview
+refinement_temperature: 1.8
+refinement_persona: ai_buddy
+save_original_subtitles: false
+save_translated_subtitles: false
+voice_auto_selection: true
+include_original_audio: false
+start_time: 0
+refinement_max_tokens: 0
+enable_emotion_analysis: false
+min_pause_duration: 3
+keyframe_buffer: 0.2
+background_volume: 0.762341
+group_overflow_tolerance: 1
+gemini_transcription_model: gemini-3.1-pro-preview
+voices:
+  SPEAKER_00:
+    tts_system: gemini
+    model: gemini-3.1-flash-tts-preview
+    fallback_model: gemini-3.1-flash-tts-preview
+    voice_name: Achird
+  SPEAKER_01:
+    tts_system: omnivoice
+    reference_audio: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_03\reference.mp3
+    reference_text: И тут прямо какие-то Анадырь, Чита, и с этой стороны какие-то американские
+      города, стоят печати аэропортов. Очень живописно выглядит, где-то по-русски...
+duration: 800
+transcription_model: best
