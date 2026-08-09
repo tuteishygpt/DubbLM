@@ -106,6 +106,7 @@ prj/NA_Matthew Manarino_shorts_3/*.srt
 # Credentials / secrets
 cred/
 *.json
+!tests/fixtures/semantic_boundaries_matthew.json
 
 # Ignore Gemini voice stats file
 tts/samples/gemini/gemini_voice_stats.json

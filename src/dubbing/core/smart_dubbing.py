@@ -517,14 +517,59 @@ class SmartDubbing:
         prompt_prefix_hash = hashlib.md5(
             effective_prompt_prefix.encode("utf-8")
         ).hexdigest()[:12]
+        semantic_fingerprint = getattr(self, "_semantic_plan_fingerprint", None)
+        semantic_suffix = f"_semantic_{semantic_fingerprint}" if semantic_fingerprint else ""
         return (
             f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}"
-            f"_{self.config.get('target_language')}_{prompt_prefix_hash}"
+            f"_{self.config.get('target_language')}_{prompt_prefix_hash}{semantic_suffix}"
         )
 
     def _build_emotions_cache_key(self, audio_file: str) -> str:
         """Compute the emotion-analysis cache key used by analyze_emotions()."""
         return self.cache_manager.generate_cache_key(audio_file, "", "", "")
+
+    def _restore_semantic_plan_fingerprint(self, audio_file: str) -> None:
+        """Restore the semantic identity needed by resume cache keys."""
+        isolated_tracks = self.config.get("isolated_tracks")
+        if not isolated_tracks or not self.config.get("semantic_split_enabled", True):
+            return
+        step_name = "isolated_tracks_semantic_plan"
+        cache_key = self._isolated_tracks_cache_key(audio_file, isolated_tracks)
+        if not self.cache_manager.cache_exists(step_name, cache_key):
+            raise FileNotFoundError(
+                "Semantic-plan cache is missing or stale; run transcribe_only or the "
+                "full pipeline before resuming plan-dependent translation/TTS."
+            )
+        cached = self.cache_manager.load_from_cache(step_name, cache_key)
+        transcription = cached.get("transcription") if isinstance(cached, dict) else None
+        fingerprints = {
+            segment.get("semantic_plan_fingerprint")
+            for segment in (transcription or [])
+            if segment.get("semantic_plan_fingerprint")
+        }
+        if (
+            len(fingerprints) != 1
+            or any(
+                segment.get("semantic_plan_fingerprint") not in fingerprints
+                for segment in (transcription or [])
+            )
+        ):
+            raise ValueError("Cached semantic plan has a missing or inconsistent fingerprint")
+        self._semantic_plan_fingerprint = next(iter(fingerprints))
+        self._semantic_plan_cache_persistable = True
+
+    def _validate_plan_dependent_segments(self, segments: List[Dict[str, Any]]) -> None:
+        expected = getattr(self, "_semantic_plan_fingerprint", None)
+        if expected is None:
+            return
+        if any(
+            segment.get("semantic_plan_fingerprint") != expected
+            for segment in segments
+        ):
+            raise ValueError(
+                "Cached artifact semantic_plan_fingerprint is absent or does not "
+                "match the active semantic plan"
+            )
 
     def _load_required_cached_step(self, *, step_name: str, cache_key: str, hint: str) -> Any:
         """Load a required cached artifact or raise an actionable error."""
@@ -684,6 +729,8 @@ class SmartDubbing:
         `synthesized_speech_file`) back to the translation cache so the UI
         editor can display and reuse them.
         """
+        if not getattr(self, "_semantic_plan_cache_persistable", True):
+            return
         try:
             cache_key = self._build_translation_cache_key(audio_file)
             self.cache_manager.save_to_cache("translation", cache_key, segments)
@@ -729,6 +776,9 @@ class SmartDubbing:
             "deepgram_diarization_transcription",
             "assemblyai_diarization_transcription",
             "isolated_tracks_transcription",
+            "isolated_tracks_raw_transcription",
+            "isolated_tracks_semantic_plan",
+            "semantic_boundary_classification",
             "chunked_processing",
             "segment_transcription",
             "diarization",
@@ -861,12 +911,14 @@ class SmartDubbing:
                 )
 
             audio_file, _, _ = self._prepare_audio_inputs()
+            self._restore_semantic_plan_fingerprint(audio_file)
 
             translated_segments = self._load_required_cached_step(
                 step_name="translation",
                 cache_key=self._build_translation_cache_key(audio_file),
                 hint="translation",
             )
+            self._validate_plan_dependent_segments(translated_segments)
 
             try:
                 self.cache_manager.clear_cache("emotions")
@@ -925,11 +977,13 @@ class SmartDubbing:
 
         try:
             audio_file, background_audio_path, segment_reference_audio_file = self._prepare_audio_inputs()
+            self._restore_semantic_plan_fingerprint(audio_file)
             translated_segments = self._load_required_cached_step(
                 step_name="translation",
                 cache_key=self._build_translation_cache_key(audio_file),
                 hint="translation",
             )
+            self._validate_plan_dependent_segments(translated_segments)
 
             self.debug_data["translation"] = translated_segments
             segments_for_output = self._apply_speaker_filter(translated_segments)
@@ -1232,7 +1286,11 @@ class SmartDubbing:
         # then, so we just recompute).
         isolated_tracks = self.config.get('isolated_tracks')
         if isolated_tracks:
-            step_name = "isolated_tracks_transcription"
+            step_name = (
+                "isolated_tracks_semantic_plan"
+                if self.config.get("semantic_split_enabled", True)
+                else "isolated_tracks_transcription"
+            )
             cache_key = self._isolated_tracks_cache_key(audio_file, isolated_tracks)
             if not self.cache_manager.cache_exists(step_name, cache_key):
                 raise FileNotFoundError(
@@ -1367,8 +1425,109 @@ class SmartDubbing:
                 fingerprint.update(str(path).encode('utf-8'))
             fingerprint.update(b';')
         fingerprint.update(inner_system.encode('utf-8'))
+        if self.config.get("semantic_split_enabled", True):
+            fingerprint.update(
+                self._isolated_tracks_raw_cache_key(isolated_tracks).encode("utf-8")
+            )
+            semantic_payload = {
+                "algorithm": "semantic_planner_v1",
+                "incomplete_tail_rules": "incomplete_tail_en_v1",
+                "prompt_parser": "semantic_boundary_prompt_v1",
+                "semantic_split_enabled": True,
+                "tts_preferred_segment_duration": self.config.get("tts_preferred_segment_duration", 15.0),
+                "tts_hard_segment_duration": self.config.get("tts_hard_segment_duration", 35.0),
+                "semantic_split_search_window": self.config.get("semantic_split_search_window", 10.0),
+                "source_language": self.config.get("source_language"),
+                "classifier": self._semantic_classifier_identity(),
+                "classifier_timeout": 30.0,
+                "classifier_batch_size": 50,
+                "classifier_batch_characters": 12000,
+            }
+            fingerprint.update(
+                json.dumps(semantic_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            )
 
         return f"{base_key}_isolated_{fingerprint.hexdigest()[:16]}"
+
+    def _isolated_tracks_raw_cache_key(
+        self,
+        isolated_tracks: Dict[str, str],
+    ) -> str:
+        """Fingerprint provider-level VAD/ASR output independently of planning."""
+        payload: Dict[str, Any] = {
+            "algorithm": "isolated_raw_v1",
+            "source_language": self.config.get("source_language"),
+            "inner_transcription_system": self.config.get(
+                "inner_transcription_system", "deepgram"
+            ),
+            "start_time": self.config.get("start_time"),
+            "duration": self.config.get("duration"),
+            "deepgram_model": self.config.get("deepgram_model"),
+            "assemblyai_model": self.config.get("transcription_model"),
+            "gemini_model": self.config.get("gemini_transcription_model"),
+            "tracks": [],
+        }
+        for speaker in sorted(isolated_tracks):
+            path = isolated_tracks[speaker]
+            try:
+                track_digest = hashlib.sha256()
+                with open(path, "rb") as track_file:
+                    for chunk in iter(lambda: track_file.read(1024 * 1024), b""):
+                        track_digest.update(chunk)
+                identity = [speaker, track_digest.hexdigest()]
+            except OSError:
+                identity = [speaker, str(path), None, None]
+            payload["tracks"].append(identity)
+        return f"isolated_raw_v1_{hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:20]}"
+
+    def _semantic_classifier(self) -> Tuple[Optional[Any], str]:
+        if self.config.get("translator_type", "llm") != "llm":
+            return None, "deterministic-only"
+        translator = getattr(self, "translator", None)
+        classifier = getattr(translator, "classify_semantic_boundaries", None)
+        if callable(classifier):
+            return classifier, "ready"
+        if getattr(self, "translator_init_error", None) is not None:
+            return None, "initialization_failed"
+        return None, "unavailable"
+
+    def _semantic_classifier_identity(self) -> Dict[str, Any]:
+        """Return the effective classifier identity used by semantic-plan caches."""
+        _classifier, status = self._semantic_classifier()
+        if status == "deterministic-only":
+            return {"mode": status}
+        translator = getattr(self, "translator", None)
+        return {
+            "mode": status,
+            "provider": getattr(
+                translator, "llm_provider", self.config.get("llm_provider")
+            ),
+            "model": getattr(
+                translator, "model_name", self.config.get("llm_model_name")
+            ),
+            "temperature": getattr(
+                translator,
+                "temperature",
+                self.config.get("llm_temperature", 0.5),
+            ),
+            "max_tokens": getattr(
+                translator,
+                "max_tokens",
+                self.config.get("llm_max_tokens", 16384),
+            ),
+        }
+
+    @staticmethod
+    def _write_semantic_boundary_diagnostics(
+        path: str, records: List[Dict[str, Any]]
+    ) -> None:
+        debug_path = Path(path)
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        with debug_path.open("w", encoding="utf-8", newline="\n") as handle:
+            for record in records:
+                handle.write(
+                    json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+                )
 
     def _diarize_and_transcribe_isolated(
         self,
@@ -1382,9 +1541,22 @@ class SmartDubbing:
         ``translate_only`` / ``tts_to_end`` can resume without re-running
         VAD or the inner transcriber.
         """
-        from dubbing.audio.isolated_tracks import run_isolated_tracks
+        from dubbing.audio.isolated_tracks import (
+            collect_isolated_tracks_raw,
+            run_isolated_tracks,
+        )
 
-        step_name = "isolated_tracks_transcription"
+        semantic_enabled = self.config.get("semantic_split_enabled", True)
+        semantic_debug_path = (
+            str(Path(self.config.get("debug_dir")) / "semantic_boundaries.jsonl")
+            if self.config.get("debug_info", False) and self.config.get("debug_dir")
+            else None
+        )
+        step_name = (
+            "isolated_tracks_semantic_plan"
+            if semantic_enabled
+            else "isolated_tracks_transcription"
+        )
         cache_key = self._isolated_tracks_cache_key(audio_file, isolated_tracks)
 
         if (
@@ -1393,13 +1565,54 @@ class SmartDubbing:
         ):
             logger.debug("Loading isolated-tracks diarization+transcription from cache...")
             cached = self.cache_manager.load_from_cache(step_name, cache_key)
+            if not isinstance(cached, dict):
+                cached = None
+            if cached is not None:
+                if (
+                    semantic_enabled
+                    and semantic_debug_path
+                    and not isinstance(cached.get("semantic_diagnostics"), list)
+                ):
+                    logger.info(
+                        "Cached semantic plan predates boundary diagnostics; replanning from raw transcription."
+                    )
+                    cached = None
+                if cached is None:
+                    logger.warning("Semantic-plan cache cannot satisfy debug diagnostics.")
+                else:
+                    if semantic_enabled and semantic_debug_path:
+                        self._write_semantic_boundary_diagnostics(
+                            semantic_debug_path,
+                            cached["semantic_diagnostics"],
+                        )
             if cached is not None:
                 speakers_rolls = cached["diarization"]
                 transcription = cached["transcription"]
-                self.debug_data["diarization"] = speakers_rolls
-                self.debug_data["transcription"] = transcription
-                self._save_transcription_file(transcription)
-                return speakers_rolls, transcription
+                if transcription and semantic_enabled:
+                    fingerprints = {
+                        segment.get("semantic_plan_fingerprint")
+                        for segment in transcription
+                        if segment.get("semantic_plan_fingerprint")
+                    }
+                    if (
+                        len(fingerprints) != 1
+                        or any(
+                            segment.get("semantic_plan_fingerprint") not in fingerprints
+                            for segment in transcription
+                        )
+                    ):
+                        logger.warning(
+                            "Cached semantic plan has a missing or inconsistent fingerprint; replanning."
+                        )
+                        cached = None
+                    else:
+                        self._semantic_plan_fingerprint = next(iter(fingerprints))
+                if cached is not None:
+                    self._semantic_plan_cache_persistable = True
+                    self.debug_data["diarization"] = speakers_rolls
+                    self.debug_data["transcription"] = transcription
+                    self._save_transcription_file(transcription)
+                    return speakers_rolls, transcription
             logger.warning("Corrupt isolated-tracks cache entry, recomputing.")
 
         inner_system = self.config.get('inner_transcription_system', 'deepgram')
@@ -1409,6 +1622,49 @@ class SmartDubbing:
             inner_system,
         )
 
+        raw_step_name = "isolated_tracks_raw_transcription"
+        raw_cache_key = self._isolated_tracks_raw_cache_key(isolated_tracks)
+        raw_tracks_data = None
+        if (
+            self.cache_manager.use_cache
+            and self.cache_manager.cache_exists(raw_step_name, raw_cache_key)
+        ):
+            raw_tracks_data = self.cache_manager.load_from_cache(
+                raw_step_name, raw_cache_key
+            )
+        if raw_tracks_data is None:
+            raw_tracks_data = collect_isolated_tracks_raw(
+                tracks=isolated_tracks,
+                inner_system=inner_system,
+                source_language=self.config.get('source_language'),
+                device=self.config.get('device'),
+                cache_manager=self.cache_manager,
+                inner_kwargs=self._isolated_inner_kwargs(inner_system),
+                start_time=self.config.get('start_time'),
+                duration=self.config.get('duration'),
+            )
+            self.cache_manager.save_to_cache(
+                raw_step_name, raw_cache_key, raw_tracks_data
+            )
+
+        semantic_classifier, classifier_status = self._semantic_classifier()
+        classification_step = "semantic_boundary_classification"
+
+        def load_classification(key: str) -> Any:
+            if self.cache_manager.cache_exists(classification_step, key):
+                return self.cache_manager.load_from_cache(classification_step, key)
+            return None
+
+        def save_classification(key: str, value: Any) -> None:
+            self.cache_manager.save_to_cache(classification_step, key, value)
+
+        classifier_cache_context = {
+            **self._semantic_classifier_identity(),
+            "timeout": 30.0,
+            "batch_size": 50,
+            "batch_characters": 12000,
+        }
+        semantic_diagnostics: List[Dict[str, Any]] = []
         speakers_rolls, transcription = run_isolated_tracks(
             tracks=isolated_tracks,
             inner_system=inner_system,
@@ -1418,13 +1674,50 @@ class SmartDubbing:
             inner_kwargs=self._isolated_inner_kwargs(inner_system),
             start_time=self.config.get('start_time'),
             duration=self.config.get('duration'),
+            semantic_split_enabled=semantic_enabled,
+            tts_preferred_segment_duration=self.config.get(
+                "tts_preferred_segment_duration", 15.0
+            ),
+            tts_hard_segment_duration=self.config.get(
+                "tts_hard_segment_duration", 35.0
+            ),
+            semantic_split_search_window=self.config.get(
+                "semantic_split_search_window", 10.0
+            ),
+            semantic_classifier=semantic_classifier,
+            semantic_classifier_status=classifier_status,
+            semantic_debug_path=semantic_debug_path,
+            raw_tracks_data=raw_tracks_data,
+            classification_cache_get=load_classification,
+            classification_cache_set=save_classification,
+            classifier_cache_context=classifier_cache_context,
+            semantic_diagnostics_out=semantic_diagnostics,
         )
 
-        self.cache_manager.save_to_cache(
-            step_name,
-            cache_key,
-            {"diarization": speakers_rolls, "transcription": transcription},
+        plan_persistable = all(
+            segment.get("_semantic_plan_cache_persistable", True)
+            for segment in transcription
         )
+        if not semantic_enabled or plan_persistable:
+            self.cache_manager.save_to_cache(
+                step_name,
+                cache_key,
+                {
+                    "diarization": speakers_rolls,
+                    "transcription": transcription,
+                    "semantic_diagnostics": semantic_diagnostics,
+                },
+            )
+        else:
+            logger.warning(
+                "Semantic boundary classification used a transient fallback; "
+                "semantic plan and downstream plan-dependent caches will not be persisted."
+            )
+        if transcription and semantic_enabled:
+            self._semantic_plan_fingerprint = transcription[0].get(
+                "semantic_plan_fingerprint"
+            )
+            self._semantic_plan_cache_persistable = plan_persistable
 
         self.debug_data["diarization"] = speakers_rolls
         self.debug_data["transcription"] = transcription
@@ -1446,16 +1739,29 @@ class SmartDubbing:
     
     def translate_segments(self, transcription: List[Dict], audio_file: str) -> List[Dict]:
         """Translate segments using the translator."""
-        effective_prompt_prefix = self._build_translation_prompt_prefix(
-            self.config.get("translation_prompt_prefix")
-        )
-        prompt_prefix_hash = hashlib.md5(
-            effective_prompt_prefix.encode("utf-8")
-        ).hexdigest()[:12]
-        cache_key = (
-            f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}"
-            f"_{self.config.get('target_language')}_{prompt_prefix_hash}"
-        )
+        semantic_fingerprints = {
+            segment.get("semantic_plan_fingerprint")
+            for segment in transcription
+            if segment.get("semantic_plan_fingerprint")
+        }
+        semantic_segments = [
+            segment for segment in transcription if segment.get("semantic_unit_id")
+        ]
+        if semantic_segments and (
+            len(semantic_fingerprints) != 1
+            or any(
+                segment.get("semantic_plan_fingerprint") not in semantic_fingerprints
+                for segment in semantic_segments
+            )
+        ):
+            raise ValueError(
+                "Semantic transcription has a missing or inconsistent semantic_plan_fingerprint"
+            )
+        if len(semantic_fingerprints) > 1:
+            raise ValueError("Transcription contains multiple semantic plan fingerprints")
+        if semantic_fingerprints:
+            self._semantic_plan_fingerprint = next(iter(semantic_fingerprints))
+        cache_key = self._build_translation_cache_key(audio_file)
         step_name = "translation"
         
         translated_segments = None
@@ -1464,6 +1770,7 @@ class SmartDubbing:
             logger.debug("Loading translations from cache...")
             translated_segments = self.cache_manager.load_from_cache(step_name, cache_key)
             if translated_segments is not None:
+                self._validate_plan_dependent_segments(translated_segments)
                 self.performance_tracker.record_metric("translation", 0.0)
             else:
                 logger.warning("Found corrupted translation cache, re-translating.")
@@ -1498,7 +1805,8 @@ class SmartDubbing:
                     translator.prompt_prefix = original_prompt_prefix
             
             # Save results to cache
-            self.cache_manager.save_to_cache(step_name, cache_key, translated_segments)
+            if getattr(self, "_semantic_plan_cache_persistable", True):
+                self.cache_manager.save_to_cache(step_name, cache_key, translated_segments)
             
             # End timing
             elapsed_time = self.performance_tracker.end_timing("translation")
@@ -1715,11 +2023,37 @@ class SmartDubbing:
             item.segment["_timing_available_window"] = item.available_window
         segments[:] = [item.segment for item in anchor_plan]
         timing_policy = TimingPolicy.from_config(self.config)
+        self._plan_dependent_cache_allowed = getattr(
+            self, "_semantic_plan_cache_persistable", True
+        )
 
         # Start timing
         self.performance_tracker.start_timing("speech_synthesis")
         
-        cache_key = f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}_{self.config.get('target_language')}_{self.config.get('tts_system')}_{timing_cache_fingerprint(timing_policy)}"
+        semantic_fingerprints = {
+            segment.get("semantic_plan_fingerprint")
+            for segment in segments
+            if segment.get("semantic_plan_fingerprint")
+        }
+        semantic_segments = [
+            segment for segment in segments if segment.get("semantic_unit_id")
+        ]
+        if semantic_segments and (
+            len(semantic_fingerprints) != 1
+            or any(
+                segment.get("semantic_plan_fingerprint") not in semantic_fingerprints
+                for segment in semantic_segments
+            )
+        ):
+            raise ValueError(
+                "Semantic TTS segments have a missing or inconsistent semantic_plan_fingerprint"
+            )
+        semantic_suffix = (
+            f"_{next(iter(semantic_fingerprints))}"
+            if len(semantic_fingerprints) == 1
+            else ""
+        )
+        cache_key = f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}_{self.config.get('target_language')}_{self.config.get('tts_system')}_{timing_cache_fingerprint(timing_policy)}{semantic_suffix}"
         step_name = "synthesized_speech"
         
         # Final audio is stored as WAV rather than CacheManager's pickle
@@ -1727,6 +2061,7 @@ class SmartDubbing:
         cached_audio_path = self.cache_manager.get_cache_path(step_name) / f"{cache_key}.wav"
         if (
             self.cache_manager.use_cache
+            and self._plan_dependent_cache_allowed
             and not self.config.get("debug_info", False)
             and cached_audio_path.exists()
         ):
@@ -1873,20 +2208,24 @@ class SmartDubbing:
                         f"Failed to resolve reference audio for segment {i+1} ({speaker}): {exc}"
                     )
 
-                # Check cache (including reference audio path in hash)
-                import hashlib
-                translation_hash = hashlib.md5(segment_dict["translation"].encode()).hexdigest()[:8]
-                voice_prompt_hash = hashlib.md5((segment_style_prompt or "").encode()).hexdigest()[:8]
-                ref_audio_str = str(tts_segment_data_args.get("reference_audio_path") or "")
-                ref_audio_hash = hashlib.md5(ref_audio_str.encode()).hexdigest()[:8]
-                segment_cache_key = f"{base_cache_prefix}_{tts_system}_{i}_{speaker}_{translation_hash}_{voice_prompt_hash}_{ref_audio_hash}"
+                # Check cache (including semantic-plan and reference identities).
+                segment_cache_key = self._raw_tts_segment_cache_key(
+                    base_cache_prefix=base_cache_prefix,
+                    tts_system=tts_system,
+                    segment=segment_dict,
+                    speaker=speaker,
+                    translation=segment_dict["translation"],
+                    style_prompt=segment_style_prompt,
+                    reference_audio_path=tts_segment_data_args.get("reference_audio_path"),
+                    legacy_index=i,
+                )
                 current_segment_output_path = str(self.audio_chunks_dir / f"{i}.wav")
                 os.makedirs(os.path.dirname(current_segment_output_path), exist_ok=True)
                 
                 segment_cached_file_path = segment_cache_path / f"{segment_cache_key}.wav"
                 
                 # Try to use cached segment
-                if self.cache_manager.use_cache and segment_cached_file_path.exists():
+                if self.cache_manager.use_cache and self._plan_dependent_cache_allowed and segment_cached_file_path.exists():
                     try:
                         cached_audio_info = AudioSegment.from_file(segment_cached_file_path)
                         if len(cached_audio_info) > 0:
@@ -2088,7 +2427,7 @@ class SmartDubbing:
                         segment_dict['synthesized_text'] = metadata.get('chosen_text', segment_dict.get('translation', ''))
 
                         # Cache the synthesized segment
-                        if self.cache_manager.use_cache and segment_dict['synthesized_speech_len'] > 0:
+                        if self.cache_manager.use_cache and self._plan_dependent_cache_allowed and segment_dict['synthesized_speech_len'] > 0:
                             try:
                                 self._cache_raw_tts_segment(output_path, metadata["cache_path"])
                                 logger.debug(f"Cached synthesized segment {metadata['index']+1} ({tts_system})")
@@ -2173,7 +2512,7 @@ class SmartDubbing:
                             segment_dict['synthesized_text'] = metadata.get('chosen_text', segment_dict.get('translation', ''))
 
                             # Cache the synthesized segment
-                            if self.cache_manager.use_cache and segment_dict['synthesized_speech_len'] > 0:
+                            if self.cache_manager.use_cache and self._plan_dependent_cache_allowed and segment_dict['synthesized_speech_len'] > 0:
                                 self._cache_raw_tts_segment(output_path, metadata["cache_path"])
                         
                         # After fallback individual synthesis, validate duration again
@@ -2232,7 +2571,7 @@ class SmartDubbing:
                         f"Real duration: {total_real_duration:.2f}s, Original duration: {total_original_duration:.2f}s")
         
         # Save to cache
-        if self.cache_manager.use_cache:
+        if self.cache_manager.use_cache and self._plan_dependent_cache_allowed:
             # Save the output audio
             shutil.copy(output_path, self.cache_manager.get_cache_path(step_name) / f"{cache_key}.wav")
         
@@ -2363,7 +2702,7 @@ class SmartDubbing:
                     logger.info(
                         f"Retry {attempt + 1}: recovered segment {metadata['index']+1} ({tts_system})"
                     )
-                    if self.cache_manager.use_cache and segment_dict['synthesized_speech_len'] > 0:
+                    if self.cache_manager.use_cache and getattr(self, "_plan_dependent_cache_allowed", True) and segment_dict['synthesized_speech_len'] > 0:
                         try:
                             self._cache_raw_tts_segment(output_path, metadata["cache_path"])
                         except Exception:
@@ -2733,6 +3072,32 @@ class SmartDubbing:
     def _segment_cache_metadata_path(cache_path: Path) -> Path:
         return cache_path.with_suffix(cache_path.suffix + ".json")
 
+    @staticmethod
+    def _raw_tts_segment_cache_key(
+        *,
+        base_cache_prefix: str,
+        tts_system: str,
+        segment: Dict[str, Any],
+        speaker: str,
+        translation: str,
+        style_prompt: str,
+        reference_audio_path: Optional[str],
+        legacy_index: Any = 0,
+    ) -> str:
+        """Build a raw-unit cache identity without timing-policy settings."""
+        translation_hash = hashlib.md5(translation.encode()).hexdigest()[:8]
+        voice_prompt_hash = hashlib.md5((style_prompt or "").encode()).hexdigest()[:8]
+        ref_audio_hash = hashlib.md5(
+            str(reference_audio_path or "").encode()
+        ).hexdigest()[:8]
+        semantic_unit_identity = segment.get("semantic_unit_id", legacy_index)
+        semantic_plan_identity = segment.get("semantic_plan_fingerprint", "legacy")
+        return (
+            f"{base_cache_prefix}_{tts_system}_{semantic_plan_identity}_"
+            f"{semantic_unit_identity}_{speaker}_{translation_hash}_"
+            f"{voice_prompt_hash}_{ref_audio_hash}"
+        )
+
     def _cache_raw_tts_segment(self, source_path: str, cache_path: Path) -> None:
         """Cache raw TTS plus a version marker, independent of timing policy."""
         shutil.copy(source_path, cache_path)
@@ -3007,7 +3372,7 @@ class SmartDubbing:
             segment_dict["synthesized_text"] = metadata["chosen_text"]
 
             # Update cache if needed
-            if self.cache_manager.use_cache and len(audio_info) > 0:
+            if self.cache_manager.use_cache and getattr(self, "_plan_dependent_cache_allowed", True) and len(audio_info) > 0:
                 try:
                     self._cache_raw_tts_segment(output_path, metadata["cache_path"])
                 except Exception:
@@ -3503,6 +3868,9 @@ class SmartDubbing:
                     "trim_error": trim_error or "",
                     "tempo_error": tempo_error or "",
                     "cache_contract": segment.get("_tts_cache_contract", "legacy"),
+                    "semantic_unit_id": segment.get("semantic_unit_id", ""),
+                    "semantic_plan_fingerprint": segment.get("semantic_plan_fingerprint", ""),
+                    "continuation_id": segment.get("continuation_id", ""),
                 }
             )
 

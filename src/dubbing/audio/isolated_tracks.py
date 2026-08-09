@@ -19,9 +19,12 @@ else needs to change to render the overlap in the dubbed output.
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 import subprocess
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from src.dubbing.core.log_config import get_logger
 
@@ -519,6 +522,191 @@ def _build_inner_transcriber(
     )
 
 
+def collect_isolated_tracks_raw(
+    tracks: Dict[str, str],
+    inner_system: str,
+    source_language: str,
+    device: Optional[str] = None,
+    cache_manager: Optional["CacheManager"] = None,
+    inner_kwargs: Optional[Dict[str, Any]] = None,
+    start_time: Optional[float] = None,
+    duration: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Run VAD/ASR only and return cacheable provider-level track records."""
+    if not tracks:
+        raise ValueError("run_isolated_tracks: 'tracks' mapping is empty")
+    inner_kwargs = dict(inner_kwargs or {})
+    raw_tracks: List[Dict[str, Any]] = []
+    for speaker_label, audio_path in tracks.items():
+        if not os.path.exists(audio_path):
+            raise FileNotFoundError(
+                f"Isolated track for speaker '{speaker_label}' not found: {audio_path}"
+            )
+        logger.info("Processing isolated track speaker=%s path=%s", speaker_label, audio_path)
+        work_path, cleanup_path = _trim_track_if_needed(audio_path, start_time, duration)
+        try:
+            regions = _run_vad(work_path, device=device)
+            if not regions:
+                logger.warning("VAD found no speech regions in isolated track '%s'; skipping.", audio_path)
+                continue
+            inner_transcriber = _build_inner_transcriber(
+                inner_system=inner_system,
+                source_language=source_language,
+                device=device,
+                cache_manager=cache_manager,
+                inner_kwargs=inner_kwargs,
+            )
+            _ignored, inner_segments = inner_transcriber.diarize_and_transcribe(
+                audio_file=work_path,
+                cache_key=None,
+                use_cache=cache_manager.use_cache if cache_manager else True,
+            )
+        finally:
+            if cleanup_path:
+                try:
+                    os.remove(cleanup_path)
+                except OSError:
+                    pass
+        from .semantic_planner import (
+            _normalize_regions,
+            _normalize_segments,
+            _normalize_words,
+        )
+
+        normalized_regions = _normalize_regions(regions, speaker_label)
+        normalized_segments = _normalize_segments(inner_segments, speaker_label)
+        normalized_words = _normalize_words(
+            normalized_segments, normalized_regions, speaker_label
+        )
+        raw_tracks.append(
+            {
+                "speaker": speaker_label,
+                "audio_path": audio_path,
+                "vad_regions": normalized_regions,
+                "asr_segments": normalized_segments,
+                "words": normalized_words,
+            }
+        )
+    return raw_tracks
+
+
+def _assemble_isolated_raw_tracks(
+    raw_tracks_data: Sequence[Dict[str, Any]],
+    *,
+    inner_system: str,
+    source_language: str,
+    semantic_split_enabled: bool,
+    tts_preferred_segment_duration: float,
+    tts_hard_segment_duration: float,
+    semantic_split_search_window: float,
+    semantic_classifier: Optional[Any],
+    semantic_classifier_status: str,
+    semantic_debug_path: Optional[str],
+    classification_cache_get: Optional[Any],
+    classification_cache_set: Optional[Any],
+    classifier_cache_context: Optional[Dict[str, Any]],
+    semantic_diagnostics_out: Optional[List[Dict[str, Any]]],
+) -> Tuple[Dict[Tuple[float, float], str], List[Dict[str, Any]]]:
+    all_segments: List[Dict[str, Any]] = []
+    semantic_diagnostics: List[Dict[str, Any]] = []
+    plan_fingerprints: List[str] = []
+    for raw_track in raw_tracks_data:
+        speaker_label = str(raw_track["speaker"])
+        regions = list(raw_track.get("vad_regions") or [])
+        legacy_regions = [
+            (float(region["start"]), float(region["end"]))
+            if isinstance(region, dict) else region
+            for region in regions
+        ]
+        inner_segments = list(raw_track.get("asr_segments") or [])
+        words = _extract_words(inner_segments)
+        if semantic_split_enabled:
+            from .semantic_planner import SemanticPlannerConfig, plan_semantic_segments
+
+            result = plan_semantic_segments(
+                inner_segments,
+                vad_regions=regions,
+                speaker=speaker_label,
+                source_language=source_language,
+                config=SemanticPlannerConfig(
+                    preferred_duration=tts_preferred_segment_duration,
+                    hard_duration=tts_hard_segment_duration,
+                    search_window=semantic_split_search_window,
+                ),
+                classifier=semantic_classifier,
+                classifier_status=semantic_classifier_status,
+                classification_cache_get=classification_cache_get,
+                classification_cache_set=classification_cache_set,
+                classifier_cache_context=classifier_cache_context,
+            )
+            track_segments = result.units
+            raw_count = merged_count = len(inner_segments)
+            plan_fingerprints.append(result.fingerprint)
+            semantic_diagnostics.extend(result.diagnostics)
+            for segment in track_segments:
+                segment["_semantic_plan_cache_persistable"] = result.cache_persistable
+        else:
+            logger.info(
+                "Semantic splitting disabled for isolated track '%s'; using legacy "
+                "merge/split mode with %.3fs maximum.",
+                speaker_label,
+                tts_preferred_segment_duration,
+            )
+            track_segments = (
+                _segment_by_words(words, legacy_regions, speaker_label)
+                if words
+                else _segment_by_intersect(inner_segments, legacy_regions, speaker_label)
+            )
+            raw_count = len(track_segments)
+            track_segments = _merge_close_segments(
+                track_segments, max_duration=tts_preferred_segment_duration
+            )
+            merged_count = len(track_segments)
+            track_segments = _split_long_segments(
+                track_segments, max_duration=tts_preferred_segment_duration
+            )
+        logger.info(
+            "Isolated track '%s': %d VAD regions -> %d raw -> %d merged -> %d final (%s, %s)",
+            speaker_label,
+            len(regions),
+            raw_count,
+            merged_count,
+            len(track_segments),
+            inner_system,
+            "word-based" if words else "segment-based",
+        )
+        all_segments.extend(track_segments)
+
+    if not all_segments:
+        raise RuntimeError(
+            "Isolated-tracks path produced no transcription segments; check that "
+            "the input files contain speech and that the inner transcriber is configured."
+        )
+    all_segments.sort(key=lambda segment: (segment["start"], segment["end"], segment["speaker"]))
+    if semantic_split_enabled:
+        payload = json.dumps(
+            {"algorithm": "semantic_planner_v1", "track_plans": sorted(plan_fingerprints)},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        for segment in all_segments:
+            segment["semantic_plan_fingerprint"] = fingerprint
+        if semantic_debug_path:
+            debug_path = Path(semantic_debug_path)
+            debug_path.parent.mkdir(parents=True, exist_ok=True)
+            with debug_path.open("w", encoding="utf-8", newline="\n") as handle:
+                for record in semantic_diagnostics:
+                    handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        if semantic_diagnostics_out is not None:
+            semantic_diagnostics_out.extend(semantic_diagnostics)
+    rolls = {
+        (segment["start"], segment["end"]): segment["speaker"]
+        for segment in all_segments
+    }
+    return rolls, all_segments
+
+
 def run_isolated_tracks(
     tracks: Dict[str, str],
     inner_system: str,
@@ -528,6 +716,18 @@ def run_isolated_tracks(
     inner_kwargs: Optional[Dict[str, Any]] = None,
     start_time: Optional[float] = None,
     duration: Optional[float] = None,
+    semantic_split_enabled: bool = True,
+    tts_preferred_segment_duration: float = 15.0,
+    tts_hard_segment_duration: float = 35.0,
+    semantic_split_search_window: float = 10.0,
+    semantic_classifier: Optional[Any] = None,
+    semantic_classifier_status: str = "deterministic-only",
+    semantic_debug_path: Optional[str] = None,
+    raw_tracks_data: Optional[Sequence[Dict[str, Any]]] = None,
+    classification_cache_get: Optional[Any] = None,
+    classification_cache_set: Optional[Any] = None,
+    classifier_cache_context: Optional[Dict[str, Any]] = None,
+    semantic_diagnostics_out: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Dict[Tuple[float, float], str], List[Dict[str, Any]]]:
     """Diarize + transcribe from isolated per-speaker tracks.
 
@@ -553,90 +753,30 @@ def run_isolated_tracks(
     if not tracks:
         raise ValueError("run_isolated_tracks: 'tracks' mapping is empty")
 
-    inner_kwargs = dict(inner_kwargs or {})
-
-    all_segments: List[Dict[str, Any]] = []
-    for speaker_label, audio_path in tracks.items():
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(
-                f"Isolated track for speaker '{speaker_label}' not found: {audio_path}"
-            )
-        logger.info(
-            "Processing isolated track speaker=%s path=%s",
-            speaker_label,
-            audio_path,
+    if raw_tracks_data is None:
+        raw_tracks_data = collect_isolated_tracks_raw(
+            tracks=tracks,
+            inner_system=inner_system,
+            source_language=source_language,
+            device=device,
+            cache_manager=cache_manager,
+            inner_kwargs=inner_kwargs,
+            start_time=start_time,
+            duration=duration,
         )
-
-        # Trim to the requested slice before VAD/transcription. The trimmed
-        # clip starts at t=0, so downstream segment timestamps line up with
-        # the main audio track that AudioProcessor.extract_audio produces.
-        work_path, cleanup_path = _trim_track_if_needed(audio_path, start_time, duration)
-        try:
-            regions = _run_vad(work_path, device=device)
-            if not regions:
-                logger.warning(
-                    "VAD found no speech regions in isolated track '%s' — skipping.",
-                    audio_path,
-                )
-                continue
-
-            inner_transcriber = _build_inner_transcriber(
-                inner_system=inner_system,
-                source_language=source_language,
-                device=device,
-                cache_manager=cache_manager,
-                inner_kwargs=inner_kwargs,
-            )
-            _speakers_ignored, inner_segments = inner_transcriber.diarize_and_transcribe(
-                audio_file=work_path,
-                cache_key=None,
-                use_cache=cache_manager.use_cache if cache_manager else True,
-            )
-        finally:
-            if cleanup_path:
-                try:
-                    os.remove(cleanup_path)
-                except OSError:
-                    pass
-
-        words = _extract_words(inner_segments)
-        if words:
-            track_segments = _segment_by_words(words, regions, speaker_label)
-        else:
-            track_segments = _segment_by_intersect(inner_segments, regions, speaker_label)
-
-        raw_count = len(track_segments)
-        # Merge short-pause splits, then re-cut anything still too long.
-        # Merge first so same-speaker phrases the VAD chopped in half are
-        # reunited; split second so the resulting long blocks are chunked
-        # at natural sentence boundaries the TTS can pace comfortably.
-        track_segments = _merge_close_segments(track_segments)
-        merged_count = len(track_segments)
-        track_segments = _split_long_segments(track_segments)
-
-        logger.info(
-            "Isolated track '%s': %d VAD regions → %d raw → %d merged → %d final (%s, %s)",
-            speaker_label,
-            len(regions),
-            raw_count,
-            merged_count,
-            len(track_segments),
-            inner_system,
-            "word-based" if words else "segment-based",
-        )
-        all_segments.extend(track_segments)
-
-    if not all_segments:
-        raise RuntimeError(
-            "Isolated-tracks path produced no transcription segments — check that "
-            "the input files contain speech and that the inner transcriber is configured."
-        )
-
-    all_segments.sort(key=lambda s: (s["start"], s["end"], s["speaker"]))
-
-    speakers_rolls: Dict[Tuple[float, float], str] = {
-        (seg["start"], seg["end"]): seg["speaker"]
-        for seg in all_segments
-    }
-
-    return speakers_rolls, all_segments
+    return _assemble_isolated_raw_tracks(
+        raw_tracks_data,
+        inner_system=inner_system,
+        source_language=source_language,
+        semantic_split_enabled=semantic_split_enabled,
+        tts_preferred_segment_duration=tts_preferred_segment_duration,
+        tts_hard_segment_duration=tts_hard_segment_duration,
+        semantic_split_search_window=semantic_split_search_window,
+        semantic_classifier=semantic_classifier,
+        semantic_classifier_status=semantic_classifier_status,
+        semantic_debug_path=semantic_debug_path,
+        classification_cache_get=classification_cache_get,
+        classification_cache_set=classification_cache_set,
+        classifier_cache_context=classifier_cache_context,
+        semantic_diagnostics_out=semantic_diagnostics_out,
+    )

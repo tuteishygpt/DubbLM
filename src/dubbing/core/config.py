@@ -11,6 +11,16 @@ from .log_config import get_logger
 
 logger = get_logger(__name__)
 
+
+def _semantic_bool_argument(value: Any) -> Any:
+    """Parse supported bool spellings while preserving invalid values for normalization."""
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1"}:
+        return True
+    if normalized in {"false", "0"}:
+        return False
+    return value
+
 DEFAULT_PROJECTS_ROOT = Path(__file__).resolve().parents[3] / "prj"
 
 def _parse_time_to_seconds(time_str: str) -> float:
@@ -93,6 +103,14 @@ class DubbingConfig:
             'dubbed_volume': 1.0,
             'background_volume': 0.562341,
             'group_overflow_tolerance': 1.0,
+            'timing_short_segment_threshold': 1.5,
+            'timing_short_segment_max_speed': 1.08,
+            'timing_max_speed': 1.15,
+            'timing_max_overflow': 0.25,
+            'semantic_split_enabled': True,
+            'tts_preferred_segment_duration': 15.0,
+            'tts_hard_segment_duration': 35.0,
+            'semantic_split_search_window': 10.0,
             'segment_reference_min_duration': 2.0,
             'isolated_tracks': None,
             'inner_transcription_system': 'deepgram',
@@ -374,17 +392,8 @@ class DubbingConfig:
         from .voice_profiles import normalize_voices
         self.config['voices'] = normalize_voices(self.config)
 
-        # Clamp group_overflow_tolerance to [0.0, 1.0]
-        tol = self.config.get('group_overflow_tolerance')
-        try:
-            tol_f = float(1.0 if tol is None else tol)
-            if tol_f < 0.0 or tol_f > 1.0:
-                logger.warning("Warning: group_overflow_tolerance must be between 0 and 1. Clamping to valid range.")
-            tol_f = max(0.0, min(1.0, tol_f))
-            self.config['group_overflow_tolerance'] = tol_f
-        except Exception:
-            logger.warning("Warning: Invalid group_overflow_tolerance value. Falling back to 1.0.")
-            self.config['group_overflow_tolerance'] = 1.0
+        from .timing import normalize_timing_config
+        normalize_timing_config(self.config, warn=logger.warning)
 
         # Validate segment_reference_min_duration
         ref_min_duration = self.config.get('segment_reference_min_duration')
@@ -498,7 +507,15 @@ class DubbingConfig:
         parser.add_argument('--use_two_pass_encoding', type=lambda x: (str(x).lower() == 'true'), help='Use two-pass encoding for better video quality during re-encoding (True/False)')
         parser.add_argument('--dubbed_volume', type=float, help='Gain multiplier for translated track (e.g., 1.2 for +1.6 dB)')
         parser.add_argument('--background_volume', type=float, help='Gain multiplier for background track when keep_background=true (e.g., 0.56 ≈ -5 dB)')
-        parser.add_argument('--group_overflow_tolerance', type=float, help='Allowed overflow beyond group timeframe when combining segments (0..1, default 1.0)')
+        parser.add_argument('--group_overflow_tolerance', type=float, help='Deprecated and ignored; use --timing_max_overflow')
+        parser.add_argument('--timing_short_segment_threshold', type=float, help='Recognized duration below which the short-segment speed limit applies (default: 1.5)')
+        parser.add_argument('--timing_short_segment_max_speed', type=float, help='Maximum tempo multiplier for short segments (default: 1.08)')
+        parser.add_argument('--timing_max_speed', type=float, help='Maximum tempo multiplier for other segments (default: 1.15)')
+        parser.add_argument('--timing_max_overflow', type=float, help='Allowed speech overflow beyond an anchor window in seconds (default: 0.25)')
+        parser.add_argument('--semantic_split_enabled', type=_semantic_bool_argument, help='Use semantic planning for isolated speaker tracks (default: true)')
+        parser.add_argument('--tts_preferred_segment_duration', type=float, help='Soft target duration for semantic TTS units (default: 15.0)')
+        parser.add_argument('--tts_hard_segment_duration', type=float, help='Hard maximum duration for semantic TTS units (default: 35.0)')
+        parser.add_argument('--semantic_split_search_window', type=float, help='Semantic boundary search radius around the soft target (default: 10.0)')
         parser.add_argument('--segment_reference_min_duration', type=float, help='Minimum segment length in seconds required to export dedicated reference audio clips')
         parser.add_argument(
             '--isolated_track',

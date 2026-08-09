@@ -177,6 +177,69 @@ class LLMTranslator(TranslationInterface):
             if JSON_REPAIR_AVAILABLE and json_repair is not None:
                 return json_repair.loads(response_text)
             raise
+
+    def classify_semantic_boundaries(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Classify boundary candidates with the already initialized primary LLM.
+
+        Parsing and per-candidate validation stay in the semantic planner.  This
+        method only enforces a narrow structured prompt and never initializes a
+        second provider client.
+        """
+        if self.llm is None:
+            raise RuntimeError("Primary translation LLM is not initialized")
+        source_language = str(request.get("source_language") or "unknown")
+        candidates = request.get("candidates")
+        if not isinstance(candidates, list):
+            raise ValueError("Semantic boundary request must contain candidates")
+        payload = json.dumps(
+            {"candidates": candidates}, ensure_ascii=False, separators=(",", ":")
+        )
+        prompt = f"""semantic_boundary_prompt_v1
+You classify possible transcript boundaries in source language {source_language}.
+Do not rewrite, translate, remove, or add transcript text.
+For every input id, return exactly one CUT, CONTINUE, or UNCERTAIN decision and
+a confidence from 0 to 1. Return JSON only with this schema:
+{{"boundaries":[{{"id":"...","decision":"CUT","confidence":0.9,"reason_code":"complete_thought"}}]}}
+Input:
+{payload}
+"""
+        response = self.llm.complete(prompt)
+        response_text = response.text.strip() if hasattr(response, "text") else str(response).strip()
+        parsed = self._load_response_json(response_text)
+        if not isinstance(parsed, dict):
+            raise ValueError("Semantic boundary response must be a JSON object")
+        return parsed
+
+    @staticmethod
+    def _validate_semantic_translation_pairs(
+        originals: List[Dict[str, Any]],
+        translated: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Require a one-to-one semantic ID mapping and restore source order."""
+        expected = [item.get("semantic_unit_id") for item in originals]
+        if not any(expected):
+            return translated
+        if any(not isinstance(value, str) or not value for value in expected):
+            raise ValueError("Every semantic translation source needs semantic_unit_id")
+        if len(set(expected)) != len(expected):
+            raise ValueError("Duplicate semantic_unit_id in translation source")
+        by_id: Dict[str, Dict[str, Any]] = {}
+        for item in translated:
+            semantic_id = item.get("semantic_unit_id")
+            if not isinstance(semantic_id, str) or not semantic_id:
+                raise ValueError("Missing semantic_unit_id in translated pair")
+            if semantic_id in by_id:
+                raise ValueError(f"Duplicate semantic_unit_id in translated pairs: {semantic_id}")
+            by_id[semantic_id] = item
+        expected_set = set(expected)
+        actual_set = set(by_id)
+        if actual_set != expected_set:
+            missing = sorted(expected_set - actual_set)
+            unknown = sorted(actual_set - expected_set)
+            raise ValueError(
+                f"semantic_unit_id mismatch; missing={missing}, unknown={unknown}"
+            )
+        return [by_id[semantic_id] for semantic_id in expected]
             
     def _create_llm(
         self, 
@@ -640,7 +703,8 @@ Example JSON output:
             if current_segment is None:
                 # First segment
                 current_segment = segment.copy()
-            elif (segment["speaker"] == current_segment["speaker"] and 
+            elif (not segment.get("lock_boundary_before") and
+                  segment["speaker"] == current_segment["speaker"] and
                   segment["start"] - current_segment["end"] <= max_gap_seconds and
                   len(current_segment["text"]) + len(segment["text"]) + 1 <= max_chars):  # +1 for the space
                 # Same speaker, close enough in time, and won't exceed max character limit
@@ -807,8 +871,13 @@ Example JSON output:
             for segment in chunk["segments"]:
                 speaker = segment["speaker"]
                 text = segment["text"]
-                chunk_text += f"{speaker}: {text}\n"
-                original_speaker_texts.append({"speaker": speaker, "text": text})
+                semantic_id = segment.get("semantic_unit_id")
+                prefix = f"[{semantic_id}] " if semantic_id else ""
+                chunk_text += f"{prefix}{speaker}: {text}\n"
+                source_pair = {"speaker": speaker, "text": text}
+                if semantic_id:
+                    source_pair["semantic_unit_id"] = semantic_id
+                original_speaker_texts.append(source_pair)
             
             chunk_text = chunk_text.strip()
             
@@ -893,7 +962,11 @@ Example JSON output:
         if source_language == target_language:
             chunk_start_time = time.perf_counter()
             translated_pairs = [
-                {"speaker": pair["speaker"], "text": pair["text"]}
+                {
+                    key: pair[key]
+                    for key in ("speaker", "text", "semantic_unit_id")
+                    if key in pair
+                }
                 for pair in original_speaker_texts
             ]
             chunk["translated_pairs"] = translated_pairs
@@ -969,6 +1042,26 @@ IMPORTANT: The glossary provides base forms of translations. When using a term f
 """ if self.prompt_prefix else ""
 
         # Build prompt with context information
+        semantic_ids_present = any(
+            pair.get("semantic_unit_id") for pair in original_speaker_texts
+        )
+        if semantic_ids_present:
+            translation_object_rule = (
+                'CRITICAL: Each translation object must contain exactly "semantic_unit_id", '
+                '"speaker", and "text". Preserve every semantic_unit_id exactly once.'
+            )
+            translation_example = (
+                '{"semantic_unit_id": "stable-id", "speaker": "SPEAKER_00", '
+                '"text": "translated text"}'
+            )
+        else:
+            translation_object_rule = (
+                'CRITICAL: Each translation object must contain exactly two keys: '
+                '"speaker" and "text".'
+            )
+            translation_example = (
+                '{"speaker": "SPEAKER_00", "text": "translated text"}'
+            )
         prompt = f"""
 You are a professional translator specializing in {context_info['domain']} content.
 
@@ -1049,14 +1142,13 @@ CRITICAL: Output tanslation should contain same number of rows and original spea
 
 CRITICAL: Respond with valid JSON only. Do not add markdown fences, comments, explanations, or any text before or after the JSON.
 CRITICAL: The top-level JSON object must contain only the "translations" key.
-CRITICAL: Each translation object must contain exactly two keys: "speaker" and "text".
+{translation_object_rule}
 CRITICAL: "speaker" must exactly match the original speaker identifier, and "text" must contain only the final translated dubbing line.
 
 IMPORTANT: Respond in JSON format with an array of objects containing speaker and translated text:
 {{
     "translations": [
-        {{"speaker": "SPEAKER_00", "text": "translated text 1"}},
-        {{"speaker": "SPEAKER_01", "text": "translated text 2"}},
+        {translation_example},
         ...
     ]
 }}
@@ -1097,6 +1189,9 @@ IMPORTANT: Respond in JSON format with an array of objects containing speaker an
                     repaired_json = self._load_response_json(translation_text)
                             
                     translated_pairs = repaired_json.get("translations", [])
+                    translated_pairs = self._validate_semantic_translation_pairs(
+                        original_speaker_texts, translated_pairs
+                    )
                         
                     # Validate all translations match the target language
                     validation_errors = []
@@ -1486,7 +1581,11 @@ IMPORTANT: The glossary provides base forms of translations. When using a term f
                     if idx < len(all_translated_pairs):
                         all_original_texts.append({
                             "speaker": segment["speaker"],
-                            "text": segment["text"]
+                            "text": segment["text"],
+                            **(
+                                {"semantic_unit_id": segment["semantic_unit_id"]}
+                                if segment.get("semantic_unit_id") else {}
+                            ),
                         })
                         idx += 1
             
@@ -1513,11 +1612,13 @@ IMPORTANT: The glossary provides base forms of translations. When using a term f
             # Create paired conversation format with original and translation
             original_conversation_text = ""
             for orig in all_original_texts:
-                original_conversation_text += f"{orig['speaker']}: {orig['text']}\n"
+                semantic_prefix = f"[{orig['semantic_unit_id']}] " if orig.get("semantic_unit_id") else ""
+                original_conversation_text += f"{semantic_prefix}{orig['speaker']}: {orig['text']}\n"
 
             translated_conversation_text = ""
             for trans in all_translated_pairs:
-                translated_conversation_text += f"{trans['speaker']}: {trans['text']}\n"
+                semantic_prefix = f"[{trans['semantic_unit_id']}] " if trans.get("semantic_unit_id") else ""
+                translated_conversation_text += f"{semantic_prefix}{trans['speaker']}: {trans['text']}\n"
 
                 
             # Build the refinement prompt
@@ -1537,6 +1638,12 @@ IMPORTANT: The glossary provides base forms of translations. When using a term f
                 source_language=source_language,
                 target_language=target_language
             )
+            if any(pair.get("semantic_unit_id") for pair in all_translated_pairs):
+                refinement_prompt += (
+                    "\n\nCRITICAL: Every output translation object must include its input "
+                    "semantic_unit_id. Return every ID exactly once, do not merge IDs, and "
+                    "do not invent IDs."
+                )
 
             # Start timer for batch refinement
             batch_start_time = time.perf_counter()
@@ -1579,6 +1686,9 @@ IMPORTANT: The glossary provides base forms of translations. When using a term f
                         
                         if len(refined_pairs) != len(all_translated_pairs):
                             raise ValueError(f"Refined pairs count ({len(refined_pairs)}) does not match original pairs count ({len(all_translated_pairs)}).")
+                        refined_pairs = self._validate_semantic_translation_pairs(
+                            all_translated_pairs, refined_pairs
+                        )
 
                         # Validate individual pairs
                         has_invalid_pairs = False
@@ -1857,6 +1967,9 @@ IMPORTANT: The glossary provides base forms of translations. When using a term f
         for chunk in chunks:
             original_segments = chunk["segments"]
             translated_pairs = chunk["translated_pairs"]
+            translated_pairs = self._validate_semantic_translation_pairs(
+                original_segments, translated_pairs
+            )
             
             # Handle mismatch without complex alignment algorithm
             if len(original_segments) != len(translated_pairs):

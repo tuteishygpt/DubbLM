@@ -1,0 +1,1004 @@
+{
+  "source": "NA_07_Matthew_Manarino_teaser_9-16_no_cover isolated-track transcription",
+  "rows": [
+    6,
+    7,
+    8,
+    13,
+    14,
+    15
+  ],
+  "segments": [
+    {
+      "text": "Riot Games Creative Director, esports, then Epic Games Creative Director, then Summoner co-founder and again Creative Director, industry insider. turned outsider 2 years ago,",
+      "start": 42.239,
+      "end": 54.997,
+      "speaker": "SPEAKER_01",
+      "words": [
+        {
+          "word": "Riot",
+          "start": 42.239,
+          "end": 42.543,
+          "confidence": 0.85877854
+        },
+        {
+          "word": "Games",
+          "start": 42.543,
+          "end": 42.768,
+          "confidence": 0.9998758
+        },
+        {
+          "word": "Creative",
+          "start": 42.864,
+          "end": 43.281,
+          "confidence": 0.670561
+        },
+        {
+          "word": "Director,",
+          "start": 43.281,
+          "end": 43.826,
+          "confidence": 0.8768703
+        },
+        {
+          "word": "esports,",
+          "start": 44.147,
+          "end": 44.596,
+          "confidence": 0.7754135
+        },
+        {
+          "word": "then",
+          "start": 44.869,
+          "end": 45.109,
+          "confidence": 0.993168
+        },
+        {
+          "word": "Epic",
+          "start": 45.109,
+          "end": 45.43,
+          "confidence": 0.9987214
+        },
+        {
+          "word": "Games",
+          "start": 45.43,
+          "end": 45.735,
+          "confidence": 0.9999708
+        },
+        {
+          "word": "Creative",
+          "start": 45.927,
+          "end": 46.328,
+          "confidence": 0.99831414
+        },
+        {
+          "word": "Director,",
+          "start": 46.328,
+          "end": 46.809,
+          "confidence": 0.9621289
+        },
+        {
+          "word": "then",
+          "start": 46.969,
+          "end": 47.178,
+          "confidence": 0.99769896
+        },
+        {
+          "word": "Summoner",
+          "start": 47.226,
+          "end": 47.931,
+          "confidence": 0.997515
+        },
+        {
+          "word": "co-founder",
+          "start": 48.252,
+          "end": 48.878,
+          "confidence": 0.9067282
+        },
+        {
+          "word": "and",
+          "start": 48.974,
+          "end": 49.038,
+          "confidence": 0.92424667
+        },
+        {
+          "word": "again",
+          "start": 49.134,
+          "end": 49.503,
+          "confidence": 0.99227434
+        },
+        {
+          "word": "Creative",
+          "start": 49.695,
+          "end": 50.225,
+          "confidence": 0.9879218
+        },
+        {
+          "word": "Director,",
+          "start": 50.401,
+          "end": 50.914,
+          "confidence": 0.81525713
+        },
+        {
+          "word": "industry",
+          "start": 51.203,
+          "end": 51.684,
+          "confidence": 0.97022575
+        },
+        {
+          "word": "insider.",
+          "start": 51.7,
+          "end": 52.197,
+          "confidence": 0.7866573
+        },
+        {
+          "word": "turned",
+          "start": 52.502,
+          "end": 52.84,
+          "confidence": 0.46889833
+        },
+        {
+          "word": "outsider",
+          "start": 52.969,
+          "end": 53.661,
+          "confidence": 0.99165744
+        },
+        {
+          "word": "2",
+          "start": 54.369,
+          "end": 54.562,
+          "confidence": 0.9998926
+        },
+        {
+          "word": "years",
+          "start": 54.578,
+          "end": 54.804,
+          "confidence": 0.9999393
+        },
+        {
+          "word": "ago,",
+          "start": 54.836,
+          "end": 54.997,
+          "confidence": 0.9086329
+        }
+      ],
+      "confidence": 0.9117228375,
+      "source_row": 6,
+      "source_segment_id": "SPEAKER_01:s000005"
+    },
+    {
+      "text": "launching his own marketing agency.",
+      "start": 55.641,
+      "end": 58.104,
+      "speaker": "SPEAKER_01",
+      "words": [
+        {
+          "word": "launching",
+          "start": 55.641,
+          "end": 55.931,
+          "confidence": 0.9994203
+        },
+        {
+          "word": "his",
+          "start": 56.671,
+          "end": 56.784,
+          "confidence": 0.99985397
+        },
+        {
+          "word": "own",
+          "start": 56.913,
+          "end": 57.122,
+          "confidence": 0.999923
+        },
+        {
+          "word": "marketing",
+          "start": 57.251,
+          "end": 57.621,
+          "confidence": 0.99981016
+        },
+        {
+          "word": "agency.",
+          "start": 57.653,
+          "end": 58.104,
+          "confidence": 0.9825578
+        }
+      ],
+      "confidence": 0.996313046,
+      "source_row": 7,
+      "source_segment_id": "SPEAKER_01:s000006"
+    },
+    {
+      "text": "Matt Manorina.",
+      "start": 58.683,
+      "end": 60.213,
+      "speaker": "SPEAKER_01",
+      "words": [
+        {
+          "word": "Matt",
+          "start": 58.683,
+          "end": 58.973,
+          "confidence": 0.6187993
+        },
+        {
+          "word": "Manorina.",
+          "start": 59.247,
+          "end": 60.213,
+          "confidence": 0.5513502
+        }
+      ],
+      "confidence": 0.58507475,
+      "source_row": 8,
+      "source_segment_id": "SPEAKER_01:s000007"
+    },
+    {
+      "text": "Yeah, it was, um, I had been working in corporate for, like you said, almost, almost 12 years, almost a dozen years, and I was pretty burnt out. I think that",
+      "start": 82.678,
+      "end": 93.559,
+      "speaker": "SPEAKER_00",
+      "words": [
+        {
+          "word": "Yeah,",
+          "start": 82.678,
+          "end": 82.999,
+          "confidence": 0.7715577
+        },
+        {
+          "word": "it",
+          "start": 83.159,
+          "end": 83.207,
+          "confidence": 0.985817
+        },
+        {
+          "word": "was,",
+          "start": 83.239,
+          "end": 83.384,
+          "confidence": 0.6503769
+        },
+        {
+          "word": "um,",
+          "start": 83.641,
+          "end": 83.849,
+          "confidence": 0.94890314
+        },
+        {
+          "word": "I",
+          "start": 84.202,
+          "end": 84.218,
+          "confidence": 0.98995715
+        },
+        {
+          "word": "had",
+          "start": 84.218,
+          "end": 84.299,
+          "confidence": 0.5034369
+        },
+        {
+          "word": "been",
+          "start": 84.299,
+          "end": 84.507,
+          "confidence": 0.9989519
+        },
+        {
+          "word": "working",
+          "start": 84.523,
+          "end": 84.844,
+          "confidence": 0.9994154
+        },
+        {
+          "word": "in",
+          "start": 84.844,
+          "end": 84.908,
+          "confidence": 0.99951124
+        },
+        {
+          "word": "corporate",
+          "start": 84.941,
+          "end": 85.502,
+          "confidence": 0.9999747
+        },
+        {
+          "word": "for,",
+          "start": 85.502,
+          "end": 85.759,
+          "confidence": 0.9952432
+        },
+        {
+          "word": "like",
+          "start": 85.888,
+          "end": 86.048,
+          "confidence": 0.99851876
+        },
+        {
+          "word": "you",
+          "start": 86.048,
+          "end": 86.144,
+          "confidence": 0.9997588
+        },
+        {
+          "word": "said,",
+          "start": 86.144,
+          "end": 86.433,
+          "confidence": 0.99989325
+        },
+        {
+          "word": "almost,",
+          "start": 86.53,
+          "end": 87.027,
+          "confidence": 0.9622203
+        },
+        {
+          "word": "almost",
+          "start": 87.172,
+          "end": 87.428,
+          "confidence": 0.9990308
+        },
+        {
+          "word": "12",
+          "start": 87.428,
+          "end": 87.814,
+          "confidence": 0.99996185
+        },
+        {
+          "word": "years,",
+          "start": 87.814,
+          "end": 88.119,
+          "confidence": 0.995198
+        },
+        {
+          "word": "almost",
+          "start": 88.151,
+          "end": 88.407,
+          "confidence": 0.99678314
+        },
+        {
+          "word": "a",
+          "start": 88.407,
+          "end": 88.472,
+          "confidence": 0.9996859
+        },
+        {
+          "word": "dozen",
+          "start": 88.472,
+          "end": 88.873,
+          "confidence": 0.99976975
+        },
+        {
+          "word": "years,",
+          "start": 88.873,
+          "end": 89.162,
+          "confidence": 0.9841618
+        },
+        {
+          "word": "and",
+          "start": 89.9,
+          "end": 90.125,
+          "confidence": 0.9934767
+        },
+        {
+          "word": "I",
+          "start": 90.221,
+          "end": 90.349,
+          "confidence": 0.99894804
+        },
+        {
+          "word": "was",
+          "start": 90.382,
+          "end": 90.606,
+          "confidence": 0.9996247
+        },
+        {
+          "word": "pretty",
+          "start": 90.959,
+          "end": 91.409,
+          "confidence": 0.9985714
+        },
+        {
+          "word": "burnt",
+          "start": 91.842,
+          "end": 92.227,
+          "confidence": 0.994819
+        },
+        {
+          "word": "out.",
+          "start": 92.227,
+          "end": 92.564,
+          "confidence": 0.9992771
+        },
+        {
+          "word": "I",
+          "start": 93.03,
+          "end": 93.078,
+          "confidence": 0.51259845
+        },
+        {
+          "word": "think",
+          "start": 93.11,
+          "end": 93.303,
+          "confidence": 0.9985715
+        },
+        {
+          "word": "that",
+          "start": 93.351,
+          "end": 93.559,
+          "confidence": 0.9979367
+        }
+      ],
+      "confidence": 0.9442564893548387,
+      "source_row": 13,
+      "source_segment_id": "SPEAKER_00:s000012"
+    },
+    {
+      "text": "I was feeling what a lot of people might be feeling right now in the industry, was that I felt like a very small piece in a very huge machine that couldn't make a much of a difference,",
+      "start": 94.474,
+      "end": 105.438,
+      "speaker": "SPEAKER_00",
+      "words": [
+        {
+          "word": "I",
+          "start": 94.474,
+          "end": 94.522,
+          "confidence": 0.95643485
+        },
+        {
+          "word": "was",
+          "start": 94.555,
+          "end": 94.667,
+          "confidence": 0.9995536
+        },
+        {
+          "word": "feeling",
+          "start": 94.811,
+          "end": 95.1,
+          "confidence": 0.9990544
+        },
+        {
+          "word": "what",
+          "start": 95.277,
+          "end": 95.518,
+          "confidence": 0.998395
+        },
+        {
+          "word": "a",
+          "start": 95.598,
+          "end": 95.758,
+          "confidence": 0.99740666
+        },
+        {
+          "word": "lot",
+          "start": 95.758,
+          "end": 96.015,
+          "confidence": 0.99960834
+        },
+        {
+          "word": "of",
+          "start": 96.015,
+          "end": 96.144,
+          "confidence": 0.99919623
+        },
+        {
+          "word": "people",
+          "start": 96.336,
+          "end": 96.577,
+          "confidence": 0.99939525
+        },
+        {
+          "word": "might",
+          "start": 96.577,
+          "end": 96.802,
+          "confidence": 0.99853957
+        },
+        {
+          "word": "be",
+          "start": 96.802,
+          "end": 96.898,
+          "confidence": 0.9993523
+        },
+        {
+          "word": "feeling",
+          "start": 96.898,
+          "end": 97.187,
+          "confidence": 0.9997491
+        },
+        {
+          "word": "right",
+          "start": 97.203,
+          "end": 97.331,
+          "confidence": 0.99926955
+        },
+        {
+          "word": "now",
+          "start": 97.379,
+          "end": 97.572,
+          "confidence": 0.9995449
+        },
+        {
+          "word": "in",
+          "start": 97.62,
+          "end": 97.668,
+          "confidence": 0.9976036
+        },
+        {
+          "word": "the",
+          "start": 97.7,
+          "end": 97.845,
+          "confidence": 0.9994099
+        },
+        {
+          "word": "industry,",
+          "start": 97.861,
+          "end": 98.31,
+          "confidence": 0.9848368
+        },
+        {
+          "word": "was",
+          "start": 98.824,
+          "end": 98.952,
+          "confidence": 0.9696722
+        },
+        {
+          "word": "that",
+          "start": 99.049,
+          "end": 99.434,
+          "confidence": 0.99865913
+        },
+        {
+          "word": "I",
+          "start": 99.691,
+          "end": 99.739,
+          "confidence": 0.97663975
+        },
+        {
+          "word": "felt",
+          "start": 99.803,
+          "end": 100.14,
+          "confidence": 0.9987907
+        },
+        {
+          "word": "like",
+          "start": 100.252,
+          "end": 100.573,
+          "confidence": 0.99758935
+        },
+        {
+          "word": "a",
+          "start": 100.975,
+          "end": 100.991,
+          "confidence": 0.93213695
+        },
+        {
+          "word": "very",
+          "start": 100.991,
+          "end": 101.263,
+          "confidence": 0.99704933
+        },
+        {
+          "word": "small",
+          "start": 101.312,
+          "end": 101.584,
+          "confidence": 0.9970193
+        },
+        {
+          "word": "piece",
+          "start": 101.713,
+          "end": 102.194,
+          "confidence": 0.99893457
+        },
+        {
+          "word": "in",
+          "start": 102.194,
+          "end": 102.275,
+          "confidence": 0.99727815
+        },
+        {
+          "word": "a",
+          "start": 102.275,
+          "end": 102.355,
+          "confidence": 0.99846506
+        },
+        {
+          "word": "very",
+          "start": 102.355,
+          "end": 102.644,
+          "confidence": 0.9980812
+        },
+        {
+          "word": "huge",
+          "start": 102.676,
+          "end": 102.884,
+          "confidence": 0.9972518
+        },
+        {
+          "word": "machine",
+          "start": 102.981,
+          "end": 103.446,
+          "confidence": 0.99863154
+        },
+        {
+          "word": "that",
+          "start": 103.478,
+          "end": 103.687,
+          "confidence": 0.97232395
+        },
+        {
+          "word": "couldn't",
+          "start": 103.783,
+          "end": 104.04,
+          "confidence": 0.9970784
+        },
+        {
+          "word": "make",
+          "start": 104.04,
+          "end": 104.217,
+          "confidence": 0.99211615
+        },
+        {
+          "word": "a",
+          "start": 104.265,
+          "end": 104.345,
+          "confidence": 0.9201574
+        },
+        {
+          "word": "much",
+          "start": 104.49,
+          "end": 104.57,
+          "confidence": 0.38769555
+        },
+        {
+          "word": "of",
+          "start": 104.666,
+          "end": 104.763,
+          "confidence": 0.99996555
+        },
+        {
+          "word": "a",
+          "start": 104.763,
+          "end": 104.779,
+          "confidence": 0.9999957
+        },
+        {
+          "word": "difference,",
+          "start": 104.843,
+          "end": 105.438,
+          "confidence": 0.9925916
+        }
+      ],
+      "confidence": 0.9748808784210525,
+      "source_row": 14,
+      "source_segment_id": "SPEAKER_00:s000013"
+    },
+    {
+      "text": "and I wanted to make more of a difference. I, I loved my time working for corporate game studios. It was like a dream come true.",
+      "start": 105.888,
+      "end": 113.072,
+      "speaker": "SPEAKER_00",
+      "words": [
+        {
+          "word": "and",
+          "start": 105.888,
+          "end": 105.952,
+          "confidence": 0.9999912
+        },
+        {
+          "word": "I",
+          "start": 105.968,
+          "end": 106.016,
+          "confidence": 0.9999713
+        },
+        {
+          "word": "wanted",
+          "start": 106.113,
+          "end": 106.354,
+          "confidence": 0.9999653
+        },
+        {
+          "word": "to",
+          "start": 106.354,
+          "end": 106.434,
+          "confidence": 0.9999931
+        },
+        {
+          "word": "make",
+          "start": 106.434,
+          "end": 106.627,
+          "confidence": 0.999987
+        },
+        {
+          "word": "more",
+          "start": 106.691,
+          "end": 106.868,
+          "confidence": 0.9999877
+        },
+        {
+          "word": "of",
+          "start": 106.916,
+          "end": 107.013,
+          "confidence": 0.9999907
+        },
+        {
+          "word": "a",
+          "start": 107.013,
+          "end": 107.093,
+          "confidence": 0.99999475
+        },
+        {
+          "word": "difference.",
+          "start": 107.093,
+          "end": 107.511,
+          "confidence": 0.99998343
+        },
+        {
+          "word": "I,",
+          "start": 107.64,
+          "end": 107.72,
+          "confidence": 0.7907561
+        },
+        {
+          "word": "I",
+          "start": 107.817,
+          "end": 107.865,
+          "confidence": 0.99998915
+        },
+        {
+          "word": "loved",
+          "start": 108.058,
+          "end": 108.395,
+          "confidence": 0.9999802
+        },
+        {
+          "word": "my",
+          "start": 108.395,
+          "end": 108.684,
+          "confidence": 0.9999865
+        },
+        {
+          "word": "time",
+          "start": 109.247,
+          "end": 109.681,
+          "confidence": 0.99995637
+        },
+        {
+          "word": "working",
+          "start": 109.906,
+          "end": 110.276,
+          "confidence": 0.9999908
+        },
+        {
+          "word": "for",
+          "start": 110.549,
+          "end": 110.71,
+          "confidence": 0.9999889
+        },
+        {
+          "word": "corporate",
+          "start": 110.71,
+          "end": 111.16,
+          "confidence": 0.9986314
+        },
+        {
+          "word": "game",
+          "start": 111.256,
+          "end": 111.449,
+          "confidence": 0.99997485
+        },
+        {
+          "word": "studios.",
+          "start": 111.449,
+          "end": 111.803,
+          "confidence": 0.9998551
+        },
+        {
+          "word": "It",
+          "start": 111.915,
+          "end": 111.979,
+          "confidence": 0.9999019
+        },
+        {
+          "word": "was",
+          "start": 111.979,
+          "end": 112.076,
+          "confidence": 0.99998343
+        },
+        {
+          "word": "like",
+          "start": 112.076,
+          "end": 112.397,
+          "confidence": 0.9988135
+        },
+        {
+          "word": "a",
+          "start": 112.413,
+          "end": 112.429,
+          "confidence": 0.99993813
+        },
+        {
+          "word": "dream",
+          "start": 112.461,
+          "end": 112.703,
+          "confidence": 0.99997544
+        },
+        {
+          "word": "come",
+          "start": 112.703,
+          "end": 112.863,
+          "confidence": 0.9999975
+        },
+        {
+          "word": "true.",
+          "start": 112.863,
+          "end": 113.072,
+          "confidence": 0.99981654
+        }
+      ],
+      "confidence": 0.9918230880769231,
+      "source_row": 15,
+      "source_segment_id": "SPEAKER_00:s000014"
+    }
+  ],
+  "vad_regions": [
+    {
+      "start": 42.239,
+      "end": 54.997,
+      "speaker": "SPEAKER_01",
+      "vad_region_id": "SPEAKER_01:v000005"
+    },
+    {
+      "start": 55.641,
+      "end": 58.104,
+      "speaker": "SPEAKER_01",
+      "vad_region_id": "SPEAKER_01:v000006"
+    },
+    {
+      "start": 58.683,
+      "end": 60.213,
+      "speaker": "SPEAKER_01",
+      "vad_region_id": "SPEAKER_01:v000007"
+    },
+    {
+      "start": 82.678,
+      "end": 93.559,
+      "speaker": "SPEAKER_00",
+      "vad_region_id": "SPEAKER_00:v000012"
+    },
+    {
+      "start": 94.474,
+      "end": 105.438,
+      "speaker": "SPEAKER_00",
+      "vad_region_id": "SPEAKER_00:v000013"
+    },
+    {
+      "start": 105.888,
+      "end": 113.072,
+      "speaker": "SPEAKER_00",
+      "vad_region_id": "SPEAKER_00:v000014"
+    }
+  ],
+  "expected_source_boundary_decisions": {
+    "6->7": "CONTINUE",
+    "7->8": "CUT",
+    "13->14": "CONTINUE",
+    "14->15": "CONTINUE"
+  },
+  "expected_units": {
+    "SPEAKER_01": [
+      {
+        "semantic_unit_id": "b6dd95a0e0367e81",
+        "text": "Riot Games Creative Director, esports, then Epic Games Creative Director, then Summoner co-founder and again Creative Director, industry insider. turned outsider 2 years ago, launching his own marketing agency.",
+        "start": 42.239,
+        "end": 58.104,
+        "source_word_range": [
+          0,
+          29
+        ],
+        "source_segment_ids": [
+          "SPEAKER_01:s000005",
+          "SPEAKER_01:s000006"
+        ],
+        "vad_region_ids": [
+          "SPEAKER_01:v000005",
+          "SPEAKER_01:v000006"
+        ],
+        "lock_boundary_before": false,
+        "boundary_before": null,
+        "continuation_id": null
+      },
+      {
+        "semantic_unit_id": "f8d174098438c55f",
+        "text": "Matt Manorina.",
+        "start": 58.683,
+        "end": 60.213,
+        "source_word_range": [
+          29,
+          31
+        ],
+        "source_segment_ids": [
+          "SPEAKER_01:s000007"
+        ],
+        "vad_region_ids": [
+          "SPEAKER_01:v000007"
+        ],
+        "lock_boundary_before": true,
+        "boundary_before": {
+          "candidate_id": "006a91d78c4d3a78",
+          "type": "semantic",
+          "source_pause": 0.5790000000000006,
+          "decision": "CUT",
+          "confidence": null,
+          "reason_code": "sentence_final",
+          "classifier_mode": "deterministic-only"
+        },
+        "continuation_id": null
+      }
+    ],
+    "SPEAKER_00": [
+      {
+        "semantic_unit_id": "5b62708920f4a900",
+        "text": "Yeah, it was, um, I had been working in corporate for, like you said, almost, almost 12 years, almost a dozen years, and I was pretty burnt out.",
+        "start": 82.678,
+        "end": 92.564,
+        "source_word_range": [
+          0,
+          28
+        ],
+        "source_segment_ids": [
+          "SPEAKER_00:s000012"
+        ],
+        "vad_region_ids": [
+          "SPEAKER_00:v000012"
+        ],
+        "lock_boundary_before": false,
+        "boundary_before": null,
+        "continuation_id": null
+      },
+      {
+        "semantic_unit_id": "387104d3e2daf244",
+        "text": "I think that I was feeling what a lot of people might be feeling right now in the industry, was that I felt like a very small piece in a very huge machine that couldn't make a much of a difference, and I wanted to make more of a difference.",
+        "start": 93.03,
+        "end": 107.511,
+        "source_word_range": [
+          28,
+          78
+        ],
+        "source_segment_ids": [
+          "SPEAKER_00:s000013",
+          "SPEAKER_00:s000014"
+        ],
+        "vad_region_ids": [
+          "SPEAKER_00:v000013",
+          "SPEAKER_00:v000014"
+        ],
+        "lock_boundary_before": true,
+        "boundary_before": {
+          "candidate_id": "6f1638a319bce96a",
+          "type": "semantic",
+          "source_pause": 0.4660000000000082,
+          "decision": "CUT",
+          "confidence": null,
+          "reason_code": "sentence_final",
+          "classifier_mode": "deterministic-only"
+        },
+        "continuation_id": null
+      },
+      {
+        "semantic_unit_id": "2bed6e18fdc0fb10",
+        "text": "I, I loved my time working for corporate game studios. It was like a dream come true.",
+        "start": 107.64,
+        "end": 113.072,
+        "source_word_range": [
+          78,
+          95
+        ],
+        "source_segment_ids": [],
+        "vad_region_ids": [],
+        "lock_boundary_before": true,
+        "boundary_before": {
+          "candidate_id": "9d65fe9de8b15983",
+          "type": "semantic",
+          "source_pause": 0.1290000000000049,
+          "decision": "CUT",
+          "confidence": null,
+          "reason_code": "sentence_final",
+          "classifier_mode": "deterministic-only"
+        },
+        "continuation_id": null
+      }
+    ]
+  }
+}

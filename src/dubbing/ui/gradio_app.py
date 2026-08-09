@@ -91,6 +91,10 @@ SETTINGS_FIELDS = [
     "timing_short_segment_max_speed",
     "timing_max_speed",
     "timing_max_overflow",
+    "semantic_split_enabled",
+    "tts_preferred_segment_duration",
+    "tts_hard_segment_duration",
+    "semantic_split_search_window",
     "debug_info",
     "debug_tts",
     "debug_diarize_only",
@@ -1545,6 +1549,27 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         value=defaults.get("timing_max_overflow", 0.25),
                         precision=3,
                     )
+                with gr.Row():
+                    semantic_split_enabled = gr.Checkbox(
+                        label="Semantic splitting",
+                        value=bool(defaults.get("semantic_split_enabled", True)),
+                    )
+                    tts_preferred_segment_duration = gr.Number(
+                        label="Preferred TTS segment duration",
+                        value=defaults.get("tts_preferred_segment_duration", 15.0),
+                        precision=2,
+                    )
+                with gr.Row():
+                    tts_hard_segment_duration = gr.Number(
+                        label="Hard TTS segment duration",
+                        value=defaults.get("tts_hard_segment_duration", 35.0),
+                        precision=2,
+                    )
+                    semantic_split_search_window = gr.Number(
+                        label="Semantic split search window",
+                        value=defaults.get("semantic_split_search_window", 10.0),
+                        precision=2,
+                    )
 
                 gr.Markdown("## Debug / Advanced")
                 with gr.Row():
@@ -1601,6 +1626,10 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         timing_short_segment_max_speed,
                         timing_max_speed,
                         timing_max_overflow,
+                        semantic_split_enabled,
+                        tts_preferred_segment_duration,
+                        tts_hard_segment_duration,
+                        semantic_split_search_window,
                         debug_info,
                         debug_tts,
                         debug_diarize_only,
