@@ -1426,11 +1426,13 @@ class SmartDubbing:
             fingerprint.update(b';')
         fingerprint.update(inner_system.encode('utf-8'))
         if self.config.get("semantic_split_enabled", True):
+            from ..audio.semantic_planner import SEMANTIC_PLANNER_VERSION
+
             fingerprint.update(
                 self._isolated_tracks_raw_cache_key(isolated_tracks).encode("utf-8")
             )
             semantic_payload = {
-                "algorithm": "semantic_planner_v1",
+                "algorithm": SEMANTIC_PLANNER_VERSION,
                 "incomplete_tail_rules": "incomplete_tail_en_v1",
                 "prompt_parser": "semantic_boundary_prompt_v1",
                 "semantic_split_enabled": True,

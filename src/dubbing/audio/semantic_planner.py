@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, MutableMapping, Optional, Sequence
 
 
-SEMANTIC_PLANNER_VERSION = "semantic_planner_v1"
+SEMANTIC_PLANNER_VERSION = "semantic_planner_v2"
 INCOMPLETE_TAIL_RULES_VERSION = "incomplete_tail_en_v1"
 SEMANTIC_BOUNDARY_PROMPT_VERSION = "semantic_boundary_prompt_v1"
 
@@ -133,6 +133,41 @@ def _normalize_regions(
         }
         for index, (start, end, provider_index, supplied_id) in enumerate(validated)
     ]
+
+
+def _normalize_foreign_activity(
+    activity: Sequence[Any], speaker: str
+) -> list[tuple[float, float]]:
+    """Validate and coalesce foreign word activity into stable components."""
+    validated: set[tuple[float, float]] = set()
+    for provider_index, record in enumerate(activity):
+        try:
+            if isinstance(record, Mapping):
+                start = float(record["start"])
+                end = float(record["end"])
+            else:
+                start = float(record[0])
+                end = float(record[1])
+        except (KeyError, TypeError, ValueError, IndexError, OverflowError) as exc:
+            raise ValueError(
+                f"{speaker} foreign activity {provider_index} has invalid timestamps"
+            ) from exc
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0.0 or end < start:
+            raise ValueError(
+                f"{speaker} foreign activity {provider_index} has invalid timestamps: "
+                f"{start!r}..{end!r}"
+            )
+        if start != end:
+            validated.add((start, end))
+
+    coalesced: list[tuple[float, float]] = []
+    for start, end in sorted(validated):
+        if coalesced and start <= coalesced[-1][1]:
+            previous_start, previous_end = coalesced[-1]
+            coalesced[-1] = (previous_start, max(previous_end, end))
+        else:
+            coalesced.append((start, end))
+    return coalesced
 
 
 def _normalize_segments(
@@ -293,7 +328,10 @@ def _context(items: Sequence[Mapping[str, Any]], index: int) -> tuple[str, str]:
 
 
 def _build_candidates(
-    items: Sequence[Mapping[str, Any]], speaker: str, source_language: str
+    items: Sequence[Mapping[str, Any]],
+    speaker: str,
+    source_language: str,
+    foreign_activity: Sequence[tuple[float, float]],
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for index in range(len(items) - 1):
@@ -301,6 +339,16 @@ def _build_candidates(
         left_context, right_context = _context(items, index)
         pause = max(0.0, float(right["start"]) - float(left["end"]))
         left_text = str(left["text"]).strip()
+        speaker_turn_boundary = any(
+            float(left["end"]) < activity_start
+            and activity_end < float(right["start"])
+            for activity_start, activity_end in foreign_activity
+        )
+        strong_early_utterance = (
+            left_text.endswith(_SENTENCE_PUNCTUATION)
+            and left.get("source_segment_id") != right.get("source_segment_id")
+            and pause >= 0.5
+        )
         if (
             _has_incomplete_tail(left_context, source_language)
             or _cross_boundary_is_incomplete(left_text, right_context, source_language)
@@ -355,6 +403,8 @@ def _build_candidates(
                 "boundary_type": "semantic",
                 "continuation_id": None,
                 "semantic_unit_id": None,
+                "speaker_turn_boundary": speaker_turn_boundary,
+                "strong_early_utterance": strong_early_utterance,
                 "lineage": {
                     "source_segment_ids": _ordered_unique(
                         [left.get("source_segment_id"), right.get("source_segment_id")]
@@ -366,6 +416,29 @@ def _build_candidates(
             }
         )
     return candidates
+
+
+def _apply_mandatory_boundaries(
+    candidates: Sequence[MutableMapping[str, Any]], speaker: str
+) -> None:
+    for candidate in candidates:
+        if not candidate["speaker_turn_boundary"]:
+            continue
+        candidate["final_decision"] = "CUT"
+        candidate["reason_code"] = "speaker_turn"
+        candidate["boundary_type"] = "speaker_turn"
+        candidate["decision_priority"] = 3
+        if candidate["local_decision"] == "HARD_CONTINUE":
+            candidate["continuation_id"] = _stable_hash(
+                [speaker, candidate["source_index"], candidate["candidate_time"]]
+            )
+
+
+def _is_mandatory_boundary(candidate: Mapping[str, Any]) -> bool:
+    return bool(candidate["speaker_turn_boundary"]) or (
+        bool(candidate["strong_early_utterance"])
+        and candidate["local_decision"] == "LOCAL_CUT_SENTENCE"
+    )
 
 
 def _classifier_payload(candidate: Mapping[str, Any]) -> dict[str, Any]:
@@ -638,7 +711,17 @@ def _select_boundaries(
         hard_end = min(chain_end, unit_start + config.hard_duration)
         search_start = max(unit_start, target - effective_window)
         search_end = min(hard_end, target + effective_window)
-        relevant = candidates[unit_start_index:]
+        mandatory_index = next(
+            (
+                index
+                for index in range(unit_start_index, len(candidates))
+                if _is_mandatory_boundary(candidates[index])
+            ),
+            None,
+        )
+        mandatory = candidates[mandatory_index] if mandatory_index is not None else None
+        relevant_end = mandatory_index + 1 if mandatory_index is not None else len(candidates)
+        relevant = candidates[unit_start_index:relevant_end]
         eligible = [
             item for item in relevant
             if item["final_decision"] == "CUT"
@@ -653,7 +736,13 @@ def _select_boundaries(
             ]
             if later:
                 chosen = min(later, key=lambda c: _eligible_key(c, target))
-        if chosen is None and chain_end <= hard_end:
+        if (
+            chosen is None
+            and mandatory is not None
+            and float(mandatory["candidate_time"]) <= hard_end
+        ):
+            chosen = mandatory
+        if chosen is None and mandatory is None and chain_end <= hard_end:
             selected.append((len(items), None))
             break
         if chosen is None:
@@ -813,6 +902,7 @@ def plan_semantic_segments(
     segments: Sequence[Mapping[str, Any]],
     *,
     vad_regions: Sequence[Any] = (),
+    foreign_activity: Sequence[Mapping[str, Any] | Sequence[float]] = (),
     speaker: str,
     source_language: str = "en",
     config: Optional[SemanticPlannerConfig] = None,
@@ -833,6 +923,7 @@ def plan_semantic_segments(
         raise ValueError("Invalid semantic planner durations")
     normalized_segments = _normalize_segments(segments, speaker)
     normalized_regions = _normalize_regions(vad_regions, speaker)
+    normalized_foreign_activity = _normalize_foreign_activity(foreign_activity, speaker)
     words = _normalize_words(normalized_segments, normalized_regions, speaker)
     words_mode = bool(words)
     if words_mode:
@@ -849,7 +940,9 @@ def plan_semantic_segments(
         payload = {"version": SEMANTIC_PLANNER_VERSION, "units": [], "boundaries": []}
         return SemanticPlanResult([], [], _stable_hash(payload), True, classifier_status)
 
-    candidates = _build_candidates(items, speaker, source_language)
+    candidates = _build_candidates(
+        items, speaker, source_language, normalized_foreign_activity
+    )
     persistable, classifier_mode = _classify_candidates(
         candidates,
         classifier,
@@ -860,6 +953,7 @@ def plan_semantic_segments(
         classification_cache_set,
         classifier_cache_context,
     )
+    _apply_mandatory_boundaries(candidates, speaker)
     selections = _select_boundaries(items, candidates, config, speaker)
     units = _build_units(items, selections, speaker, words_mode)
     canonical = {
@@ -882,6 +976,8 @@ def plan_semantic_segments(
                 "chosen": item["chosen"],
                 "boundary_type": item["boundary_type"],
                 "continuation_id": item["continuation_id"],
+                "speaker_turn_boundary": item["speaker_turn_boundary"],
+                "strong_early_utterance": item["strong_early_utterance"],
             }
             for item in candidates
         ],

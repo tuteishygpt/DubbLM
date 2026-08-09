@@ -879,7 +879,7 @@
   "expected_units": {
     "SPEAKER_01": [
       {
-        "semantic_unit_id": "b6dd95a0e0367e81",
+        "semantic_unit_id": "920963f7b7de1e56",
         "text": "Riot Games Creative Director, esports, then Epic Games Creative Director, then Summoner co-founder and again Creative Director, industry insider. turned outsider 2 years ago, launching his own marketing agency.",
         "start": 42.239,
         "end": 58.104,
@@ -900,7 +900,7 @@
         "continuation_id": null
       },
       {
-        "semantic_unit_id": "f8d174098438c55f",
+        "semantic_unit_id": "605a286a7c5a9b4e",
         "text": "Matt Manorina.",
         "start": 58.683,
         "end": 60.213,
@@ -916,7 +916,7 @@
         ],
         "lock_boundary_before": true,
         "boundary_before": {
-          "candidate_id": "006a91d78c4d3a78",
+          "candidate_id": "14620fc3b0b6d922",
           "type": "semantic",
           "source_pause": 0.5790000000000006,
           "decision": "CUT",
@@ -929,7 +929,7 @@
     ],
     "SPEAKER_00": [
       {
-        "semantic_unit_id": "5b62708920f4a900",
+        "semantic_unit_id": "2748c54b08373065",
         "text": "Yeah, it was, um, I had been working in corporate for, like you said, almost, almost 12 years, almost a dozen years, and I was pretty burnt out.",
         "start": 82.678,
         "end": 92.564,
@@ -948,7 +948,7 @@
         "continuation_id": null
       },
       {
-        "semantic_unit_id": "387104d3e2daf244",
+        "semantic_unit_id": "6fb65acdc43a7be2",
         "text": "I think that I was feeling what a lot of people might be feeling right now in the industry, was that I felt like a very small piece in a very huge machine that couldn't make a much of a difference, and I wanted to make more of a difference.",
         "start": 93.03,
         "end": 107.511,
@@ -966,7 +966,7 @@
         ],
         "lock_boundary_before": true,
         "boundary_before": {
-          "candidate_id": "6f1638a319bce96a",
+          "candidate_id": "90ce255781d0d1bc",
           "type": "semantic",
           "source_pause": 0.4660000000000082,
           "decision": "CUT",
@@ -977,7 +977,7 @@
         "continuation_id": null
       },
       {
-        "semantic_unit_id": "2bed6e18fdc0fb10",
+        "semantic_unit_id": "e9df54f5d4181ccc",
         "text": "I, I loved my time working for corporate game studios. It was like a dream come true.",
         "start": 107.64,
         "end": 113.072,
@@ -989,7 +989,7 @@
         "vad_region_ids": [],
         "lock_boundary_before": true,
         "boundary_before": {
-          "candidate_id": "9d65fe9de8b15983",
+          "candidate_id": "ec966803bf8eb4a2",
           "type": "semantic",
           "source_pause": 0.1290000000000049,
           "decision": "CUT",

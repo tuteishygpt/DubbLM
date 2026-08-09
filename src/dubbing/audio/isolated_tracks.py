@@ -610,7 +610,13 @@ def _assemble_isolated_raw_tracks(
     all_segments: List[Dict[str, Any]] = []
     semantic_diagnostics: List[Dict[str, Any]] = []
     plan_fingerprints: List[str] = []
-    for raw_track in raw_tracks_data:
+    words_by_track = [
+        list(raw_track.get("words") or [])
+        if "words" in raw_track
+        else _extract_words(list(raw_track.get("asr_segments") or []))
+        for raw_track in raw_tracks_data
+    ]
+    for track_index, raw_track in enumerate(raw_tracks_data):
         speaker_label = str(raw_track["speaker"])
         regions = list(raw_track.get("vad_regions") or [])
         legacy_regions = [
@@ -619,13 +625,21 @@ def _assemble_isolated_raw_tracks(
             for region in regions
         ]
         inner_segments = list(raw_track.get("asr_segments") or [])
-        words = _extract_words(inner_segments)
+        words = words_by_track[track_index]
         if semantic_split_enabled:
             from .semantic_planner import SemanticPlannerConfig, plan_semantic_segments
+
+            foreign_activity = [
+                (word["start"], word["end"])
+                for other_index, other_words in enumerate(words_by_track)
+                if other_index != track_index
+                for word in other_words
+            ]
 
             result = plan_semantic_segments(
                 inner_segments,
                 vad_regions=regions,
+                foreign_activity=foreign_activity,
                 speaker=speaker_label,
                 source_language=source_language,
                 config=SemanticPlannerConfig(
@@ -684,8 +698,10 @@ def _assemble_isolated_raw_tracks(
         )
     all_segments.sort(key=lambda segment: (segment["start"], segment["end"], segment["speaker"]))
     if semantic_split_enabled:
+        from .semantic_planner import SEMANTIC_PLANNER_VERSION
+
         payload = json.dumps(
-            {"algorithm": "semantic_planner_v1", "track_plans": sorted(plan_fingerprints)},
+            {"algorithm": SEMANTIC_PLANNER_VERSION, "track_plans": sorted(plan_fingerprints)},
             sort_keys=True,
             separators=(",", ":"),
         )
