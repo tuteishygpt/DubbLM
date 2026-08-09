@@ -524,9 +524,24 @@ class SmartDubbing:
             f"_{self.config.get('target_language')}_{prompt_prefix_hash}{semantic_suffix}"
         )
 
-    def _build_emotions_cache_key(self, audio_file: str) -> str:
-        """Compute the emotion-analysis cache key used by analyze_emotions()."""
-        return self.cache_manager.generate_cache_key(audio_file, "", "", "")
+    def _build_emotions_cache_key(
+        self,
+        audio_file: str,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> str:
+        """Compute the plan-aware emotion-analysis cache identity."""
+        provider = str(provider or self.config.get("emotion_provider") or "gemini").lower()
+        model = str(model or self.config.get("emotion_model") or "gemini-3.1-flash-lite")
+        cache_extra = f"{provider}_{model}" if provider == "gemini" else provider
+        base_key = self.cache_manager.generate_cache_key(
+            audio_file, "", "", cache_extra
+        )
+        semantic_fingerprint = getattr(self, "_semantic_plan_fingerprint", None)
+        semantic_suffix = (
+            f"_semantic_{semantic_fingerprint}" if semantic_fingerprint else ""
+        )
+        return f"{base_key}_{cache_extra}{semantic_suffix}"
 
     def _restore_semantic_plan_fingerprint(self, audio_file: str) -> None:
         """Restore the semantic identity needed by resume cache keys."""
@@ -1003,13 +1018,22 @@ class SmartDubbing:
                     for segment in segments_for_output
                 )
                 if not translation_has_emotions:
-                    emotions_key = self._build_emotions_cache_key(audio_file)
+                    emotion_provider = str(
+                        self.config.get("emotion_provider") or "gemini"
+                    ).lower()
+                    emotion_model = str(
+                        self.config.get("emotion_model") or "gemini-3.1-flash-lite"
+                    )
+                    emotions_key = self._build_emotions_cache_key(
+                        audio_file, emotion_provider, emotion_model
+                    )
                     if self.cache_manager.cache_exists("emotions", emotions_key):
                         segments_for_output = self._load_required_cached_step(
                             step_name="emotions",
                             cache_key=emotions_key,
                             hint="emotion-analysis",
                         )
+                        self._validate_plan_dependent_segments(segments_for_output)
                     else:
                         logger.warning(
                             "enable_emotion_analysis is True but no emotion data was "
@@ -1836,17 +1860,22 @@ class SmartDubbing:
         provider = str(self.config.get("emotion_provider") or "gemini").lower()
         model = str(self.config.get("emotion_model") or "gemini-3.1-flash-lite")
 
-        cache_extra = f"{provider}_{model}" if provider == "gemini" else provider
-        cache_key = self.cache_manager.generate_cache_key(
-            audio_file, "", "", cache_extra
-        )
+        cache_key = self._build_emotions_cache_key(audio_file, provider, model)
         step_name = "emotions"
 
         if self.cache_manager.cache_exists(step_name, cache_key):
             logger.debug("Loading emotion analysis from cache...")
             cached_segments = self.cache_manager.load_from_cache(step_name, cache_key)
             if cached_segments is not None:
-                return cached_segments
+                try:
+                    self._validate_plan_dependent_segments(cached_segments)
+                except ValueError:
+                    logger.warning(
+                        "Emotion cache does not match the active semantic plan; "
+                        "re-analyzing."
+                    )
+                else:
+                    return cached_segments
             logger.warning("Found corrupted emotion cache, re-analyzing.")
 
         logger.info("Analyzing speech emotions (provider=%s, model=%s)...", provider, model)

@@ -675,6 +675,72 @@ def test_raw_tts_cache_key_includes_semantic_plan_fingerprint():
     assert first != second
 
 
+def test_emotions_cache_key_includes_provider_model_and_semantic_plan_fingerprint():
+    from dubbing.core.smart_dubbing import SmartDubbing
+
+    class Cache:
+        def generate_cache_key(self, *_args):
+            return "base"
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.cache_manager = Cache()
+    dubber.config = {}
+    dubber._semantic_plan_fingerprint = "plan-a"
+    first = dubber._build_emotions_cache_key("source.wav", "gemini", "model-a")
+    dubber._semantic_plan_fingerprint = "plan-b"
+    second = dubber._build_emotions_cache_key("source.wav", "gemini", "model-a")
+    third = dubber._build_emotions_cache_key("source.wav", "gemini", "model-b")
+
+    assert first != second != third
+    assert "plan-a" in first
+    assert "model-b" in third
+
+
+def test_analyze_emotions_rejects_mismatched_plan_cache_and_reanalyzes():
+    from dubbing.core.smart_dubbing import SmartDubbing
+
+    current = [{"semantic_plan_fingerprint": "plan-new", "start": 0.0, "end": 1.0}]
+    stale = [{"semantic_plan_fingerprint": "plan-old", "emotion": "Angry"}]
+    saved = []
+
+    class Cache:
+        def generate_cache_key(self, *_args):
+            return "base"
+
+        def cache_exists(self, *_args):
+            return True
+
+        def load_from_cache(self, *_args):
+            return stale
+
+        def save_to_cache(self, step, key, value):
+            saved.append((step, key, value))
+
+    class Performance:
+        def start_timing(self, *_args):
+            pass
+
+        def end_timing(self, *_args):
+            return 0.0
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.cache_manager = Cache()
+    dubber.performance_tracker = Performance()
+    dubber.config = {"emotion_provider": "gemini", "emotion_model": "model-a"}
+    dubber._semantic_plan_fingerprint = "plan-new"
+    calls = []
+
+    def analyze(segments, _audio_file, _model):
+        calls.append(segments)
+        segments[0]["emotion"] = "Neutral"
+
+    dubber._analyze_emotions_gemini = analyze
+
+    assert dubber.analyze_emotions(current, "source.wav") is current
+    assert calls == [current]
+    assert saved and saved[0][2] is current
+
+
 @pytest.mark.parametrize(
     "translated",
     [
