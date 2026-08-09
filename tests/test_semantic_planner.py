@@ -22,6 +22,27 @@ def _segment(text, start, end, words=None, speaker="SPEAKER_00"):
     return result
 
 
+def _assemble_semantic_raw_tracks(raw_tracks, diagnostics=None):
+    from dubbing.audio.isolated_tracks import _assemble_isolated_raw_tracks
+
+    return _assemble_isolated_raw_tracks(
+        raw_tracks,
+        inner_system="deepgram",
+        source_language="en",
+        semantic_split_enabled=True,
+        tts_preferred_segment_duration=15.0,
+        tts_hard_segment_duration=35.0,
+        semantic_split_search_window=10.0,
+        semantic_classifier=None,
+        semantic_classifier_status="deterministic-only",
+        semantic_debug_path=None,
+        classification_cache_get=None,
+        classification_cache_set=None,
+        classifier_cache_context=None,
+        semantic_diagnostics_out=diagnostics,
+    )
+
+
 def test_semantic_config_normalizes_all_entry_point_values():
     from dubbing.core.timing import normalize_timing_config
 
@@ -879,3 +900,408 @@ def test_translate_segments_rejects_a_partially_missing_semantic_fingerprint():
             ],
             "source.wav",
         )
+
+
+def test_strong_early_source_utterance_is_mandatory_before_duration_window():
+    from dubbing.audio.semantic_planner import SemanticPlannerConfig, plan_semantic_segments
+
+    segments = [
+        _segment(
+            "Matt Manorina.",
+            58.683,
+            60.213,
+            [
+                _word("Matt", 58.683, 59.231),
+                _word("Manorina.", 59.312, 60.213),
+            ],
+        ),
+        _segment(
+            "What is the most important lesson you learned?",
+            61.179,
+            74.100,
+            [
+                _word("What", 61.179, 62.100),
+                _word("is", 62.180, 63.000),
+                _word("the", 63.080, 64.000),
+                _word("most", 64.080, 65.600),
+                _word("important", 65.680, 68.300),
+                _word("lesson", 68.380, 70.200),
+                _word("you", 70.280, 71.100),
+                _word("learned?", 71.180, 74.100),
+            ],
+        ),
+    ]
+
+    result = plan_semantic_segments(
+        segments,
+        vad_regions=[(58.683, 60.213), (61.179, 74.100)],
+        speaker="SPEAKER_00",
+        source_language="en",
+        config=SemanticPlannerConfig(
+            preferred_duration=15.0,
+            hard_duration=35.0,
+            search_window=10.0,
+        ),
+    )
+
+    assert result.units[0]["text"] == "Matt Manorina."
+    chosen = next(item for item in result.diagnostics if item["chosen"])
+    assert chosen["candidate_time"] == pytest.approx(60.213)
+    assert chosen["strong_early_utterance"] is True
+
+
+def test_intervening_foreign_turn_splits_returning_speaker_chain():
+    speaker_00_segments = [
+        _segment(
+            "Earlier words",
+            63.122,
+            65.065,
+            [_word("Earlier", 63.122, 64.000), _word("words", 64.100, 65.065)],
+            speaker="SPEAKER_00",
+        ),
+        _segment(
+            "return now",
+            82.678,
+            83.849,
+            [_word("return", 82.678, 83.200), _word("now", 83.300, 83.849)],
+            speaker="SPEAKER_00",
+        ),
+    ]
+    speaker_01_segments = [
+        _segment(
+            "A fully intervening response.",
+            66.000,
+            80.000,
+            [
+                _word("A", 66.000, 67.000),
+                _word("fully", 67.100, 70.000),
+                _word("intervening", 70.100, 75.000),
+                _word("response.", 75.100, 80.000),
+            ],
+            speaker="SPEAKER_01",
+        )
+    ]
+    diagnostics = []
+
+    _, units = _assemble_semantic_raw_tracks(
+        [
+            {
+                "speaker": "SPEAKER_00",
+                "vad_regions": [(63.122, 65.065), (82.678, 83.849)],
+                "asr_segments": speaker_00_segments,
+                "words": [word for segment in speaker_00_segments for word in segment["words"]],
+            },
+            {
+                "speaker": "SPEAKER_01",
+                "vad_regions": [(66.000, 80.000)],
+                "asr_segments": speaker_01_segments,
+                "words": [word for segment in speaker_01_segments for word in segment["words"]],
+            },
+        ],
+        diagnostics,
+    )
+
+    speaker_00_units = [unit for unit in units if unit["speaker"] == "SPEAKER_00"]
+    assert len(speaker_00_units) == 2
+    assert not any(
+        unit["start"] == pytest.approx(63.122) and unit["end"] == pytest.approx(83.849)
+        for unit in speaker_00_units
+    )
+    assert speaker_00_units[1]["boundary_before"]["type"] == "speaker_turn"
+    chosen = [
+        item
+        for item in diagnostics
+        if item["speaker"] == "SPEAKER_00" and item["chosen"]
+    ]
+    assert chosen[0]["speaker_turn_boundary"] is True
+
+
+def test_concurrent_foreign_activity_does_not_split_current_speaker():
+    from dubbing.audio.semantic_planner import plan_semantic_segments
+
+    result = plan_semantic_segments(
+        [
+            _segment(
+                "alpha beta",
+                1.0,
+                4.0,
+                [_word("alpha", 1.0, 2.0), _word("beta", 3.0, 4.0)],
+            )
+        ],
+        vad_regions=[(1.0, 4.0)],
+        foreign_activity=[(1.8, 3.2)],
+        speaker="SPEAKER_00",
+        source_language="en",
+    )
+
+    assert [unit["text"] for unit in result.units] == ["alpha beta"]
+    assert result.diagnostics[0]["speaker_turn_boundary"] is False
+    assert all(item["boundary_type"] != "speaker_turn" for item in result.diagnostics)
+
+
+def test_foreign_activity_normalization_is_order_duplicate_and_contact_stable():
+    from dubbing.audio.semantic_planner import plan_semantic_segments
+
+    segments = [
+        _segment(
+            "alpha beta",
+            1.0,
+            6.0,
+            [_word("alpha", 1.0, 2.0), _word("beta", 5.0, 6.0)],
+        )
+    ]
+    common = {
+        "vad_regions": [(1.0, 2.0), (5.0, 6.0)],
+        "speaker": "SPEAKER_00",
+        "source_language": "en",
+    }
+
+    canonical = plan_semantic_segments(
+        segments,
+        foreign_activity=[{"start": 3.0, "end": 4.0}],
+        **common,
+    )
+    noisy = plan_semantic_segments(
+        segments,
+        foreign_activity=[
+            (4.5, 5.0),
+            (3.5, 3.5),
+            [3.0, 4.0],
+            {"end": 4.0, "start": 3.0},
+            (2.0, 2.5),
+        ],
+        **common,
+    )
+
+    assert canonical.fingerprint == noisy.fingerprint
+    assert canonical.units == noisy.units
+    assert canonical.diagnostics[0]["speaker_turn_boundary"] is True
+    assert noisy.diagnostics[0]["speaker_turn_boundary"] is True
+
+
+@pytest.mark.parametrize(
+    "bad_foreign_activity",
+    [
+        (-1.0, 1.0),
+        (2.0, 1.0),
+        (math.nan, 1.0),
+        [1.0],
+        {"start": 1.0},
+        {"end": 1.0},
+    ],
+)
+def test_invalid_foreign_activity_names_speaker_and_provider_index(bad_foreign_activity):
+    from dubbing.audio.semantic_planner import plan_semantic_segments
+
+    with pytest.raises(ValueError, match=r"SPEAKER_00.*foreign activity 0"):
+        plan_semantic_segments(
+            [_segment("alpha", 0.0, 1.0, [_word("alpha", 0.0, 1.0)])],
+            vad_regions=[(0.0, 1.0)],
+            foreign_activity=[bad_foreign_activity],
+            speaker="SPEAKER_00",
+            source_language="en",
+        )
+
+
+def test_wordless_current_track_splits_on_valid_foreign_activity():
+    from dubbing.audio.semantic_planner import plan_semantic_segments
+
+    result = plan_semantic_segments(
+        [
+            _segment("first thought", 0.0, 2.0),
+            _segment("second thought", 5.0, 7.0),
+        ],
+        vad_regions=[(0.0, 2.0), (5.0, 7.0)],
+        foreign_activity=[(3.0, 4.0)],
+        speaker="SPEAKER_00",
+        source_language="en",
+    )
+
+    assert [unit["text"] for unit in result.units] == ["first thought", "second thought"]
+    assert result.units[1]["boundary_before"]["type"] == "speaker_turn"
+    assert result.diagnostics[0]["speaker_turn_boundary"] is True
+
+
+def test_wordless_foreign_track_contributes_no_inferred_activity():
+    current_segments = [
+        _segment(
+            "alpha beta",
+            0.0,
+            7.0,
+            [_word("alpha", 0.0, 2.0), _word("beta", 5.0, 7.0)],
+            speaker="SPEAKER_00",
+        )
+    ]
+    wordless_foreign_segments = [
+        _segment("wordless foreign turn", 3.0, 4.0, speaker="SPEAKER_01")
+    ]
+    diagnostics = []
+
+    _, units = _assemble_semantic_raw_tracks(
+        [
+            {
+                "speaker": "SPEAKER_00",
+                "vad_regions": [(0.0, 2.0), (5.0, 7.0)],
+                "asr_segments": current_segments,
+                "words": [word for segment in current_segments for word in segment["words"]],
+            },
+            {
+                "speaker": "SPEAKER_01",
+                "vad_regions": [(3.0, 4.0)],
+                "asr_segments": wordless_foreign_segments,
+                "words": [],
+            },
+        ],
+        diagnostics,
+    )
+
+    speaker_00_units = [unit for unit in units if unit["speaker"] == "SPEAKER_00"]
+    assert [unit["text"] for unit in speaker_00_units] == ["alpha beta"]
+    assert all(
+        not item.get("speaker_turn_boundary", False)
+        for item in diagnostics
+        if item["speaker"] == "SPEAKER_00"
+    )
+    assert all(
+        item["boundary_type"] != "speaker_turn"
+        for item in diagnostics
+        if item["speaker"] == "SPEAKER_00"
+    )
+
+
+def test_speaker_turn_overrides_incomplete_tail_with_continuation():
+    from dubbing.audio.semantic_planner import plan_semantic_segments
+
+    result = plan_semantic_segments(
+        [
+            _segment(
+                "I think that this works.",
+                0.0,
+                8.0,
+                [
+                    _word("I", 0.0, 1.0),
+                    _word("think", 1.1, 2.0),
+                    _word("that", 2.1, 3.0),
+                    _word("this", 6.0, 7.0),
+                    _word("works.", 7.1, 8.0),
+                ],
+            )
+        ],
+        vad_regions=[(0.0, 3.0), (6.0, 8.0)],
+        foreign_activity=[(4.0, 5.0)],
+        speaker="SPEAKER_00",
+        source_language="en",
+    )
+
+    chosen = next(
+        item for item in result.diagnostics
+        if item["candidate_time"] == pytest.approx(3.0)
+    )
+    assert chosen["local_decision"] == "HARD_CONTINUE"
+    assert chosen["chosen"] is True
+    assert chosen["boundary_type"] == "speaker_turn"
+    assert len(result.units) == 2
+    assert result.units[0]["continuation_id"]
+    assert result.units[0]["continuation_id"] == result.units[1]["continuation_id"]
+
+
+def test_strong_early_boundary_never_overrides_incomplete_tail():
+    from dubbing.audio.semantic_planner import plan_semantic_segments
+
+    result = plan_semantic_segments(
+        [
+            _segment(
+                "I think that",
+                0.0,
+                3.0,
+                [_word("I", 0.0, 1.0), _word("think", 1.1, 2.0), _word("that", 2.1, 3.0)],
+            ),
+            _segment(
+                "this works.",
+                4.0,
+                6.0,
+                [_word("this", 4.0, 5.0), _word("works.", 5.1, 6.0)],
+            ),
+        ],
+        vad_regions=[(0.0, 3.0), (4.0, 6.0)],
+        speaker="SPEAKER_00",
+        source_language="en",
+    )
+
+    boundary = next(
+        item for item in result.diagnostics
+        if item["candidate_time"] == pytest.approx(3.0)
+    )
+    assert boundary["local_decision"] == "HARD_CONTINUE"
+    assert boundary["strong_early_utterance"] is False
+    assert boundary["chosen"] is False
+
+
+def test_dual_fact_boundary_uses_speaker_turn_metadata():
+    from dubbing.audio.semantic_planner import plan_semantic_segments
+
+    result = plan_semantic_segments(
+        [
+            _segment("Done.", 0.0, 1.0, [_word("Done.", 0.0, 1.0)]),
+            _segment(
+                "Next starts",
+                4.0,
+                6.0,
+                [_word("Next", 4.0, 5.0), _word("starts", 5.1, 6.0)],
+            ),
+        ],
+        vad_regions=[(0.0, 1.0), (4.0, 6.0)],
+        foreign_activity=[(2.0, 3.0)],
+        speaker="SPEAKER_00",
+        source_language="en",
+    )
+
+    boundary = next(item for item in result.diagnostics if item["candidate_time"] == 1.0)
+    assert boundary["speaker_turn_boundary"] is True
+    assert boundary["strong_early_utterance"] is True
+    assert boundary["chosen"] is True
+    assert boundary["boundary_type"] == "speaker_turn"
+    assert boundary["reason_code"] == "speaker_turn"
+
+
+def test_normal_cut_before_mandatory_cap_does_not_drop_cap():
+    from dubbing.audio.semantic_planner import SemanticPlannerConfig, plan_semantic_segments
+
+    result = plan_semantic_segments(
+        [
+            _segment(
+                "Opening ends. Middle continues After resumes.",
+                0.0,
+                20.0,
+                [
+                    _word("Opening", 0.0, 4.0),
+                    _word("ends.", 4.1, 10.0),
+                    _word("Middle", 10.1, 11.5),
+                    _word("continues", 11.6, 12.0),
+                    _word("After", 15.0, 17.0),
+                    _word("resumes.", 17.1, 20.0),
+                ],
+            )
+        ],
+        vad_regions=[(0.0, 12.0), (15.0, 20.0)],
+        foreign_activity=[(13.0, 14.0)],
+        speaker="SPEAKER_00",
+        source_language="en",
+        config=SemanticPlannerConfig(
+            preferred_duration=10.0,
+            hard_duration=35.0,
+            search_window=2.0,
+        ),
+    )
+
+    assert [unit["text"] for unit in result.units] == [
+        "Opening ends.",
+        "Middle continues",
+        "After resumes.",
+    ]
+    chosen = [item for item in result.diagnostics if item["chosen"]]
+    assert [item["candidate_time"] for item in chosen] == [10.0, 12.0]
+    assert chosen[0]["boundary_type"] == "semantic"
+    assert chosen[0]["reason_code"] == "sentence_final"
+    assert chosen[1]["speaker_turn_boundary"] is True
+    assert chosen[1]["boundary_type"] == "speaker_turn"
