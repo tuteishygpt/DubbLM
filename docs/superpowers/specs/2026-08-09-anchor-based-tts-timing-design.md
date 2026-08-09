@@ -48,6 +48,93 @@ For every segment:
 This design prioritizes stable starts and natural short utterances. It does not
 silently truncate intelligible speech.
 
+## Semantic segmentation for isolated speaker tracks
+
+### Current isolated-track failure
+
+The isolated-track path already runs VAD independently for every supplied
+speaker track. It then maps ASR words onto VAD regions, merges close regions,
+and finally calls `_split_long_segments`. The last step currently treats 15
+seconds as a hard duration target and may choose any word gap of at least 0.4
+seconds. As a result, a VAD breath inside an unfinished sentence can become a
+new translation and TTS segment. This is the source of the observed splits
+after phrases such as `I think that`.
+
+VAD remains authoritative for acoustic activity and word timestamps remain
+authoritative for placement, but neither is by itself a semantic boundary.
+Running a second ASR provider is not part of the default solution: it may alter
+punctuation or word timing, but it cannot correct a downstream duration-based
+split reliably.
+
+### Selected hybrid policy
+
+Replace the hard 15-second recursive split with a semantic segment planner:
+
+- `tts_preferred_segment_duration = 15.0` is a soft target.
+- `tts_hard_segment_duration = 35.0` is the maximum normal synthesis unit.
+- `semantic_split_search_window = 10.0` controls how far on either side of the
+  preferred duration the planner searches before allowing the unit to grow.
+- `semantic_split_enabled = true` enables the planner for isolated-track input.
+
+The planner first rebuilds a continuity chain from adjacent VAD regions for the
+same isolated speaker. A short acoustic pause is retained as metadata; it does
+not force a boundary. The old `max_duration * 1.5` merge cap must not prevent a
+30-second thought from being considered as one chain.
+
+For each chain, candidate cuts are produced from word boundaries. Candidates
+are ranked in this order:
+
+1. a semantically and grammatically complete sentence;
+2. a complete independent clause supported by soft punctuation and an
+   acoustic pause;
+3. an ASR segment boundary classified as a complete thought;
+4. the strongest acoustic word gap, used only when the hard limit would
+   otherwise be exceeded.
+
+Sentence-final punctuation is a candidate even if its measured word gap is
+below 0.4 seconds. Conversely, a long VAD pause is rejected as a normal cut
+when the left context is syntactically incomplete, for example after a
+subordinating conjunction, preposition, determiner, or construction such as
+`I think that` or `if we've laid off`.
+
+Obvious boundaries are classified locally from punctuation, pause, speaker,
+and incomplete-tail rules. Ambiguous candidate boundaries are evaluated in one
+batched structured LLM request using the source text on both sides. The
+classifier returns `CUT`, `CONTINUE`, or `UNCERTAIN` plus confidence and a
+reason code. It must not rewrite the transcript. If the configured LLM is
+unavailable, malformed, or times out, the deterministic ranking is used and a
+diagnostic records the fallback. A second ASR provider is deliberately not
+required.
+
+The planner chooses the highest-ranked valid candidate inside the search
+window, with distance from the preferred duration as a tie-breaker. If there
+is no valid boundary, it extends the unit until the next valid boundary or the
+hard maximum. Crossing the preferred duration is always preferable to cutting
+an unfinished sentence.
+
+If a chain reaches the hard maximum without any valid semantic boundary, the
+planner makes a forced cut at the strongest safe acoustic/clause candidate and
+marks both sides with a shared `continuation_id` and
+`boundary_type=technical_continuation`. Such a cut:
+
+- adds no synthetic pause;
+- retains the measured source pause separately;
+- uses edge-silence trimming on both generated clips;
+- is reported in timing diagnostics.
+
+Normal semantic cuts use `boundary_type=semantic`. Each planned unit retains
+the contributing VAD-region IDs and word range so its start and end are still
+derived from recognized word timestamps. The translation and TTS stages
+consume the planned semantic units, while debug output preserves their lineage
+back to the raw VAD regions.
+
+For the motivating artifact, the expected planning decisions are:
+
+- rows 6 and 7 remain one thought; row 8 starts a new semantic unit;
+- the cut after `I think that` is prohibited;
+- rows 13--15 are resegmented at complete sentence or clause boundaries, with
+  no unit exceeding 35 seconds.
+
 ## Timing policy
 
 The default timing policy is:
@@ -119,7 +206,7 @@ recognized speech ended after 0.5 seconds.
 
 ## Configuration and interface
 
-Add four configuration fields with validation and defaults:
+Add eight configuration fields with validation and defaults:
 
 | Config key | Default | Meaning |
 | --- | ---: | --- |
@@ -127,8 +214,12 @@ Add four configuration fields with validation and defaults:
 | `timing_short_segment_max_speed` | `1.08` | Maximum FFmpeg tempo multiplier for short segments. |
 | `timing_max_speed` | `1.15` | Maximum FFmpeg tempo multiplier for other segments. |
 | `timing_max_overflow` | `0.25` | Allowed audio overflow beyond the usable window, in seconds. |
+| `semantic_split_enabled` | `true` | Use semantic rather than fixed-duration splitting for isolated speaker tracks. |
+| `tts_preferred_segment_duration` | `15.0` | Soft target duration for a translation/TTS unit, in seconds. |
+| `tts_hard_segment_duration` | `35.0` | Hard maximum duration for a normal semantic unit, in seconds. |
+| `semantic_split_search_window` | `10.0` | Candidate search radius around the preferred duration, in seconds. |
 
-Expose the same four values in the Gradio advanced timing/audio settings. They
+Expose all timing and semantic-split values in the Gradio advanced timing/audio settings. They
 participate in the existing settings save/load flow and can also be supplied by
 YAML, CLI arguments, and programmatic overrides.
 
@@ -136,6 +227,8 @@ Validation rules:
 
 - Threshold and overflow must be non-negative.
 - Speed multipliers must be at least `1.0`.
+- Preferred duration must be positive, hard duration must be greater than or
+  equal to preferred duration, and the search window must be non-negative.
 - Invalid YAML/programmatic values, including NaN and infinity, fall back to
   defaults with a warning.
 - Gradio uses numeric fields with appropriate precision.
@@ -190,6 +283,16 @@ timing policy, it returns:
 
 Keeping this calculation independent of FFmpeg makes edge cases easy to unit
 test.
+
+### Semantic segment planner
+
+Add a focused planner component for isolated-track continuity chains. It owns
+candidate extraction, deterministic ranking, optional batched LLM
+classification, duration-constrained selection, lineage metadata, and forced
+continuation diagnostics. VAD execution and ASR providers remain unchanged.
+The existing `_split_long_segments` becomes a compatibility wrapper or is
+replaced at its isolated-track call site; fixed recursive splitting must not run
+after semantic planning and undo its decisions.
 
 ### Timeline assembly
 
@@ -273,6 +376,18 @@ Add focused tests covering:
 12. Final-cache keys change with every timing setting and the algorithm version,
     while raw segment caches remain reusable.
 13. Raw and legacy cached chunks produce defined trimming diagnostics.
+14. A same-speaker 30-second chain can cross the 15-second preferred duration
+    and cuts at a complete sentence rather than after `I think that`.
+15. Rows equivalent to 6--8 produce `JOIN, KEEP`, while rows equivalent to
+    13--15 never cut after the incomplete `that` boundary.
+16. Sentence-final punctuation is considered even with a word gap below 0.4
+    seconds; a long VAD pause after an incomplete tail is rejected.
+17. No semantic candidate before the hard maximum produces a marked technical
+    continuation with no added pause.
+18. LLM `CUT`, `CONTINUE`, malformed response, timeout, and unavailable-provider
+    paths all produce deterministic, cached outcomes and diagnostics.
+19. Configuration, CLI, Gradio defaults, validation, and persistence cover all
+    four semantic-split settings.
 
 The existing full test suite remains the regression gate. A real-artifact check
 compares `transcription.srt`, generated chunks, and final output duration for the
@@ -285,3 +400,5 @@ waveform correlation.
 - Lip-shape synchronization.
 - Automatically rewriting translations during final assembly.
 - Exposing low-level silence detector settings in the UI.
+- Running multiple ASR providers by default or voting between their segment
+  boundaries.
