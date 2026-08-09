@@ -962,10 +962,11 @@ class GeminiTTSWrapper(TTSInterface):
         if not style_prompt and segment_hint:
             style_prompt = segment_hint.style_prompt
             if not style_prompt and segment_hint.emotion and segment_hint.emotion != "Neutral":
-                # Get voice name for more natural prompts
-                voice_name = self._get_voice_for_speaker(speaker_id, segment_hint)
-                voice_name = self._validate_voice_name(voice_name)
-                style_prompt = f"Make {voice_name} sound {segment_hint.emotion.lower()}"
+                style_prompt = {
+                    "Angry": "Use subtle firmer emphasis and tighter pauses; preserve the voice, timbre, and pitch",
+                    "Happy": "Use a subtle brighter rhythm and gentle emphasis; preserve the voice, timbre, and pitch",
+                    "Sad": "Use subtle slower pacing and gentler pauses; preserve the voice, timbre, and pitch",
+                }.get(segment_hint.emotion, "")
         
         if style_prompt and not style_prompt.endswith(":"):
             style_prompt = style_prompt.strip() + ":"

@@ -5,7 +5,11 @@ from pydub import AudioSegment
 import dubbing.core.config as config_module
 import dubbing.core.runner as runner
 from dubbing.core.config import create_argument_parser
-from dubbing.core.smart_dubbing import SmartDubbing
+from dubbing.core.smart_dubbing import (
+    EMOTION_ANALYSIS_PROMPT,
+    SOFT_STYLE_BY_EMOTION,
+    SmartDubbing,
+)
 from dubbing.core.runner import build_config_from_overrides, run_dubbing_job
 
 
@@ -13,6 +17,28 @@ def _patch_projects_root(monkeypatch, tmp_path):
     projects_root = tmp_path / "prj"
     monkeypatch.setattr(config_module, "DEFAULT_PROJECTS_ROOT", projects_root, raising=False)
     return projects_root
+
+
+def test_emotion_analysis_prompt_preserves_voice_identity():
+    prompt = EMOTION_ANALYSIS_PROMPT.lower()
+
+    assert "voice identity" in prompt
+    assert "timbre" in prompt
+    assert "pitch" in prompt
+    assert "rhythm" in prompt
+    assert "pause" in prompt
+    assert "do not" in prompt
+    assert "make a new utterance sound like this" not in prompt
+
+
+def test_emotion_styles_only_request_subtle_prosody_changes():
+    assert set(SOFT_STYLE_BY_EMOTION) == {"Neutral", "Angry", "Happy", "Sad"}
+    for style in SOFT_STYLE_BY_EMOTION.values():
+        lowered = style.lower()
+        assert "voice" in lowered
+        assert "timbre" in lowered
+        assert "pitch" in lowered
+        assert "subtle" in lowered
 
 
 def test_build_config_from_overrides_parses_structured_fields(tmp_path, monkeypatch):

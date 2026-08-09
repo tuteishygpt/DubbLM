@@ -12,6 +12,8 @@ os.environ['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES', '0')
 
 import time
 import hashlib
+import csv
+import json
 import torch
 import warnings
 import shutil
@@ -52,6 +54,29 @@ warnings.filterwarnings("ignore")
 
 # Get logger
 logger = get_logger(__name__)
+
+
+EMOTION_ANALYSIS_PROMPT = (
+    "You are annotating a short audio clip for a text-to-speech dubbing engine. "
+    "Listen only for the speaker's emotional intensity and prosody. Produce ONE "
+    "short imperative instruction (max ~12 words) describing subtle changes to "
+    "rhythm, pauses, emphasis, or energy. Preserve the speaker's voice identity, "
+    "timbre, pitch range, accent, and vocal character exactly. Do not ask the TTS "
+    "model to imitate, transform, deepen, brighten, or otherwise change the voice. "
+    "Do not describe the words spoken. Do not add quotes, JSON, or explanations. "
+    "Also pick a single dominant emotion tag from: Neutral, Angry, Happy, Sad. "
+    "Respond with exactly two lines in this format (no extra text):\n"
+    "STYLE: <subtle prosody instruction>\n"
+    "EMOTION: <one of Neutral|Angry|Happy|Sad>"
+)
+
+
+SOFT_STYLE_BY_EMOTION = {
+    "Neutral": "Keep a natural conversational rhythm with subtle emphasis; preserve the voice, timbre, and pitch.",
+    "Angry": "Use subtle firmer emphasis and tighter pauses; preserve the voice, timbre, and pitch.",
+    "Happy": "Use a subtle brighter rhythm and gentle emphasis; preserve the voice, timbre, and pitch.",
+    "Sad": "Use subtle slower pacing and gentler pauses; preserve the voice, timbre, and pitch.",
+}
 
 
 SMART_DUBBING_STRESS_MARKS_REQUIREMENT = (
@@ -799,6 +824,78 @@ class SmartDubbing:
         finally:
             self._cleanup()
 
+    def run_analyze_emotions_only(
+        self,
+        save_translated_subtitles: bool = False,
+    ) -> str:
+        """Re-run emotion analysis over an existing translation.
+
+        Reuses cached diarization/transcription and the cached translation
+        pickle from a previous full-pipeline (or ``translate_only``) run,
+        wipes the emotion cache so classification runs fresh, then persists
+        the updated ``emotion`` / ``style_prompt`` fields back into the
+        translation cache. The Dubbing Texts editor and ``tts_to_end`` pick
+        them up on the next load without re-running TTS.
+
+        Fails loudly if there is no cached translation to annotate — this
+        step deliberately does not fall back to running the full pipeline.
+
+        Returns:
+            The translation cache path (or the translated subtitles path
+            when requested), for parity with the other resume-style steps.
+        """
+        logger.info("Running emotion-analysis-only step")
+        self.performance_tracker.start_timing("total")
+        try:
+            if not self.config.get("enable_emotion_analysis", False):
+                logger.warning(
+                    "enable_emotion_analysis is False in the current config; "
+                    "the analyze_emotions step will still run because it was "
+                    "requested explicitly."
+                )
+
+            audio_file, _, _ = self._prepare_audio_inputs()
+
+            translated_segments = self._load_required_cached_step(
+                step_name="translation",
+                cache_key=self._build_translation_cache_key(audio_file),
+                hint="translation",
+            )
+
+            try:
+                self.cache_manager.clear_cache("emotions")
+            except Exception as e:
+                logger.warning(f"Could not clear emotions cache: {e}")
+
+            annotated_segments = self.analyze_emotions(translated_segments, audio_file)
+            self._persist_synthesis_results(annotated_segments, audio_file)
+
+            filled = sum(
+                1 for seg in annotated_segments
+                if (seg.get("style_prompt") or "").strip()
+            )
+            logger.info(
+                "Emotion analysis complete: %d/%d segments have style_prompt set.",
+                filled,
+                len(annotated_segments),
+            )
+
+            if save_translated_subtitles:
+                self._save_requested_subtitles(
+                    self._apply_speaker_filter(annotated_segments),
+                    save_original_subtitles=False,
+                    save_translated_subtitles=True,
+                )
+                return self._get_subtitle_path(
+                    "translation",
+                    self.config.get("input"),
+                    self.config.get("target_language"),
+                )
+
+            return self.config.get("transcription_path")
+        finally:
+            self._cleanup()
+
     def run_from_scratch(
         self,
         save_original_subtitles: bool = False,
@@ -833,11 +930,35 @@ class SmartDubbing:
             self.subtitle_manager.save_debug_tsv(segments_for_output, output_dir=self.config.get("debug_dir"))
 
             if self.config.get('enable_emotion_analysis', True):
-                segments_for_output = self._load_required_cached_step(
-                    step_name="emotions",
-                    cache_key=self._build_emotions_cache_key(audio_file),
-                    hint="emotion-analysis",
+                # Prefer emotion/style_prompt already embedded in the translation
+                # cache (populated by analyze_emotions_only or a previous full
+                # run's _persist_synthesis_results). Only fall back to a
+                # standalone `emotions` cache entry when the translation cache
+                # is missing that data — that keeps back-compat with older
+                # projects while ensuring fresh analyze_emotions_only edits are
+                # respected on resume.
+                translation_has_emotions = any(
+                    (segment.get("emotion") is not None)
+                    or (segment.get("style_prompt") or "").strip()
+                    for segment in segments_for_output
                 )
+                if not translation_has_emotions:
+                    emotions_key = self._build_emotions_cache_key(audio_file)
+                    if self.cache_manager.cache_exists("emotions", emotions_key):
+                        segments_for_output = self._load_required_cached_step(
+                            step_name="emotions",
+                            cache_key=emotions_key,
+                            hint="emotion-analysis",
+                        )
+                    else:
+                        logger.warning(
+                            "enable_emotion_analysis is True but no emotion data was "
+                            "found in the translation cache or a standalone 'emotions' "
+                            "cache; proceeding with Neutral for all segments. Run "
+                            "--run_step analyze_emotions_only to populate emotions."
+                        )
+                        for segment in segments_for_output:
+                            segment.setdefault("emotion", "Neutral")
             else:
                 for segment in segments_for_output:
                     segment["emotion"] = "Neutral"
@@ -1396,82 +1517,168 @@ class SmartDubbing:
         if not segments:
             return []
 
+        provider = str(self.config.get("emotion_provider") or "gemini").lower()
+        model = str(self.config.get("emotion_model") or "gemini-3.1-flash-lite")
+
+        cache_extra = f"{provider}_{model}" if provider == "gemini" else provider
         cache_key = self.cache_manager.generate_cache_key(
-            audio_file, "", "", ""  # Simple cache key for emotions
+            audio_file, "", "", cache_extra
         )
         step_name = "emotions"
-        
-        # Check if results are cached
+
         if self.cache_manager.cache_exists(step_name, cache_key):
             logger.debug("Loading emotion analysis from cache...")
             cached_segments = self.cache_manager.load_from_cache(step_name, cache_key)
             if cached_segments is not None:
                 return cached_segments
             logger.warning("Found corrupted emotion cache, re-analyzing.")
-        
-        logger.info("Analyzing speech emotions...")
+
+        logger.info("Analyzing speech emotions (provider=%s, model=%s)...", provider, model)
         self.performance_tracker.start_timing("emotion_analysis")
 
+        try:
+            if provider == "gemini":
+                self._analyze_emotions_gemini(segments, audio_file, model)
+            elif provider == "speechbrain":
+                self._analyze_emotions_speechbrain(segments, audio_file)
+            else:
+                logger.warning("Unknown emotion_provider '%s'; defaulting all segments to Neutral.", provider)
+                for segment in segments:
+                    segment["emotion"] = "Neutral"
+        finally:
+            self.performance_tracker.end_timing("emotion_analysis")
+
+        self.cache_manager.save_to_cache(step_name, cache_key, segments)
+        return segments
+
+    def _analyze_emotions_gemini(self, segments: List[Dict], audio_file: str, model: str) -> None:
+        """Classify each segment's emotion via a Gemini multimodal model on Vertex AI."""
+        try:
+            from google import genai
+            from google.genai import types as genai_types
+        except ImportError:
+            logger.warning(
+                "google-genai package unavailable; falling back to Neutral for all segments. "
+                "Install google-genai or switch emotion_provider to 'speechbrain'."
+            )
+            for segment in segments:
+                segment["emotion"] = "Neutral"
+            return
+
+        try:
+            from google_vertex import get_vertex_ai_settings
+            vertex_settings = get_vertex_ai_settings()
+            client = genai.Client(**vertex_settings.genai_client_kwargs)
+        except Exception as exc:
+            logger.warning("Vertex AI unavailable for emotion analysis (%s); defaulting to Neutral.", exc)
+            for segment in segments:
+                segment["emotion"] = "Neutral"
+            return
+
+        import io
+        import mimetypes
+        from pydub import AudioSegment
+
+        prompt = EMOTION_ANALYSIS_PROMPT
+        config_obj = genai_types.GenerateContentConfig(temperature=0.2)
+        allowed = {"Neutral", "Angry", "Happy", "Sad"}
+
+        audio = AudioSegment.from_file(audio_file)
+        for segment in segments:
+            try:
+                start = max(int(segment["start"] * 1000), 0)
+                end = min(int(segment["end"] * 1000), len(audio))
+                if end <= start:
+                    segment["emotion"] = "Neutral"
+                    segment.setdefault("style_prompt", "")
+                    continue
+
+                segment_audio = audio[start:end]
+                buffer = io.BytesIO()
+                segment_audio.export(buffer, format="wav")
+                audio_part = genai_types.Part.from_bytes(
+                    data=buffer.getvalue(),
+                    mime_type="audio/wav",
+                )
+
+                response = client.models.generate_content(
+                    model=model,
+                    contents=[audio_part, prompt],
+                    config=config_obj,
+                )
+                raw = (getattr(response, "text", None) or "").strip()
+                style_text = ""
+                emotion_label = "Neutral"
+                for line in raw.splitlines():
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    lower = stripped.lower()
+                    if lower.startswith("style:"):
+                        style_text = stripped.split(":", 1)[1].strip().strip('"\'')
+                    elif lower.startswith("emotion:"):
+                        tag = stripped.split(":", 1)[1].strip().split()[0]
+                        tag = tag.strip(".,!?\"'").capitalize()
+                        if tag in allowed:
+                            emotion_label = tag
+                if not style_text and raw:
+                    # Fallback: model ignored the format — take the first non-empty line.
+                    first_line = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
+                    style_text = first_line.strip('"\'')
+                segment["emotion"] = emotion_label
+                segment["style_prompt"] = style_text
+            except Exception as exc:
+                logger.warning("Gemini emotion classification failed for segment: %s", exc)
+                segment["emotion"] = "Neutral"
+                segment.setdefault("style_prompt", "")
+
+    def _analyze_emotions_speechbrain(self, segments: List[Dict], audio_file: str) -> None:
+        """Legacy speechbrain-based classifier (IEMOCAP wav2vec2)."""
         try:
             from speechbrain.inference.interfaces import foreign_class
         except ModuleNotFoundError as exc:
             if exc.name != "speechbrain":
                 raise
-
             logger.warning(
                 "Skipping emotion analysis because optional dependency "
-                "'speechbrain' is unavailable. Install project requirements "
-                "or disable enable_emotion_analysis."
+                "'speechbrain' is unavailable. Install it or switch emotion_provider to 'gemini'."
             )
             for segment in segments:
                 segment["emotion"] = "Neutral"
-            self.performance_tracker.end_timing("emotion_analysis")
-            return segments
-        
-        # Initialize the emotion classifier
+            return
+
         classifier = foreign_class(
             source="speechbrain/emotion-recognition-wav2vec2-IEMOCAP",
             pymodule_file="custom_interface.py",
             classname="CustomEncoderWav2vec2Classifier",
-            run_opts={"device": self.torch_device}
+            run_opts={"device": self.torch_device},
         )
-        
-        # Emotion mapping
         emotion_dict = {
             'neu': 'Neutral',
             'ang': 'Angry',
             'hap': 'Happy',
             'sad': 'Sad',
-            'None': None
+            'None': None,
         }
-        
-        # Process each segment
+
         from pydub import AudioSegment
         audio = AudioSegment.from_file(audio_file)
         for segment in segments:
             try:
                 start = int(segment["start"] * 1000)
                 end = int(segment["end"] * 1000)
-                
                 segment_audio = audio[start:end]
                 temp_segment_path = self.config.get("temp_segment_audio_path")
                 segment_audio.export(temp_segment_path, format="wav")
-                
                 out_prob, score, index, text_lab = classifier.classify_file(temp_segment_path)
-                segment["emotion"] = emotion_dict[text_lab[0]]
-                
+                emotion = emotion_dict[text_lab[0]] or "Neutral"
+                segment["emotion"] = emotion
+                segment["style_prompt"] = SOFT_STYLE_BY_EMOTION.get(emotion, "")
                 os.remove(temp_segment_path)
             except Exception as e:
                 logger.warning(f"Error analyzing emotion: {e}")
                 segment["emotion"] = "Neutral"
-        
-        # Save results to cache
-        self.cache_manager.save_to_cache(step_name, cache_key, segments)
-        
-        # End timing
-        self.performance_tracker.end_timing("emotion_analysis")
-        
-        return segments
+                segment.setdefault("style_prompt", "")
     
     def synthesize_speech(self, segments: List[Dict], speakers_rolls: Dict, audio_file: str) -> str:
         """
@@ -1488,22 +1695,40 @@ class SmartDubbing:
         if not segments:
             raise ValueError("Cannot synthesize speech with no segments.")
 
+        from .timing import TimingPolicy, plan_anchor_windows, timing_cache_fingerprint
+
+        try:
+            self._timing_source_duration = len(AudioSegment.from_file(audio_file)) / 1000.0
+        except Exception as exc:
+            raise ValueError(f"Cannot measure processed source audio for timing: {audio_file}") from exc
+        self._timing_source_audio_file = audio_file
+        anchor_plan = plan_anchor_windows(segments, self._timing_source_duration)
+        for item in anchor_plan:
+            item.segment["_timing_original_index"] = item.original_index
+            item.segment["_timing_next_anchor"] = item.next_start
+            item.segment["_timing_available_window"] = item.available_window
+        segments[:] = [item.segment for item in anchor_plan]
+        timing_policy = TimingPolicy.from_config(self.config)
+
         # Start timing
         self.performance_tracker.start_timing("speech_synthesis")
         
-        cache_key = f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}_{self.config.get('target_language')}_{self.config.get('tts_system')}"
+        cache_key = f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}_{self.config.get('target_language')}_{self.config.get('tts_system')}_{timing_cache_fingerprint(timing_policy)}"
         step_name = "synthesized_speech"
         
-        # Check if results are cached
-        if self.cache_manager.cache_exists(step_name, cache_key):
+        # Final audio is stored as WAV rather than CacheManager's pickle
+        # payload, so its existence must be checked directly.
+        cached_audio_path = self.cache_manager.get_cache_path(step_name) / f"{cache_key}.wav"
+        if (
+            self.cache_manager.use_cache
+            and not self.config.get("debug_info", False)
+            and cached_audio_path.exists()
+        ):
             logger.debug("Loading synthesized speech from cache...")
-            # Copy the cached output audio
-            cached_audio_path = self.cache_manager.get_cache_path(step_name) / f"{cache_key}.wav"
-            if cached_audio_path.exists():
-                output_path = self.config.get("translated_audio_path")
-                shutil.copy(cached_audio_path, output_path)
-                self.performance_tracker.end_timing("speech_synthesis")
-                return output_path
+            output_path = self.config.get("translated_audio_path")
+            shutil.copy(cached_audio_path, output_path)
+            self.performance_tracker.end_timing("speech_synthesis")
+            return output_path
         
         logger.info(f"Synthesizing translated speech using multiple TTS systems...")
         
@@ -1520,7 +1745,9 @@ class SmartDubbing:
         
         # Define comfort ratio constants
         COMFORT_MIN_ADJUSTMENT_RATIO = 0.75
-        COMFORT_MAX_ADJUSTMENT_RATIO = 1.15
+        # Anchor timing never stretches short speech to fill its window. Silence
+        # after a naturally short clip is valid slack, not a mismatch.
+        COMFORT_MAX_ADJUSTMENT_RATIO = float("inf")
 
         # Lazily-loaded original audio for creating segment-specific reference clips
         original_audio_segment = None
@@ -1590,7 +1817,8 @@ class SmartDubbing:
                 speaker = segment_dict["speaker"]
                 profile = self._resolve_voice_profile(speaker)
 
-                segment_style_prompt = profile.style_prompt
+                segment_style_override = (segment_dict.get("style_prompt") or "").strip()
+                segment_style_prompt = segment_style_override or profile.style_prompt
 
                 voice_name = profile.voice_name
                 if voice_name is None:
@@ -1619,7 +1847,7 @@ class SmartDubbing:
                     "reference_text": profile.reference_text,
                     "voice": voice_name,
                     "speed": 1.0,
-                    "target_duration": max(segment_dict["end"] - segment_dict["start"], 0.0),
+                    "target_duration": segment_dict["_timing_available_window"],
                 }
                 try:
                     if original_audio_segment is None:
@@ -1658,10 +1886,22 @@ class SmartDubbing:
                         if len(cached_audio_info) > 0:
                             logger.debug(f"Using valid cached segment {i+1}/{len(segments)} ({tts_system})")
                             shutil.copy(segment_cached_file_path, current_segment_output_path)
-                            segment_dict['synthesized_speech_len'] = len(cached_audio_info) / 1000.0
-                            segment_dict['synthesized_speech_file'] = current_segment_output_path
-                            segment_dict['synthesized_text'] = segment_dict.get('translation', '')
-                            continue
+                            cache_contract = self._cached_segment_contract(segment_cached_file_path)
+                            segment_dict['_tts_cache_contract'] = cache_contract
+                            if cache_contract == "anchor_raw_v1":
+                                measured_duration = self._measure_raw_tts_for_timing(current_segment_output_path, i)
+                            else:
+                                measured_duration = len(cached_audio_info) / 1000.0
+                            if measured_duration > 0:
+                                segment_dict['synthesized_speech_len'] = measured_duration
+                                segment_dict['synthesized_speech_file'] = current_segment_output_path
+                                segment_dict['synthesized_text'] = segment_dict.get('translation', '')
+                                continue
+                            os.remove(segment_cached_file_path)
+                            try:
+                                self._segment_cache_metadata_path(segment_cached_file_path).unlink()
+                            except OSError:
+                                pass
                         else:
                             os.remove(segment_cached_file_path)
                     except Exception as e:
@@ -1671,7 +1911,7 @@ class SmartDubbing:
                             pass
                 
                 # Calculate original duration and estimate current translation
-                original_duration = segment_dict["end"] - segment_dict["start"]
+                original_duration = segment_dict["_timing_available_window"]
                 
                 # Create TTSSegmentData for estimation
                 segment_data_model = TTSSegmentData(**tts_segment_data_args)
@@ -1830,28 +2070,31 @@ class SmartDubbing:
                     
                     # Check if file was created successfully
                     if os.path.exists(output_path):
-                        # Trim tail silence before measuring duration so the
-                        # comfort-ratio check sees the real speech length.
-                        self._trim_trailing_silence(output_path)
                         audio_info = AudioSegment.from_file(output_path)
-                        segment_dict['synthesized_speech_len'] = len(audio_info) / 1000.0
-                        segment_dict['synthesized_speech_file'] = output_path
+                        segment_dict['_tts_cache_contract'] = 'anchor_raw_v1'
+                        segment_dict['synthesized_speech_len'] = self._measure_raw_tts_for_timing(
+                            output_path,
+                            metadata['index'],
+                        )
+                        segment_dict['synthesized_speech_file'] = (
+                            output_path if segment_dict['synthesized_speech_len'] > 0 else None
+                        )
                         segment_dict['synthesized_text'] = metadata.get('chosen_text', segment_dict.get('translation', ''))
 
                         # Cache the synthesized segment
-                        if self.cache_manager.use_cache and len(audio_info) > 0:
+                        if self.cache_manager.use_cache and segment_dict['synthesized_speech_len'] > 0:
                             try:
-                                shutil.copy(output_path, metadata["cache_path"])
+                                self._cache_raw_tts_segment(output_path, metadata["cache_path"])
                                 logger.debug(f"Cached synthesized segment {metadata['index']+1} ({tts_system})")
                             except Exception as e:
                                 logger.error(f"Error caching segment {metadata['index']+1}: {e}")
 
                         # Validate actual duration and resynthesize if needed
-                        original_dur = segment_dict["end"] - segment_dict["start"]
+                        original_dur = segment_dict["_timing_available_window"]
                         actual_dur = segment_dict['synthesized_speech_len']
                         ratio = original_dur / actual_dur if actual_dur > 0 else 1.0
                         deviation = abs(original_dur - actual_dur) / original_dur if original_dur > 0 else 0.0
-                        if not (COMFORT_MIN_ADJUSTMENT_RATIO <= ratio <= COMFORT_MAX_ADJUSTMENT_RATIO):
+                        if actual_dur <= 0 or not (COMFORT_MIN_ADJUSTMENT_RATIO <= ratio <= COMFORT_MAX_ADJUSTMENT_RATIO):
                             logger.debug(f"Segment {metadata['index']+1}: duration mismatch after synthesis (ratio={ratio:.2f}, dev={deviation:.2%}). Trying alternatives...")
                             self._resynthesize_segment(
                                 metadata,
@@ -1912,22 +2155,27 @@ class SmartDubbing:
                         )
                         
                         if os.path.exists(output_path):
-                            self._trim_trailing_silence(output_path)
                             audio_info = AudioSegment.from_file(output_path)
-                            segment_dict['synthesized_speech_len'] = len(audio_info) / 1000.0
-                            segment_dict['synthesized_speech_file'] = output_path
+                            segment_dict['_tts_cache_contract'] = 'anchor_raw_v1'
+                            segment_dict['synthesized_speech_len'] = self._measure_raw_tts_for_timing(
+                                output_path,
+                                metadata['index'],
+                            )
+                            segment_dict['synthesized_speech_file'] = (
+                                output_path if segment_dict['synthesized_speech_len'] > 0 else None
+                            )
                             segment_dict['synthesized_text'] = metadata.get('chosen_text', segment_dict.get('translation', ''))
 
                             # Cache the synthesized segment
-                            if self.cache_manager.use_cache and len(audio_info) > 0:
-                                shutil.copy(output_path, metadata["cache_path"])
+                            if self.cache_manager.use_cache and segment_dict['synthesized_speech_len'] > 0:
+                                self._cache_raw_tts_segment(output_path, metadata["cache_path"])
                         
                         # After fallback individual synthesis, validate duration again
-                        original_dur = segment_dict["end"] - segment_dict["start"]
+                        original_dur = segment_dict["_timing_available_window"]
                         actual_dur = segment_dict.get('synthesized_speech_len', 0)
                         ratio = original_dur / actual_dur if actual_dur > 0 else 1.0
                         deviation = abs(original_dur - actual_dur) / original_dur if original_dur > 0 else 0.0
-                        if not (COMFORT_MIN_ADJUSTMENT_RATIO <= ratio <= COMFORT_MAX_ADJUSTMENT_RATIO):
+                        if actual_dur <= 0 or not (COMFORT_MIN_ADJUSTMENT_RATIO <= ratio <= COMFORT_MAX_ADJUSTMENT_RATIO):
                             logger.info(f"Segment {metadata['index']+1}: duration mismatch after fallback synthesis (ratio={ratio:.2f}, dev={deviation:.2%}). Trying alternatives...")
                             self._resynthesize_segment(
                                 metadata,
@@ -2082,7 +2330,6 @@ class SmartDubbing:
                     continue
 
                 if os.path.exists(output_path):
-                    self._trim_trailing_silence(output_path)
                     try:
                         audio_info = AudioSegment.from_file(output_path)
                     except Exception as exc:
@@ -2097,15 +2344,22 @@ class SmartDubbing:
                             pass
                         continue
 
-                    segment_dict['synthesized_speech_len'] = len(audio_info) / 1000.0
+                    segment_dict['_tts_cache_contract'] = 'anchor_raw_v1'
+                    segment_dict['synthesized_speech_len'] = self._measure_raw_tts_for_timing(
+                        output_path,
+                        metadata['index'],
+                    )
+                    if segment_dict['synthesized_speech_len'] <= 0:
+                        segment_dict['synthesized_speech_file'] = None
+                        continue
                     segment_dict['synthesized_speech_file'] = output_path
                     segment_dict['synthesized_text'] = metadata.get('chosen_text', segment_dict.get('translation', ''))
                     logger.info(
                         f"Retry {attempt + 1}: recovered segment {metadata['index']+1} ({tts_system})"
                     )
-                    if self.cache_manager.use_cache and len(audio_info) > 0:
+                    if self.cache_manager.use_cache and segment_dict['synthesized_speech_len'] > 0:
                         try:
-                            shutil.copy(output_path, metadata["cache_path"])
+                            self._cache_raw_tts_segment(output_path, metadata["cache_path"])
                         except Exception:
                             pass
 
@@ -2166,7 +2420,8 @@ class SmartDubbing:
             if isinstance(voice_cfg, str):
                 voice_name = voice_cfg
 
-        segment_style_prompt = profile.style_prompt
+        segment_style_override = (segment_dict.get("style_prompt") or "").strip()
+        segment_style_prompt = segment_style_override or profile.style_prompt
 
         self.audio_chunks_dir.mkdir(parents=True, exist_ok=True)
         output_path = str(self.audio_chunks_dir / f"{segment_index}.wav")
@@ -2180,7 +2435,10 @@ class SmartDubbing:
             "reference_text": None,
             "voice": voice_name,
             "speed": 1.0,
-            "target_duration": max(segment_dict.get("end", 0) - segment_dict.get("start", 0), 0.0),
+            "target_duration": segment_dict.get(
+                "_timing_available_window",
+                max(segment_dict.get("end", 0) - segment_dict.get("start", 0), 0.0),
+            ),
         }
 
         segment_reference_min_duration = float(self.config.get('segment_reference_min_duration', 2.0) or 0.0)
@@ -2237,7 +2495,6 @@ class SmartDubbing:
                 continue
 
             if os.path.exists(output_path):
-                self._trim_trailing_silence(output_path)
                 try:
                     audio_info = AudioSegment.from_file(output_path)
                 except Exception as exc:
@@ -2255,7 +2512,14 @@ class SmartDubbing:
                         pass
                     continue
 
-                segment_dict['synthesized_speech_len'] = len(audio_info) / 1000.0
+                segment_dict['_tts_cache_contract'] = 'anchor_raw_v1'
+                segment_dict['synthesized_speech_len'] = self._measure_raw_tts_for_timing(
+                    output_path,
+                    segment_index,
+                )
+                if segment_dict['synthesized_speech_len'] <= 0:
+                    last_error = RuntimeError("TTS produced only silence")
+                    continue
                 segment_dict['synthesized_speech_file'] = output_path
                 segment_dict['synthesized_text'] = text_to_synthesize
                 if override_text:
@@ -2448,6 +2712,40 @@ class SmartDubbing:
             f"(kept {end_ms}ms of {total_ms}ms)"
         )
 
+    def _measure_raw_tts_for_timing(self, audio_path: str, segment_index: int) -> float:
+        """Measure audible duration without modifying the raw synthesized WAV."""
+        from .timing import trim_audio_edges
+
+        self.su_audio_chunks_dir.mkdir(parents=True, exist_ok=True)
+        measured_path = self.su_audio_chunks_dir / f"measure_{segment_index}.wav"
+        result = trim_audio_edges(audio_path, measured_path)
+        if result.error:
+            logger.warning("Could not trim TTS edges for %s: %s", audio_path, result.error)
+        return result.trimmed_duration if result.usable else 0.0
+
+    @staticmethod
+    def _segment_cache_metadata_path(cache_path: Path) -> Path:
+        return cache_path.with_suffix(cache_path.suffix + ".json")
+
+    def _cache_raw_tts_segment(self, source_path: str, cache_path: Path) -> None:
+        """Cache raw TTS plus a version marker, independent of timing policy."""
+        shutil.copy(source_path, cache_path)
+        metadata_path = self._segment_cache_metadata_path(cache_path)
+        metadata_path.write_text(
+            json.dumps({"audio_contract": "anchor_raw_v1"}, sort_keys=True),
+            encoding="utf-8",
+        )
+
+    def _cached_segment_contract(self, cache_path: Path) -> str:
+        metadata_path = self._segment_cache_metadata_path(cache_path)
+        try:
+            data = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if data.get("audio_contract") == "anchor_raw_v1":
+                return "anchor_raw_v1"
+        except (OSError, ValueError, TypeError):
+            pass
+        return "legacy"
+
     def _calculate_percentage_deviation(self, ratio: float, min_ratio_comfort: float, max_ratio_comfort: float) -> float:
         """
         Calculates the signed percentage deviation of a given ratio from the comfort zone.
@@ -2497,7 +2795,10 @@ class SmartDubbing:
         from tts.models import TTSSegmentData
 
         segment_dict = metadata["segment_dict"]
-        original_duration = segment_dict["end"] - segment_dict["start"]
+        original_duration = segment_dict.get(
+            "_timing_available_window",
+            segment_dict["end"] - segment_dict["start"],
+        )
         output_path = metadata["output_path"]
         base_args = metadata["segment_data_args"]
         
@@ -2566,9 +2867,11 @@ class SmartDubbing:
                 if not os.path.exists(temp_output_path):
                     continue
 
-                self._trim_trailing_silence(temp_output_path)
                 audio_info = AudioSegment.from_file(temp_output_path)
-                actual_duration = len(audio_info) / 1000.0
+                actual_duration = self._measure_raw_tts_for_timing(
+                    temp_output_path,
+                    metadata['index'],
+                )
 
                 if actual_duration == 0:
                     os.remove(temp_output_path)
@@ -2639,9 +2942,11 @@ class SmartDubbing:
                             )
 
                             if os.path.exists(temp_output_path):
-                                self._trim_trailing_silence(temp_output_path)
                                 audio_info = AudioSegment.from_file(temp_output_path)
-                                actual_duration_llm = len(audio_info) / 1000.0
+                                actual_duration_llm = self._measure_raw_tts_for_timing(
+                                    temp_output_path,
+                                    metadata['index'],
+                                )
                                 if actual_duration_llm > 0:
                                     ratio_llm = original_duration / actual_duration_llm
                                     deviation_llm = self._calculate_percentage_deviation(ratio_llm, min_ratio, max_ratio)
@@ -2680,7 +2985,11 @@ class SmartDubbing:
             
             # Update segment data
             audio_info = AudioSegment.from_file(output_path)
-            segment_dict["synthesized_speech_len"] = len(audio_info) / 1000.0
+            segment_dict['_tts_cache_contract'] = 'anchor_raw_v1'
+            segment_dict["synthesized_speech_len"] = self._measure_raw_tts_for_timing(
+                output_path,
+                metadata['index'],
+            )
             segment_dict["synthesized_speech_file"] = output_path
             if best_key == "llm_adjusted":
                 # Persist the adjusted text
@@ -2694,7 +3003,7 @@ class SmartDubbing:
             # Update cache if needed
             if self.cache_manager.use_cache and len(audio_info) > 0:
                 try:
-                    shutil.copy(output_path, metadata["cache_path"])
+                    self._cache_raw_tts_segment(output_path, metadata["cache_path"])
                 except Exception:
                     pass
 
@@ -2713,7 +3022,7 @@ class SmartDubbing:
 
 
     
-    def _adjust_and_combine_audio_grouped(self, segments: List[Dict]) -> Tuple[AudioSegment, List[Dict]]:
+    def _adjust_and_combine_audio_grouped_legacy(self, segments: List[Dict]) -> Tuple[AudioSegment, List[Dict]]:
         """
         Adjusts timing and combines audio segments with optimizations for speaker continuity.
         
@@ -2729,6 +3038,11 @@ class SmartDubbing:
         Returns:
             Tuple of (Combined AudioSegment with proper timing, List of real segment positions)
         """
+        logger.warning("Legacy group timing is disabled; using anchor-based timing instead.")
+        return self._adjust_and_combine_audio_grouped(segments)
+
+        # Retained unreachable for one compatibility cycle as implementation
+        # history; all callers are routed to the active anchor assembler.
         if not segments:
             return AudioSegment.empty(), []
         
@@ -2900,10 +3214,7 @@ class SmartDubbing:
                         logger.warning(f"Warning: Speed adjustment failed for group {speaker}_{group_idx}: {exc}")
                 
                 # Enforce allowed overflow beyond the group's original timeframe
-                try:
-                    overflow_tolerance = float(self.config.get('group_overflow_tolerance', 1.0))
-                except Exception:
-                    overflow_tolerance = 1.0
+                overflow_tolerance = 1.0
                 overflow_tolerance = max(0.0, min(1.0, overflow_tolerance))
 
                 original_group_span_ms = target_duration_ms
@@ -2985,6 +3296,236 @@ class SmartDubbing:
         real_segment_positions.sort(key=lambda x: x["start"])
         
         return final_audio, real_segment_positions 
+
+    def _adjust_and_combine_audio_grouped(self, segments: List[Dict]) -> Tuple[AudioSegment, List[Dict]]:
+        """Place speech at immutable recognized starts using per-clip tempo only."""
+        if not segments:
+            return AudioSegment.empty(), []
+
+        from .timing import TimingPolicy, calculate_segment_timing, plan_anchor_windows, trim_audio_edges
+
+        source_duration = getattr(self, "_timing_source_duration", None)
+        if source_duration is None:
+            source_path = getattr(self, "_timing_source_audio_file", None)
+            if source_path and os.path.exists(str(source_path)):
+                source_duration = len(AudioSegment.from_file(source_path)) / 1000.0
+            else:
+                # Compatibility for direct callers that predate the source-duration
+                # contract. Normal synthesis always sets the exact processed length.
+                source_duration = max(float(segment["end"]) for segment in segments) + 1.0
+
+        policy = TimingPolicy.from_config(self.config)
+        planned = plan_anchor_windows(segments, source_duration)
+        for item in planned:
+            item.segment["_timing_original_index"] = item.original_index
+            item.segment["_timing_next_anchor"] = item.next_start
+            item.segment["_timing_available_window"] = item.available_window
+        segments[:] = [item.segment for item in planned]
+
+        source_duration_ms = max(0, round(float(source_duration) * 1000))
+        final_audio = AudioSegment.silent(duration=source_duration_ms)
+        real_segment_positions: List[Dict[str, Any]] = []
+        diagnostics: List[Dict[str, Any]] = []
+        self.su_audio_chunks_dir.mkdir(parents=True, exist_ok=True)
+
+        speaker_groups = {}
+        for item in planned:
+            speaker_groups.setdefault(item.segment.get("speaker", "UNKNOWN"), []).append(item.segment)
+        self.debug_data["speaker_groups"] = {
+            speaker: [speaker_segments] for speaker, speaker_segments in speaker_groups.items()
+        }
+
+        for chronological_index, item in enumerate(planned):
+            segment = item.segment
+            segment_file = segment.get("synthesized_speech_file")
+            if not segment_file:
+                candidate_path = self.audio_chunks_dir / f"{item.original_index}.wav"
+                segment_file = str(candidate_path) if candidate_path.exists() else None
+
+            raw_duration = None
+            leading_removed = None
+            trailing_removed = None
+            trim_error = None
+            used_fallback = False
+            clip = None
+
+            if segment_file and os.path.exists(str(segment_file)):
+                try:
+                    raw_clip = AudioSegment.from_file(segment_file)
+                    if len(raw_clip) > 0:
+                        if segment.get("_tts_cache_contract") == "anchor_raw_v1":
+                            timing_path = self.su_audio_chunks_dir / f"timed_{item.original_index}.wav"
+                            trim_result = trim_audio_edges(segment_file, timing_path)
+                            raw_duration = trim_result.raw_duration
+                            leading_removed = trim_result.leading_removed
+                            trailing_removed = trim_result.trailing_removed
+                            trim_error = trim_result.error
+                            if trim_result.usable:
+                                if timing_path.exists():
+                                    clip = AudioSegment.from_file(timing_path)
+                                else:
+                                    clip = raw_clip
+                                    leading_removed = 0.0
+                                    trailing_removed = 0.0
+                            elif trim_result.error:
+                                clip = raw_clip
+                                leading_removed = 0.0
+                                trailing_removed = 0.0
+                            else:
+                                logger.warning(
+                                    "Segment #%d contains no usable synthesized speech; inserting silence.",
+                                    item.original_index,
+                                )
+                        else:
+                            # Legacy cache entries may already have been tail-trimmed.
+                            # Their current readable duration is authoritative, while
+                            # unavailable raw/removed-edge values stay explicitly unknown.
+                            if raw_clip.dBFS != float("-inf"):
+                                clip = raw_clip
+                except Exception as exc:
+                    trim_error = str(exc)
+                    logger.warning("Could not read segment audio %s: %s", segment_file, exc)
+
+            if clip is None:
+                fallback_ms = max(0, round((item.end - item.start) * 1000))
+                clip = AudioSegment.silent(duration=fallback_ms)
+                used_fallback = True
+                logger.warning(
+                    "Segment #%d has no synthesized audio; inserting %dms of silence.",
+                    item.original_index,
+                    fallback_ms,
+                )
+
+            trimmed_duration = len(clip) / 1000.0
+            timing = calculate_segment_timing(
+                start=item.start,
+                end=item.end,
+                next_start=item.next_start,
+                source_duration=float(source_duration),
+                audio_duration=trimmed_duration,
+                policy=policy,
+            )
+
+            actual_tempo = timing.tempo
+            adjusted_clip = clip
+            tempo_error = None
+            if timing.tempo > 1.0005 and len(clip) > 0 and not used_fallback:
+                input_path = self.su_audio_chunks_dir / f"tempo_in_{item.original_index}.wav"
+                output_path = self.su_audio_chunks_dir / f"tempo_{item.original_index}.wav"
+                try:
+                    clip.export(input_path, format="wav")
+                    result = subprocess.run(
+                        [
+                            "ffmpeg", "-y", "-i", str(input_path),
+                            "-filter:a", f"atempo={timing.tempo:.8f}",
+                            "-vn", str(output_path),
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    if result.returncode != 0:
+                        stderr = (result.stderr or b"").decode("utf-8", errors="replace")
+                        raise RuntimeError(stderr.strip().splitlines()[-1] if stderr.strip() else "ffmpeg failed")
+                    adjusted_clip = AudioSegment.from_file(output_path)
+                except Exception as exc:
+                    tempo_error = str(exc)
+                    actual_tempo = 1.0
+                    adjusted_clip = clip
+                    logger.warning(
+                        "Tempo adjustment failed for segment #%d; using natural speed: %s",
+                        item.original_index,
+                        exc,
+                    )
+
+            actual_duration = len(adjusted_clip) / 1000.0
+            actual_overflow = max(0.0, actual_duration - item.available_window)
+            within_policy = actual_overflow <= policy.max_overflow + 0.002
+            if not within_policy:
+                logger.warning(
+                    "Segment #%d remains %.3fs beyond its anchor window after %.3fx tempo.",
+                    item.original_index,
+                    actual_overflow,
+                    actual_tempo,
+                )
+
+            start_ms = round(item.start * 1000)
+            final_audio = final_audio.overlay(adjusted_clip, position=start_ms)
+            natural_end_ms = start_ms + len(adjusted_clip)
+            clipped_end_ms = min(natural_end_ms, source_duration_ms)
+            boundary_truncated_ms = max(0, natural_end_ms - source_duration_ms)
+            if boundary_truncated_ms:
+                logger.warning(
+                    "Segment #%d is truncated by %dms at the processed source boundary.",
+                    item.original_index,
+                    boundary_truncated_ms,
+                )
+
+            position = {
+                "start": round(start_ms / 1000.0, 3),
+                "end": round(clipped_end_ms / 1000.0, 3),
+                "speaker": segment.get("speaker", "UNKNOWN"),
+                "text": segment.get("text", ""),
+                "translation": segment.get("translation", ""),
+                "original_index": item.original_index,
+                "original_start": item.start,
+                "original_end": item.end,
+                "tempo": actual_tempo,
+                "overflow": actual_overflow,
+                "within_policy": within_policy,
+                "boundary_truncated_ms": boundary_truncated_ms,
+            }
+            real_segment_positions.append(position)
+            diagnostics.append(
+                {
+                    "segment_index": item.original_index,
+                    "speaker": segment.get("speaker", "UNKNOWN"),
+                    "recognized_start": item.start,
+                    "recognized_end": item.end,
+                    "next_anchor_start": "" if item.next_start is None else item.next_start,
+                    "available_window": item.available_window,
+                    "raw_tts_duration": "" if raw_duration is None else raw_duration,
+                    "trimmed_tts_duration": trimmed_duration,
+                    "leading_silence_removed": "" if leading_removed is None else leading_removed,
+                    "trailing_silence_removed": "" if trailing_removed is None else trailing_removed,
+                    "tempo": actual_tempo,
+                    "actual_final_duration": max(0.0, (clipped_end_ms - start_ms) / 1000.0),
+                    "final_start": start_ms / 1000.0,
+                    "final_end": clipped_end_ms / 1000.0,
+                    "overflow": actual_overflow,
+                    "within_policy": within_policy,
+                    "boundary_truncated_ms": boundary_truncated_ms,
+                    "trim_error": trim_error or "",
+                    "tempo_error": tempo_error or "",
+                    "cache_contract": segment.get("_tts_cache_contract", "legacy"),
+                }
+            )
+
+        real_segment_positions.sort(key=lambda value: (value["start"], value["original_index"]))
+        self.debug_data["timing_alignment"] = diagnostics
+        self.debug_data["speed_ratios"] = {
+            row["segment_index"]: row["tempo"] for row in diagnostics
+        }
+
+        if self.config.get("debug_info", False):
+            debug_dir = Path(self.config.get("debug_dir") or ".")
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            diagnostics_path = debug_dir / "timing_alignment.tsv"
+            with diagnostics_path.open("w", encoding="utf-8", newline="") as diagnostics_file:
+                writer = csv.DictWriter(
+                    diagnostics_file,
+                    fieldnames=list(diagnostics[0].keys()),
+                    delimiter="\t",
+                )
+                writer.writeheader()
+                writer.writerows(diagnostics)
+
+        # Overlay uses a source-sized base, so this remains exactly the rounded
+        # processed source duration even when the last clip crosses the boundary.
+        if len(final_audio) < source_duration_ms:
+            final_audio += AudioSegment.silent(duration=source_duration_ms - len(final_audio))
+        elif len(final_audio) > source_duration_ms:
+            final_audio = final_audio[:source_duration_ms]
+        return final_audio, real_segment_positions
 
     def _get_subtitle_path(self, subtitle_type: str, input_path: str, language: str) -> str:
         """Generate subtitle path based on input file and language.
