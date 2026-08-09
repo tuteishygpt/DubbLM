@@ -1079,12 +1079,78 @@ def test_foreign_activity_normalization_is_order_duplicate_and_contact_stable():
     assert noisy.diagnostics[0]["speaker_turn_boundary"] is True
 
 
+@pytest.mark.parametrize("contact_only", [[(2.0, 2.5)], [(4.5, 5.0)]])
+def test_foreign_activity_contact_only_does_not_mark_speaker_turn(contact_only):
+    from dubbing.audio.semantic_planner import plan_semantic_segments
+
+    result = plan_semantic_segments(
+        [
+            _segment(
+                "alpha beta",
+                1.0,
+                6.0,
+                [_word("alpha", 1.0, 2.0), _word("beta", 5.0, 6.0)],
+            )
+        ],
+        vad_regions=[(1.0, 2.0), (5.0, 6.0)],
+        foreign_activity=contact_only,
+        speaker="SPEAKER_00",
+        source_language="en",
+    )
+
+    assert [unit["text"] for unit in result.units] == ["alpha beta"]
+    assert result.diagnostics[0]["speaker_turn_boundary"] is False
+    assert result.diagnostics[0]["chosen"] is False
+
+
+def test_foreign_activity_coalescing_is_permutation_stable_and_uses_whole_component():
+    from dubbing.audio.semantic_planner import plan_semantic_segments
+
+    segments = [
+        _segment(
+            "alpha beta",
+            1.0,
+            6.0,
+            [_word("alpha", 1.0, 2.0), _word("beta", 5.0, 6.0)],
+        )
+    ]
+    common = {
+        "vad_regions": [(1.0, 2.0), (5.0, 6.0)],
+        "speaker": "SPEAKER_00",
+        "source_language": "en",
+    }
+
+    distinct = [(2.5, 3.0), (4.0, 4.5)]
+    distinct_forward = plan_semantic_segments(
+        segments, foreign_activity=distinct, **common
+    )
+    distinct_reverse = plan_semantic_segments(
+        segments, foreign_activity=list(reversed(distinct)), **common
+    )
+    spanning = [(1.5, 3.0), (3.0, 4.0), (3.5, 5.5)]
+    spanning_forward = plan_semantic_segments(
+        segments, foreign_activity=spanning, **common
+    )
+    spanning_reverse = plan_semantic_segments(
+        segments, foreign_activity=list(reversed(spanning)), **common
+    )
+
+    assert distinct_forward.fingerprint == distinct_reverse.fingerprint
+    assert distinct_forward.units == distinct_reverse.units
+    assert distinct_forward.diagnostics[0]["speaker_turn_boundary"] is True
+    assert spanning_forward.fingerprint == spanning_reverse.fingerprint
+    assert spanning_forward.units == spanning_reverse.units
+    assert spanning_forward.diagnostics[0]["speaker_turn_boundary"] is False
+    assert spanning_forward.diagnostics[0]["chosen"] is False
+
+
 @pytest.mark.parametrize(
     "bad_foreign_activity",
     [
         (-1.0, 1.0),
         (2.0, 1.0),
         (math.nan, 1.0),
+        (0.0, math.inf),
         [1.0],
         {"start": 1.0},
         {"end": 1.0},
@@ -1093,11 +1159,11 @@ def test_foreign_activity_normalization_is_order_duplicate_and_contact_stable():
 def test_invalid_foreign_activity_names_speaker_and_provider_index(bad_foreign_activity):
     from dubbing.audio.semantic_planner import plan_semantic_segments
 
-    with pytest.raises(ValueError, match=r"SPEAKER_00.*foreign activity 0"):
+    with pytest.raises(ValueError, match=r"SPEAKER_00.*foreign activity 1"):
         plan_semantic_segments(
             [_segment("alpha", 0.0, 1.0, [_word("alpha", 0.0, 1.0)])],
             vad_regions=[(0.0, 1.0)],
-            foreign_activity=[bad_foreign_activity],
+            foreign_activity=[(2.0, 3.0), bad_foreign_activity],
             speaker="SPEAKER_00",
             source_language="en",
         )
@@ -1167,6 +1233,69 @@ def test_wordless_foreign_track_contributes_no_inferred_activity():
         for item in diagnostics
         if item["speaker"] == "SPEAKER_00"
     )
+
+
+@pytest.mark.parametrize(
+    "segments,vad_regions",
+    [
+        (
+            [
+                _segment(
+                    "Done. What comes next?",
+                    0.0,
+                    12.0,
+                    [
+                        _word("Done.", 0.0, 1.0),
+                        _word("What", 2.0, 4.0),
+                        _word("comes", 4.1, 7.0),
+                        _word("next?", 7.1, 12.0),
+                    ],
+                )
+            ],
+            [(0.0, 1.0), (2.0, 12.0)],
+        ),
+        (
+            [
+                _segment("Done.", 0.0, 1.0, [_word("Done.", 0.0, 1.0)]),
+                _segment(
+                    "What comes next?",
+                    1.4,
+                    12.0,
+                    [
+                        _word("What", 1.4, 4.0),
+                        _word("comes", 4.1, 7.0),
+                        _word("next?", 7.1, 12.0),
+                    ],
+                ),
+            ],
+            [(0.0, 1.0), (1.4, 12.0)],
+        ),
+    ],
+    ids=["same-source-segment", "short-cross-segment-pause"],
+)
+def test_strong_early_requires_source_change_and_half_second_pause(segments, vad_regions):
+    from dubbing.audio.semantic_planner import SemanticPlannerConfig, plan_semantic_segments
+
+    result = plan_semantic_segments(
+        segments,
+        vad_regions=vad_regions,
+        speaker="SPEAKER_00",
+        source_language="en",
+        config=SemanticPlannerConfig(
+            preferred_duration=15.0,
+            hard_duration=35.0,
+            search_window=10.0,
+        ),
+    )
+
+    boundary = next(
+        item for item in result.diagnostics
+        if item["candidate_time"] == pytest.approx(1.0)
+    )
+    assert boundary["local_decision"] == "LOCAL_CUT_SENTENCE"
+    assert boundary["strong_early_utterance"] is False
+    assert boundary["chosen"] is False
+    assert len(result.units) == 1
 
 
 def test_speaker_turn_overrides_incomplete_tail_with_continuation():
