@@ -829,15 +829,18 @@ def _seed_segments_from_transcription(
             "Run `transcribe_only` or the full pipeline first."
         )
 
+    timestamp_pattern = r"\d{2}\.\d{2}\.\d{2}(?:\.\d{1,3})?"
     line_pattern = re.compile(
-        r"^\[(?P<start>\d{2}\.\d{2}\.\d{2})-"
-        r"(?P<end>\d{2}\.\d{2}\.\d{2})\]\s+"
+        rf"^\[(?P<start>{timestamp_pattern})-"
+        rf"(?P<end>{timestamp_pattern})\]\s+"
         r"(?P<speaker>[^:]+):\s?(?P<text>.*)$"
     )
 
     def parse_timestamp(value: str) -> float:
-        hours, minutes, seconds = (int(part) for part in value.split("."))
-        return float(hours * 3600 + minutes * 60 + seconds)
+        parts = value.split(".")
+        hours, minutes, seconds = (int(part) for part in parts[:3])
+        milliseconds = int(parts[3].ljust(3, "0")) if len(parts) == 4 else 0
+        return float(hours * 3600 + minutes * 60 + seconds) + milliseconds / 1000
 
     transcription: list[dict[str, object]] = []
     for line_number, raw_line in enumerate(

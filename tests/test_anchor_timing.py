@@ -572,3 +572,26 @@ def test_gradio_save_normalizes_invalid_timing_values(tmp_path):
     assert saved["timing_short_segment_max_speed"] == 1.08
     assert saved["timing_max_speed"] == 1.15
     assert saved["timing_max_overflow"] == 0.25
+
+
+def test_transcription_artifact_preserves_millisecond_timestamps(tmp_path):
+    from dubbing.core.smart_dubbing import SmartDubbing
+
+    transcription_path = tmp_path / "transcription.txt"
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {"transcription_path": str(transcription_path)}
+
+    dubber._save_transcription_file(
+        [
+            {
+                "speaker": "SPEAKER_00",
+                "start": 0.096,
+                "end": 11.853,
+                "text": "Precise timing",
+            }
+        ]
+    )
+
+    assert transcription_path.read_text(encoding="utf-8") == (
+        "[00.00.00.096-00.00.11.853] SPEAKER_00: Precise timing\n"
+    )

@@ -609,6 +609,30 @@ def test_load_dubbing_text_rows_reads_current_transcription_after_transcribe_onl
     assert not cache_path.exists()
 
 
+def test_load_dubbing_text_rows_preserves_transcription_milliseconds(
+    tmp_path, monkeypatch
+):
+    overrides, config, cache_path = _create_translation_cache(
+        tmp_path,
+        monkeypatch,
+        segments=[],
+    )
+    cache_path.unlink()
+    Path(config.get("transcription_path")).write_text(
+        "[00.00.00.096-00.00.11.853] SPEAKER_00: Precise timing\n"
+        "[00.00.12.142-00.00.27.605] SPEAKER_00: Second line\n",
+        encoding="utf-8",
+    )
+
+    status, rows = gradio_app.load_dubbing_text_rows(overrides)
+
+    assert status.startswith("Loaded 2 row(s) from current transcription")
+    assert rows == [
+        ["SPEAKER_00", "0.096", "11.853", "Precise timing", "Precise timing", "", "", ""],
+        ["SPEAKER_00", "12.142", "27.605", "Second line", "Second line", "", "", ""],
+    ]
+
+
 def test_save_dubbing_text_rows_updates_cache_and_tsv(tmp_path, monkeypatch):
     overrides, config, cache_path = _create_translation_cache(
         tmp_path,

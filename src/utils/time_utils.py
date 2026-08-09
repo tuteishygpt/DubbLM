@@ -19,9 +19,9 @@ def format_seconds_to_srt(seconds: float) -> str:
 
     return f"{hours:02d}:{minutes:02d}:{int(sec):02d},{milliseconds:03d}"
 
-def format_seconds_to_hms(seconds: float) -> str:
+def format_seconds_to_hms(seconds: float, *, include_milliseconds: bool = False) -> str:
     """
-    Convert seconds to HH.MM.SS format.
+    Convert seconds to HH.MM.SS format, optionally retaining milliseconds.
 
     Args:
         seconds: Time in seconds
@@ -31,8 +31,15 @@ def format_seconds_to_hms(seconds: float) -> str:
     """
     if not math.isfinite(seconds):
         seconds = 0.0
+    if include_milliseconds:
+        total_milliseconds = max(0, round(seconds * 1000))
+        hours, remainder = divmod(total_milliseconds, 3_600_000)
+        minutes, remainder = divmod(remainder, 60_000)
+        sec, milliseconds = divmod(remainder, 1000)
+        return f"{hours:02d}.{minutes:02d}.{sec:02d}.{milliseconds:03d}"
+
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     sec = int(seconds % 60)
 
-    return f"{hours:02d}.{minutes:02d}.{sec:02d}" 
+    return f"{hours:02d}.{minutes:02d}.{sec:02d}"

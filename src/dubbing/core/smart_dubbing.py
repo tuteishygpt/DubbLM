@@ -2889,8 +2889,12 @@ class SmartDubbing:
                 for segment in transcription:
                     start_seconds = segment['start']
                     end_seconds = segment['end']
-                    formatted_time = format_seconds_to_hms(start_seconds)
-                    formatted_time_end = format_seconds_to_hms(end_seconds)
+                    formatted_time = format_seconds_to_hms(
+                        start_seconds, include_milliseconds=True
+                    )
+                    formatted_time_end = format_seconds_to_hms(
+                        end_seconds, include_milliseconds=True
+                    )
                     
                     f.write(f"[{formatted_time}-{formatted_time_end}] {segment['speaker']}: {segment['text']}\n")
             logger.info(f"Transcription saved to {transcription_output_path}")
