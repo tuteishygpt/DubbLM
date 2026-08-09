@@ -1198,6 +1198,7 @@ def test_speaker_turn_overrides_incomplete_tail_with_continuation():
         if item["candidate_time"] == pytest.approx(3.0)
     )
     assert chosen["local_decision"] == "HARD_CONTINUE"
+    assert chosen["final_decision"] == "CUT"
     assert chosen["chosen"] is True
     assert chosen["boundary_type"] == "speaker_turn"
     assert len(result.units) == 2
@@ -1211,10 +1212,10 @@ def test_strong_early_boundary_never_overrides_incomplete_tail():
     result = plan_semantic_segments(
         [
             _segment(
-                "I think that",
+                "I think that.",
                 0.0,
                 3.0,
-                [_word("I", 0.0, 1.0), _word("think", 1.1, 2.0), _word("that", 2.1, 3.0)],
+                [_word("I", 0.0, 1.0), _word("think", 1.1, 2.0), _word("that.", 2.1, 3.0)],
             ),
             _segment(
                 "this works.",
@@ -1233,7 +1234,8 @@ def test_strong_early_boundary_never_overrides_incomplete_tail():
         if item["candidate_time"] == pytest.approx(3.0)
     )
     assert boundary["local_decision"] == "HARD_CONTINUE"
-    assert boundary["strong_early_utterance"] is False
+    assert boundary["strong_early_utterance"] is True
+    assert boundary["final_decision"] == "CONTINUE"
     assert boundary["chosen"] is False
 
 
