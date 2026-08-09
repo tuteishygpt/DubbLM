@@ -1254,6 +1254,43 @@ def test_wordless_current_track_splits_on_valid_foreign_activity():
     assert result.diagnostics[0]["speaker_turn_boundary"] is True
 
 
+def test_mandatory_speaker_turn_skips_classifier_and_stays_persistable():
+    from dubbing.audio.semantic_planner import plan_semantic_segments
+
+    calls = []
+    result = plan_semantic_segments(
+        [
+            _segment(
+                "alpha beta",
+                0.0,
+                6.0,
+                [_word("alpha", 0.0, 2.0), _word("beta", 5.0, 6.0)],
+            )
+        ],
+        vad_regions=[(0.0, 2.0), (5.0, 6.0)],
+        foreign_activity=[(3.0, 4.0)],
+        speaker="SPEAKER_00",
+        source_language="en",
+        classifier=lambda request: calls.append(request) or {
+            "boundaries": [
+                {
+                    "id": request["candidates"][0]["id"],
+                    "decision": "CONTINUE",
+                    "confidence": 0.99,
+                }
+            ]
+        },
+        classifier_status="ready",
+    )
+
+    assert calls == []
+    assert result.cache_persistable is True
+    assert [unit["text"] for unit in result.units] == ["alpha", "beta"]
+    assert result.diagnostics[0]["final_decision"] == "CUT"
+    assert result.diagnostics[0]["llm_decision"] is None
+    assert result.diagnostics[0]["llm_confidence"] is None
+
+
 def test_wordless_foreign_track_contributes_no_inferred_activity():
     current_segments = [
         _segment(

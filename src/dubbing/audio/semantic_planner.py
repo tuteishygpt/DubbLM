@@ -550,7 +550,12 @@ def _classify_candidates(
     classification_cache_set: Optional[Callable[[str, Any], None]] = None,
     classifier_cache_context: Optional[Mapping[str, Any]] = None,
 ) -> tuple[bool, str]:
-    ambiguous = [item for item in candidates if item["local_decision"] == "AMBIGUOUS"]
+    ambiguous = [
+        item
+        for item in candidates
+        if item["local_decision"] == "AMBIGUOUS"
+        and not item["speaker_turn_boundary"]
+    ]
     mode = classifier_status or "deterministic-only"
     for candidate in candidates:
         candidate["classifier_mode"] = mode
