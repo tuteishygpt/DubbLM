@@ -142,24 +142,28 @@ it. Low-confidence results, `UNCERTAIN`, missing results, and malformed results
 fall back per candidate to the local decision. `HARD_CONTINUE` always wins.
 
 Eligible candidates in `[search_start, search_end]` are ordered by this exact
-tuple, ascending:
+authoritative tuple, ascending:
 
 ```text
-(-decision_priority, -semantic_rank, abs(candidate_time - target),
+(-semantic_rank, -decision_priority, abs(candidate_time - target),
  -source_pause, source_word_or_segment_index)
 ```
 
-An accepted LLM `CUT` has decision priority 3, a local complete sentence 2,
-and a local complete clause 1. Sentence, clause, and plain-boundary semantic
-ranks are 3, 2, and 1. If the window has no eligible candidate, scan eligible
-candidates in `(search_end, hard_end]` with the same ordering. If the remaining
-chain ends by `hard_end`, emit it unsplit rather than inventing a bad cut.
+Sentence, clause, and plain-boundary semantic ranks are 3, 2, and 1. Within the
+same semantic rank, an accepted LLM `CUT` has decision priority 2 and a local
+decision has priority 1. Thus an LLM-approved ambiguous plain boundary can
+never outrank a local complete sentence or clause. If the window has no
+eligible candidate, scan eligible candidates in `(search_end, hard_end]` with
+the same ordering. If the remaining chain ends by `hard_end`, emit it unsplit
+rather than inventing a bad cut.
 
 If the chain continues past `hard_end` and no eligible candidate exists, a cut
-is mandatory. Choose among all word boundaries at or before `hard_end` by
-`(-source_pause, -punctuation_rank, -candidate_time, source_word_index)`. This
-forced rule may override `HARD_CONTINUE`, but only to guarantee the configured
-hard maximum. If no complete word ends by `hard_end`, raise
+is mandatory. First choose only among non-vetoed word boundaries at or before
+`hard_end`, ordered by
+`(-punctuation_rank, -source_pause, -candidate_time, source_word_index)`. Only
+when no non-vetoed boundary can keep the unit within the hard maximum may the
+same tuple be applied to `HARD_CONTINUE` boundaries. If no complete word ends
+by `hard_end`, raise
 `SemanticSegmentationError` with the speaker, offending word/segment, and
 timestamps rather than silently exceed the invariant.
 
@@ -185,10 +189,15 @@ second ASR is never started implicitly.
 ### LLM integration contract
 
 `LLMTranslator` exposes `classify_semantic_boundaries(request)`. It uses the
-already initialized primary translation `llm`, `llm_provider`, and `model_name`;
-it does not create another client. `SmartDubbing` passes this optional callable
-to `run_isolated_tracks`, which passes it into the planner. A non-LLM translator
-or unavailable callable selects deterministic-only mode.
+already initialized primary translation `llm`, `llm_provider`, `model_name`,
+`temperature`, and `max_tokens`; it does not create another client.
+`SmartDubbing` passes the callable plus an explicit classifier status to
+`run_isolated_tracks`, which passes them into the planner. A deliberately
+configured non-LLM translator uses stable `deterministic-only` mode. Failure to
+initialize a configured LLM translator is `initialization_failed`, is treated
+as a transient classifier failure, and disables persistence of plan-dependent
+caches for the run; the later translation stage may still raise its existing
+initialization error.
 
 Candidates are batched in stable source order, at most 50 candidates and 12,000
 input characters per request. Each request uses the source-language code and:
@@ -208,6 +217,24 @@ invalid response entries fall back independently; they do not discard valid
 siblings. Calls use a 30-second timeout. Provider errors and timeouts fall back
 for the affected batch and are marked transient. The prompt and parser are
 versioned as `semantic_boundary_prompt_v1`.
+
+### Semantic input normalization
+
+Before IDs or candidates are produced, validate every VAD region, ASR segment,
+and word timestamp as finite floats with `start >= 0` and `end >= start`.
+Malformed records fail the semantic-planning step with their provider index and
+speaker; they are not silently dropped. Sort VAD regions and ASR segments by
+`(start, end, original_provider_index)` and words by
+`(start, end, normalized_text, original_provider_index)`.
+
+Exact duplicate words with equal normalized text and millisecond-rounded
+start/end are collapsed, keeping highest confidence and then lowest original
+provider index. Overlapping non-duplicate words are retained in deterministic
+order. When VAD tolerance makes a word intersect multiple regions, assign it
+to exactly one: greatest overlap, then nearest region center, then lowest
+stable VAD-region ID. Define every candidate's pause as
+`source_pause = max(0.0, right_start - left_end)` after finite validation, so
+overlap is represented by zero rather than a negative or non-finite score.
 
 ### Boundary preservation and lineage
 
@@ -454,7 +481,9 @@ Split isolated-track caching into two layers:
 2. `isolated_tracks_semantic_plan` is keyed by the raw fingerprint, all four
    semantic settings, `semantic_planner_v1`, incomplete-tail rule-table
    version, prompt/parser version, source language, and LLM provider/model (or
-   `deterministic-only`). Its value stores the plan and a
+   `deterministic-only`). When an LLM classifier is used, the key also includes
+   its effective temperature, maximum-token setting, timeout, and batching
+   limits. Its value stores the plan and a
    `semantic_plan_fingerprint`, computed from canonical JSON containing the
    resulting ordered boundaries and lineage.
 
@@ -467,12 +496,14 @@ disabled; it is never promoted to a semantic plan without replanning.
 
 Successful LLM classifications are cached per candidate-payload hash under
 `semantic_boundary_classification`, including provider, model, source language,
-and prompt/parser version. Deterministic-only results are stable and may be
-persisted. Timeout, provider error, or malformed-response fallback is transient:
-the run continues, but neither the semantic-plan cache nor translation/final
-artifacts derived from that transient plan are persisted. Raw transcription
-and successful per-candidate classifications remain reusable. This prevents a
-temporary LLM failure from becoming a sticky segmentation result.
+temperature, maximum-token setting, timeout, batching limits, and prompt/parser
+version. Intentional deterministic-only results are stable and may be
+persisted. Configured-classifier initialization failure, timeout, provider
+error, or malformed-response fallback is transient: the run continues, but
+neither the semantic-plan cache nor translation/final artifacts derived from
+that transient plan are persisted. Raw transcription and successful
+per-candidate classifications remain reusable. This prevents a temporary LLM
+failure from becoming a sticky segmentation result.
 
 ## Diagnostics
 
@@ -556,8 +587,9 @@ Add focused tests covering:
     including when the LLM returns high-confidence `CUT`.
 17. Exact search-window and tie-break tests cover candidates on both interval
     edges, equal scores, clamped oversized windows, extension beyond the soft
-    target, and a forced cut at or before 35 seconds when every candidate is
-    vetoed.
+    target, sentence-over-LLM-plain precedence, a mixed safe/vetoed forced-cut
+    case that chooses the safe boundary, and a forced cut at or before 35
+    seconds when every candidate is vetoed.
 18. LLM `CUT`, `CONTINUE`, low confidence, `UNCERTAIN`, missing ID, duplicate
     ID, unknown ID, malformed response, timeout, unavailable classifier, and
     mixed-validity batch paths produce the defined per-candidate outcomes.
@@ -572,6 +604,14 @@ Add focused tests covering:
     candidate classifications.
 22. Configuration, CLI, Gradio defaults, validation, disabled legacy mode, and
     persistence cover all four semantic-split settings.
+23. Non-finite, negative, and inverted VAD/word/segment timestamps are rejected;
+    input-order permutations, exact duplicate words, overlapping words, and
+    multi-region word intersections produce deterministic IDs, assignments,
+    pauses, boundaries, and plan fingerprints.
+24. Intentional deterministic-only mode is persistable, while configured LLM
+    initialization failure follows transient no-plan/downstream-cache policy;
+    provider/model/temperature/max-token changes invalidate classifications and
+    semantic plans.
 
 The existing full test suite remains the regression gate. A real-artifact check
 compares `transcription.srt`, generated chunks, and final output duration for the
