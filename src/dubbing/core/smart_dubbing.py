@@ -309,7 +309,13 @@ class SmartDubbing:
             voice_config=None,  # per-segment via TTSSegmentData
             voice_prompt=None,  # per-segment via TTSSegmentData
             prompt_prefix=self.config.get('tts_prompt_prefix'),
-            enable_voice_matching=self.config.get('voice_auto_selection', True),
+            # A manually assigned voice does not need catalog matching. This also
+            # prevents OpenAI/Gemini from generating the catalog samples solely
+            # for a profile whose voice is already known.
+            enable_voice_matching=(
+                self.config.get('voice_auto_selection', True)
+                and not bool(profile.voice_name)
+            ),
             debug_tts=self.config.get('debug_tts', False),
             model=model,
             fallback_model=fallback_model,

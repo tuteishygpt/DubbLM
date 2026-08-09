@@ -126,6 +126,38 @@ def test_default_tts_uses_star_fallback_client(tmp_path, monkeypatch):
     assert dubber.default_tts.tts_system == "omnivoice"
 
 
+def test_voice_matching_is_disabled_for_manual_voice_or_global_off(tmp_path, monkeypatch):
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"video")
+    _patch_projects_root(monkeypatch, tmp_path)
+
+    config = build_config_from_overrides(
+        {
+            "input": str(video_path),
+            "source_language": "en",
+            "target_language": "be",
+            "voice_auto_selection": True,
+            "voices": {"SPEAKER_00": {"tts_system": "gemini", "voice_name": "Kore"}},
+        }
+    )
+    created = []
+    _install_stub_factory(monkeypatch, created)
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = config
+    _skip_optional_init(dubber)
+    dubber.__init__(config)
+
+    assert created[0].kwargs["enable_voice_matching"] is False
+
+    config.voice_auto_selection = False
+    created.clear()
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = config
+    _skip_optional_init(dubber)
+    dubber.__init__(config)
+    assert created[0].kwargs["enable_voice_matching"] is False
+
+
 def test_unmapped_speaker_falls_through_to_star_profile(tmp_path, monkeypatch):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")

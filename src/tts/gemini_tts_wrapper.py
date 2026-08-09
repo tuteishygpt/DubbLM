@@ -836,16 +836,20 @@ class GeminiTTSWrapper(TTSInterface):
         else:
             logger.info("Voice matching disabled by configuration.")
 
-        # Initialize duration analysis
-        try:
-            logger.info("Initializing voice duration analysis...")
-            success = self.sample_manager.generate_all_samples()
-            if success:
-                logger.info("Duration analysis initialized successfully.")
-            else:
-                logger.warning("Warning: Duration analysis initialization failed. Using default estimates.")
-        except Exception as e:
-            logger.error(f"Error during duration analysis initialization: {e}")
+        # Sample generation is only needed for voice matching. In particular,
+        # do not call the Gemini API to build the catalog when matching is off.
+        if self.config.enable_voice_matching:
+            try:
+                logger.info("Initializing voice duration analysis...")
+                success = self.sample_manager.generate_all_samples()
+                if success:
+                    logger.info("Duration analysis initialized successfully.")
+                else:
+                    logger.warning("Warning: Duration analysis initialization failed. Using default estimates.")
+            except Exception as e:
+                logger.error(f"Error during duration analysis initialization: {e}")
+        else:
+            logger.info("Skipping voice sample generation because voice matching is disabled.")
 
     def estimate_audio_segment_length(
         self,
