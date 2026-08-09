@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import pickle
 import shutil
 from pathlib import Path
@@ -21,6 +22,7 @@ from ..core.config import DubbingConfig
 
 DEFAULT_CONFIG_PATH = "dubbing_config.yml"
 DEFAULT_SPEAKER_REFERENCE_LIBRARY_PATH = str(Path(__file__).resolve().parents[3] / "speaker_reference_library")
+LOGGER = logging.getLogger(__name__)
 
 
 WORKFLOW_FIELDS = [
@@ -74,6 +76,8 @@ SETTINGS_FIELDS = [
     "tts_prompt_prefix",
     "voice_prompt",
     "enable_emotion_analysis",
+    "emotion_provider",
+    "emotion_model",
     "segment_reference_min_duration",
     "watermark_path",
     "watermark_text",
@@ -83,7 +87,10 @@ SETTINGS_FIELDS = [
     "use_two_pass_encoding",
     "dubbed_volume",
     "background_volume",
-    "group_overflow_tolerance",
+    "timing_short_segment_threshold",
+    "timing_short_segment_max_speed",
+    "timing_max_speed",
+    "timing_max_overflow",
     "debug_info",
     "debug_tts",
     "debug_diarize_only",
@@ -113,9 +120,10 @@ DUBBING_TEXT_HEADERS = [
     "Original",
     "Translation",
     "Synthesized text",
+    "Style instructions",
     "Audio file",
 ]
-DUBBING_TEXT_COLUMN_WIDTHS = ["9%", "8%", "8%", "20%", "25%", "22%", "8%"]
+DUBBING_TEXT_COLUMN_WIDTHS = ["8%", "7%", "7%", "18%", "22%", "18%", "13%", "7%"]
 DUBBING_TEXT_COLUMN_COUNT = len(DUBBING_TEXT_HEADERS)
 DUBBING_TEXT_EMPTY_ROW = [""] * DUBBING_TEXT_COLUMN_COUNT
 TRANSLATION_TRACK_FIELDS = (
@@ -134,6 +142,15 @@ _TRANSCRIPTION_MODEL_CHOICES: dict[str, list[str]] = {
     "gemini": ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
     "deepgram": ["nova-3", "nova-2", "nova", "enhanced", "base", "whisper"],
 }
+
+_EMOTION_MODEL_CHOICES: list[str] = [
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash",
+    "gemma-3-27b-it",
+    "gemma-3-12b-it",
+    "gemma-3-4b-it",
+]
 
 _TRANSCRIPTION_MODEL_DEFAULTS: dict[str, str] = {
     "whisper": "large-v3",
@@ -615,6 +632,8 @@ def _expand_speaker_reference_rows(overrides: dict[str, object]) -> dict[str, ob
 def load_ui_defaults(config_path: str = DEFAULT_CONFIG_PATH) -> dict[str, object]:
     config = DubbingConfig()
     config.load_from_yaml(config_path)
+    from ..core.timing import normalize_timing_config
+    normalize_timing_config(config.config, warn=LOGGER.warning)
 
     defaults = config.to_dict()
     for field in JSON_TEXT_FIELDS:
@@ -648,6 +667,7 @@ def save_settings(
     config_path: str = DEFAULT_CONFIG_PATH,
 ) -> str:
     config_data = _load_yaml_mapping(config_path)
+    config_data.pop("group_overflow_tolerance", None)
     reference_audio_mapping, reference_text_mapping = _speaker_reference_rows_to_mappings(
         overrides.get(SPEAKER_REFERENCE_FIELD)
     )
@@ -693,6 +713,8 @@ def save_settings(
         else:
             config_data[field] = value
 
+    from ..core.timing import normalize_timing_config
+    normalize_timing_config(config_data, warn=LOGGER.warning)
     with Path(config_path).open("w", encoding="utf-8") as config_file:
         yaml.safe_dump(config_data, config_file, sort_keys=False, allow_unicode=True)
 
@@ -818,6 +840,7 @@ def _seed_segments_from_transcription(
                 "very_short_translation": text,
                 "long_translation": text,
                 "emotion": "Neutral",
+                "style_prompt": "",
             }
         )
     return segments
@@ -866,6 +889,7 @@ def _segment_to_dubbing_text_row(segment: dict) -> list[str]:
         str(segment.get("text", "") or ""),
         str(segment.get("translation", "") or ""),
         str(segment.get("synthesized_text", "") or ""),
+        str(segment.get("style_prompt", "") or ""),
         audio_file,
     ]
 
@@ -915,7 +939,8 @@ def _apply_row_to_segment(segment: dict, row: list[str]) -> None:
     synthesized_text = row[5]
     if synthesized_text:
         segment["synthesized_text"] = synthesized_text
-    # Column 6 (audio file) is read-only.
+    segment["style_prompt"] = row[6]
+    # Column 7 (audio file) is read-only.
 
 
 def _load_cached_translation_segments(cache_path: Path) -> list[dict[str, object]]:
@@ -943,6 +968,7 @@ def _write_dubbing_text_artifact(artifact_path: Path, rows: list[list[str]]) -> 
             "original",
             "translation",
             "synthesized_text",
+            "style_prompt",
             "audio_file",
         ])
         for row in rows:
@@ -956,7 +982,7 @@ def load_dubbing_text_rows(overrides: dict[str, object]) -> tuple[str, list[list
         rows = _segments_to_dubbing_text_rows(cached_segments)
         missing_indexes = [
             i for i, row in enumerate(rows)
-            if not row[6] or row[6].startswith("(MISSING)")
+            if not row[7] or row[7].startswith("(MISSING)")
         ]
         missing_note = (
             f" {len(missing_indexes)} segment(s) missing audio (rows: {missing_indexes[:20]}"
@@ -1175,12 +1201,13 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                             "from_scratch",
                             "transcribe_only",
                             "translate_only",
+                            "analyze_emotions_only",
                             "combine_video",
                             "tts_to_end",
                         ],
                         value=defaults.get("run_step") or "full_pipeline",
                         allow_custom_value=False,
-                        info="`full_pipeline` — normal end-to-end run. `from_scratch` — clear cached artifacts for this input and rerun everything from zero. `transcribe_only` — stop after diarization + transcription (saves original subtitles when requested). `translate_only` — diarization + transcription + translation only (saves subtitles when requested). Resume options require existing artifacts from a previous full run: `combine_video` rebuilds the final video from existing dubbed audio; `tts_to_end` restarts at cached translation data, regenerates TTS, and finishes the video.",
+                        info="`full_pipeline` — normal end-to-end run. `from_scratch` — clear cached artifacts for this input and rerun everything from zero. `transcribe_only` — stop after diarization + transcription (saves original subtitles when requested). `translate_only` — diarization + transcription + translation only (saves subtitles when requested). `analyze_emotions_only` — re-run emotion analysis over the cached translation and write emotion/style_prompt back into it (requires a prior translate_only or full run). Resume options require existing artifacts from a previous full run: `combine_video` rebuilds the final video from existing dubbed audio; `tts_to_end` restarts at cached translation data, regenerates TTS, and finishes the video.",
                     )
                 with gr.Row():
                     generate_speaker_report = gr.Checkbox(label="Generate speaker report only")
@@ -1225,6 +1252,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     isolated_tracks_labels = gr.Textbox(
                         label="Speaker labels (comma-separated)",
                         placeholder="SPEAKER_00, SPEAKER_01",
+                        value="SPEAKER_00, SPEAKER_01",
                     )
                     inner_transcription_system = gr.Dropdown(
                         label="Inner transcription (per track)",
@@ -1397,6 +1425,18 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         label="Enable emotion analysis",
                         value=bool(defaults.get("enable_emotion_analysis", False)),
                     )
+                    emotion_provider = gr.Dropdown(
+                        label="Emotion provider",
+                        choices=["gemini", "speechbrain"],
+                        value=str(defaults.get("emotion_provider") or "gemini"),
+                    )
+                    emotion_model = gr.Dropdown(
+                        label="Emotion model",
+                        choices=_EMOTION_MODEL_CHOICES,
+                        value=str(defaults.get("emotion_model") or _EMOTION_MODEL_CHOICES[0]),
+                        allow_custom_value=True,
+                        info="Model name for the Gemini emotion classifier. Ignored when provider=speechbrain.",
+                    )
                     segment_reference_min_duration = gr.Number(
                         label="Min segment reference duration",
                         value=defaults.get("segment_reference_min_duration", 2.0),
@@ -1484,10 +1524,26 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         value=defaults.get("background_volume", 0.562341),
                         precision=6,
                     )
-                    group_overflow_tolerance = gr.Number(
-                        label="Group overflow tolerance",
-                        value=defaults.get("group_overflow_tolerance", 1.0),
+                    timing_short_segment_threshold = gr.Number(
+                        label="Short segment threshold",
+                        value=defaults.get("timing_short_segment_threshold", 1.5),
                         precision=2,
+                    )
+                    timing_short_segment_max_speed = gr.Number(
+                        label="Short segment max speed",
+                        value=defaults.get("timing_short_segment_max_speed", 1.08),
+                        precision=3,
+                    )
+                with gr.Row():
+                    timing_max_speed = gr.Number(
+                        label="Maximum timing speed",
+                        value=defaults.get("timing_max_speed", 1.15),
+                        precision=3,
+                    )
+                    timing_max_overflow = gr.Number(
+                        label="Maximum timing overflow",
+                        value=defaults.get("timing_max_overflow", 0.25),
+                        precision=3,
                     )
 
                 gr.Markdown("## Debug / Advanced")
@@ -1530,6 +1586,8 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         tts_prompt_prefix,
                         voice_prompt,
                         enable_emotion_analysis,
+                        emotion_provider,
+                        emotion_model,
                         segment_reference_min_duration,
                         watermark_path,
                         watermark_text,
@@ -1539,7 +1597,10 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         use_two_pass_encoding,
                         dubbed_volume,
                         background_volume,
-                        group_overflow_tolerance,
+                        timing_short_segment_threshold,
+                        timing_short_segment_max_speed,
+                        timing_max_speed,
+                        timing_max_overflow,
                         debug_info,
                         debug_tts,
                         debug_diarize_only,
@@ -1551,6 +1612,9 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     "Load cached translation segments, edit any column (except the read-only `Audio file`), then save. "
                     "`Synthesized text` shows what was actually spoken by the TTS after best-variant selection and any auto-adjustments; "
                     "editing it and clicking `Regenerate selected row` runs TTS just for that segment. "
+                    "`Style instructions` is a free-text style prompt passed to the TTS backend — for Gemini TTS "
+                    "it is prepended to the utterance (e.g. `Say cheerfully:`). Populated automatically by emotion analysis "
+                    "when enabled; you can override per row. "
                     "Saved edits are written to `artifacts/dubbing_texts.tsv` and to the translation cache used by `tts_to_end`."
                 )
                 with gr.Row():
@@ -1573,7 +1637,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     show_search="search",
                     show_row_numbers=True,
                     pinned_columns=3,
-                    static_columns=[6],
+                    static_columns=[7],
                     column_widths=DUBBING_TEXT_COLUMN_WIDTHS,
                 )
 
