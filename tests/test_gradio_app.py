@@ -7,11 +7,20 @@ from pydub import AudioSegment
 import yaml
 
 import dubbing.ui.gradio_app as gradio_app
-from dubbing.ui.gradio_app import DEFAULT_CONFIG_PATH, build_app, save_settings
+from dubbing.ui.gradio_app import DEFAULT_CONFIG_PATH, build_app, load_ui_defaults, save_settings
 from dubbing.core.cache_manager import CacheManager
 from dubbing.core.runner import build_config_from_overrides
 from dubbing.core.smart_dubbing import SmartDubbing
 import dubbing.core.config as config_module
+
+
+def test_ui_defaults_keep_two_speaker_labels_after_page_load(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}\n", encoding="utf-8")
+
+    defaults = load_ui_defaults(str(config_path))
+
+    assert defaults["isolated_tracks_labels"] == "SPEAKER_00, SPEAKER_01"
 
 
 def test_build_app_returns_gradio_blocks():

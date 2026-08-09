@@ -661,6 +661,9 @@ def load_ui_defaults(config_path: str = DEFAULT_CONFIG_PATH) -> dict[str, object
         defaults.get("reference_audio_mapping"),
         defaults.get("reference_text_mapping"),
     )
+    # These are UI-only fields and are not stored in YAML.  Keep the same
+    # initial two-speaker value when ``app.load`` refreshes component values.
+    defaults["isolated_tracks_labels"] = "SPEAKER_00, SPEAKER_01"
     defaults["config"] = config_path
     return defaults
 
