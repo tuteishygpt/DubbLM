@@ -1,3 +1,4 @@
+import json
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +19,7 @@ def _segment(start, end, *, speaker="SPEAKER_00", audio_file=None):
     }
 
 
-def test_short_clip_uses_anchor_slack_without_speed_change():
+def test_short_clip_uses_bounded_slowdown_to_reduce_anchor_slack():
     from dubbing.core.timing import TimingPolicy, calculate_segment_timing
 
     result = calculate_segment_timing(
@@ -31,13 +32,13 @@ def test_short_clip_uses_anchor_slack_without_speed_change():
     )
 
     assert result.available_window == pytest.approx(1.1)
-    assert result.tempo == 1.0
-    assert result.expected_duration == pytest.approx(0.8)
+    assert result.tempo == pytest.approx(1.0 / 1.15)
+    assert result.expected_duration == pytest.approx(0.8 * 1.15)
     assert result.residual_overflow == 0.0
     assert result.within_policy is True
 
 
-def test_synthesis_uses_anchor_window_and_does_not_resynthesize_a_fitting_clip(tmp_path):
+def test_synthesis_selects_long_variant_when_primary_underfills_anchor_window(tmp_path):
     from dubbing.core.smart_dubbing import SmartDubbing
 
     source_path = tmp_path / "source.wav"
@@ -70,12 +71,14 @@ def test_synthesis_uses_anchor_window_and_does_not_resynthesize_a_fitting_clip(t
     class TTSStub:
         def estimate_audio_segment_length(self, segment_data, language):
             observed.setdefault("estimated_targets", []).append(segment_data.target_duration)
-            return 0.8
+            return 1.05 if segment_data.text == "long target" else 0.8
 
         def synthesize(self, segments_data, language):
             observed["synthesized_targets"] = [item.target_duration for item in segments_data]
+            observed["synthesized_texts"] = [item.text for item in segments_data]
             for item in segments_data:
-                Sine(440).to_audio_segment(duration=800).export(item.output_path, format="wav")
+                duration = 1050 if item.text == "long target" else 800
+                Sine(440).to_audio_segment(duration=duration).export(item.output_path, format="wav")
             return []
 
     dubber = SmartDubbing.__new__(SmartDubbing)
@@ -119,7 +122,7 @@ def test_synthesis_uses_anchor_window_and_does_not_resynthesize_a_fitting_clip(t
     dubber.default_tts = dubber.tts_clients[("fake",)]
     dubber._semantic_plan_cache_persistable = False
     dubber._resynthesize_segment = lambda *_args, **_kwargs: pytest.fail(
-        "A clip that fits its anchor window must not be resynthesized"
+        "The selected long variant must fit without resynthesis"
     )
     dubber._adjust_and_combine_audio_grouped = lambda _segments: (
         AudioSegment.silent(duration=4000),
@@ -132,15 +135,15 @@ def test_synthesis_uses_anchor_window_and_does_not_resynthesize_a_fitting_clip(t
             }
         ],
     )
-    segments = [
-        _segment(2.0, 2.5),
-        _segment(3.1, 3.5),
-    ]
+    first = _segment(2.0, 2.5)
+    first["long_translation"] = "long target"
+    segments = [first, _segment(3.1, 3.5)]
 
     dubber.synthesize_speech(segments, {}, str(source_path))
 
     assert observed["estimated_targets"][0] == pytest.approx(1.1)
     assert observed["synthesized_targets"][0] == pytest.approx(1.1)
+    assert observed["synthesized_texts"][0] == "long target"
 
 
 @pytest.mark.parametrize(
@@ -179,6 +182,24 @@ def test_exact_allowed_overflow_boundary_needs_no_tempo():
     assert result.tempo == 1.0
     assert result.residual_overflow == pytest.approx(0.25)
     assert result.within_policy is True
+
+
+def test_assembly_applies_bounded_slowdown_to_trimmed_speech(tmp_path):
+    dubber = _dubber_for_assembly(tmp_path, source_duration=2.0)
+    first_path = tmp_path / "first.wav"
+    second_path = tmp_path / "second.wav"
+    Sine(440).to_audio_segment(duration=800).export(first_path, format="wav")
+    Sine(550).to_audio_segment(duration=400).export(second_path, format="wav")
+
+    _, positions = dubber._adjust_and_combine_audio_grouped(
+        [
+            _segment(0.0, 0.5, audio_file=first_path),
+            _segment(1.1, 1.5, audio_file=second_path),
+        ]
+    )
+
+    assert positions[0]["tempo"] == pytest.approx(1.0 / 1.15)
+    assert positions[0]["end"] == pytest.approx(0.92, abs=0.03)
 
 
 def test_anchor_plan_sorts_and_equal_starts_share_next_distinct_anchor():
@@ -398,6 +419,7 @@ def test_timing_policy_config_normalization_and_cli_flags():
             "timing_short_segment_threshold": -1,
             "timing_short_segment_max_speed": math.nan,
             "timing_max_speed": 0.9,
+            "timing_max_stretch": 0.9,
             "timing_max_overflow": math.inf,
         }
     )
@@ -406,6 +428,7 @@ def test_timing_policy_config_normalization_and_cli_flags():
     assert config.get("timing_short_segment_threshold") == 1.5
     assert config.get("timing_short_segment_max_speed") == 1.08
     assert config.get("timing_max_speed") == 1.15
+    assert config.get("timing_max_stretch") == 1.15
     assert config.get("timing_max_overflow") == 0.25
 
     args = create_argument_parser().parse_args(
@@ -416,12 +439,14 @@ def test_timing_policy_config_normalization_and_cli_flags():
             "--timing_short_segment_threshold", "1.2",
             "--timing_short_segment_max_speed", "1.04",
             "--timing_max_speed", "1.12",
+            "--timing_max_stretch", "1.10",
             "--timing_max_overflow", "0.15",
         ]
     )
     assert args.timing_short_segment_threshold == 1.2
     assert args.timing_short_segment_max_speed == 1.04
     assert args.timing_max_speed == 1.12
+    assert args.timing_max_stretch == 1.10
     assert args.timing_max_overflow == 0.15
 
 
@@ -430,9 +455,10 @@ def test_final_cache_fingerprint_includes_policy_and_algorithm_version():
 
     baseline = timing_cache_fingerprint(TimingPolicy())
 
-    assert "anchor_timing_v1" in baseline
+    assert "anchor_timing_v2" in baseline
     assert baseline != timing_cache_fingerprint(TimingPolicy(max_overflow=0.1))
     assert baseline != timing_cache_fingerprint(TimingPolicy(max_speed=1.2))
+    assert baseline != timing_cache_fingerprint(TimingPolicy(max_stretch=1.1))
     assert baseline != timing_cache_fingerprint(TimingPolicy(short_segment_max_speed=1.04))
     assert baseline != timing_cache_fingerprint(TimingPolicy(short_segment_threshold=1.0))
 
@@ -505,9 +531,15 @@ def test_raw_segment_cache_sidecar_distinguishes_new_and_legacy_audio(tmp_path):
 
     assert dubber._cached_segment_contract(cache_path) == "legacy"
 
-    dubber._cache_raw_tts_segment(str(source_path), cache_path)
+    dubber._cache_raw_tts_segment(
+        str(source_path), cache_path, synthesized_text="long target"
+    )
 
-    assert dubber._cached_segment_contract(cache_path) == "anchor_raw_v1"
+    assert dubber._cached_segment_contract(cache_path) == "anchor_raw_v2"
+    metadata = json.loads(
+        dubber._segment_cache_metadata_path(cache_path).read_text(encoding="utf-8")
+    )
+    assert metadata["synthesized_text"] == "long target"
     assert cache_path.exists()
 
 
@@ -523,6 +555,7 @@ def test_gradio_exposes_and_persists_anchor_timing_settings(tmp_path):
     assert components["Short segment threshold"]["value"] == 1.5
     assert components["Short segment max speed"]["value"] == 1.08
     assert components["Maximum timing speed"]["value"] == 1.15
+    assert components["Maximum timing stretch"]["value"] == 1.15
     assert components["Maximum timing overflow"]["value"] == 0.25
     assert "Group overflow tolerance" not in components
 
@@ -532,6 +565,7 @@ def test_gradio_exposes_and_persists_anchor_timing_settings(tmp_path):
             "timing_short_segment_threshold": 1.2,
             "timing_short_segment_max_speed": 1.04,
             "timing_max_speed": 1.12,
+            "timing_max_stretch": 1.10,
             "timing_max_overflow": 0.15,
             "group_overflow_tolerance": 0.5,
         },
@@ -544,6 +578,7 @@ def test_gradio_exposes_and_persists_anchor_timing_settings(tmp_path):
         "timing_short_segment_threshold": 1.2,
         "timing_short_segment_max_speed": 1.04,
         "timing_max_speed": 1.12,
+        "timing_max_stretch": 1.10,
         "timing_max_overflow": 0.15,
         "semantic_split_enabled": True,
         "tts_preferred_segment_duration": 15.0,
@@ -562,6 +597,7 @@ def test_gradio_save_normalizes_invalid_timing_values(tmp_path):
             "timing_short_segment_threshold": -1,
             "timing_short_segment_max_speed": math.nan,
             "timing_max_speed": 0.8,
+            "timing_max_stretch": 0.8,
             "timing_max_overflow": math.inf,
         },
         config_path=str(config_path),
@@ -571,6 +607,7 @@ def test_gradio_save_normalizes_invalid_timing_values(tmp_path):
     assert saved["timing_short_segment_threshold"] == 1.5
     assert saved["timing_short_segment_max_speed"] == 1.08
     assert saved["timing_max_speed"] == 1.15
+    assert saved["timing_max_stretch"] == 1.15
     assert saved["timing_max_overflow"] == 0.25
 
 

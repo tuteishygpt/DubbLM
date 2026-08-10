@@ -106,6 +106,7 @@ class DubbingConfig:
             'timing_short_segment_threshold': 1.5,
             'timing_short_segment_max_speed': 1.08,
             'timing_max_speed': 1.15,
+            'timing_max_stretch': 1.15,
             'timing_max_overflow': 0.25,
             'semantic_split_enabled': True,
             'tts_preferred_segment_duration': 15.0,
@@ -511,6 +512,7 @@ class DubbingConfig:
         parser.add_argument('--timing_short_segment_threshold', type=float, help='Recognized duration below which the short-segment speed limit applies (default: 1.5)')
         parser.add_argument('--timing_short_segment_max_speed', type=float, help='Maximum tempo multiplier for short segments (default: 1.08)')
         parser.add_argument('--timing_max_speed', type=float, help='Maximum tempo multiplier for other segments (default: 1.15)')
+        parser.add_argument('--timing_max_stretch', type=float, help='Maximum duration multiplier used to slow short audio into its anchor window (default: 1.15)')
         parser.add_argument('--timing_max_overflow', type=float, help='Allowed speech overflow beyond an anchor window in seconds (default: 0.25)')
         parser.add_argument('--semantic_split_enabled', type=_semantic_bool_argument, help='Use semantic planning for isolated speaker tracks (default: true)')
         parser.add_argument('--tts_preferred_segment_duration', type=float, help='Soft target duration for semantic TTS units (default: 15.0)')

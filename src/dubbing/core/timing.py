@@ -12,11 +12,12 @@ from typing import Any, Callable, Mapping, MutableMapping, Optional, Sequence
 from pydub import AudioSegment
 
 
-ANCHOR_TIMING_VERSION = "anchor_timing_v1"
+ANCHOR_TIMING_VERSION = "anchor_timing_v2"
 TIMING_DEFAULTS = {
     "timing_short_segment_threshold": 1.5,
     "timing_short_segment_max_speed": 1.08,
     "timing_max_speed": 1.15,
+    "timing_max_stretch": 1.15,
     "timing_max_overflow": 0.25,
 }
 TIMING_KEYS = tuple(TIMING_DEFAULTS)
@@ -34,6 +35,7 @@ class TimingPolicy:
     short_segment_threshold: float = 1.5
     short_segment_max_speed: float = 1.08
     max_speed: float = 1.15
+    max_stretch: float = 1.15
     max_overflow: float = 0.25
 
     @classmethod
@@ -42,6 +44,7 @@ class TimingPolicy:
             short_segment_threshold=float(config.get("timing_short_segment_threshold", 1.5)),
             short_segment_max_speed=float(config.get("timing_short_segment_max_speed", 1.08)),
             max_speed=float(config.get("timing_max_speed", 1.15)),
+            max_stretch=float(config.get("timing_max_stretch", 1.15)),
             max_overflow=float(config.get("timing_max_overflow", 0.25)),
         )
 
@@ -235,14 +238,23 @@ def calculate_segment_timing(
     window_end = min(window_end, source_duration)
     available_window = max(0.0, window_end - start)
     allowed_duration = available_window + policy.max_overflow
-    required_speed = max(1.0, audio_duration / max(allowed_duration, epsilon))
     recognized_duration = end - start
     speed_limit = (
         policy.short_segment_max_speed
         if recognized_duration < policy.short_segment_threshold
         else policy.max_speed
     )
-    tempo = min(required_speed, speed_limit)
+    if audio_duration <= epsilon or available_window <= epsilon:
+        tempo = 1.0
+    elif audio_duration < available_window:
+        # Fill as much unused anchor time as the slowdown policy permits. The
+        # caller has already trimmed edge silence, so only audible speech is
+        # stretched; the immutable start anchor is preserved.
+        required_tempo = audio_duration / available_window
+        tempo = max(required_tempo, 1.0 / policy.max_stretch)
+    else:
+        required_speed = max(1.0, audio_duration / max(allowed_duration, epsilon))
+        tempo = min(required_speed, speed_limit)
     expected_duration = audio_duration / tempo
     residual_overflow = max(0.0, expected_duration - available_window)
     return SegmentTiming(
@@ -323,6 +335,7 @@ def timing_cache_fingerprint(policy: TimingPolicy) -> str:
         "timing_short_segment_threshold": policy.short_segment_threshold,
         "timing_short_segment_max_speed": policy.short_segment_max_speed,
         "timing_max_speed": policy.max_speed,
+        "timing_max_stretch": policy.max_stretch,
         "timing_max_overflow": policy.max_overflow,
     }
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))

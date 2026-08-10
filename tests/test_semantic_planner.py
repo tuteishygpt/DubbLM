@@ -670,8 +670,26 @@ def test_raw_tts_cache_key_includes_semantic_plan_fingerprint():
         segment={"semantic_unit_id": "unit-a", "semantic_plan_fingerprint": "plan-b"},
         **common,
     )
+    with_long_variant = SmartDubbing._raw_tts_segment_cache_key(
+        segment={
+            "semantic_unit_id": "unit-a",
+            "semantic_plan_fingerprint": "plan-a",
+            "long_translation": "a deliberately longer target",
+        },
+        **common,
+    )
+    with_larger_window = SmartDubbing._raw_tts_segment_cache_key(
+        segment={
+            "semantic_unit_id": "unit-a",
+            "semantic_plan_fingerprint": "plan-a",
+            "_timing_available_window": 2.0,
+        },
+        **common,
+    )
 
     assert first != second
+    assert first != with_long_variant
+    assert first != with_larger_window
 
 
 def test_emotions_cache_key_includes_provider_model_and_semantic_plan_fingerprint():

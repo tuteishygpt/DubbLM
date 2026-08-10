@@ -2276,11 +2276,11 @@ class SmartDubbing:
         # Import TTSSegmentData for synthesis
         from tts.models import TTSSegmentData
         
-        # Define comfort ratio constants
-        COMFORT_MIN_ADJUSTMENT_RATIO = 0.75
-        # Anchor timing never stretches short speech to fill its window. Silence
-        # after a naturally short clip is valid slack, not a mismatch.
-        COMFORT_MAX_ADJUSTMENT_RATIO = float("inf")
+        # Text-variant selection is independent from the physical tempo policy.
+        # Underfilled windows must still consider long_translation even though
+        # the assembler applies only bounded audio stretching.
+        TEXT_DURATION_MIN_RATIO = 0.75
+        TEXT_DURATION_MAX_RATIO = 1.15
 
         # Lazily-loaded original audio for creating segment-specific reference clips
         original_audio_segment = None
@@ -2425,14 +2425,17 @@ class SmartDubbing:
                             shutil.copy(segment_cached_file_path, current_segment_output_path)
                             cache_contract = self._cached_segment_contract(segment_cached_file_path)
                             segment_dict['_tts_cache_contract'] = cache_contract
-                            if cache_contract == "anchor_raw_v1":
+                            if cache_contract in {"anchor_raw_v1", "anchor_raw_v2"}:
                                 measured_duration = self._measure_raw_tts_for_timing(current_segment_output_path, i)
                             else:
                                 measured_duration = len(cached_audio_info) / 1000.0
                             if measured_duration > 0:
                                 segment_dict['synthesized_speech_len'] = measured_duration
                                 segment_dict['synthesized_speech_file'] = current_segment_output_path
-                                segment_dict['synthesized_text'] = segment_dict.get('translation', '')
+                                cache_metadata = self._cached_segment_metadata(segment_cached_file_path)
+                                segment_dict['synthesized_text'] = cache_metadata.get(
+                                    'synthesized_text', segment_dict.get('translation', '')
+                                )
                                 continue
                             os.remove(segment_cached_file_path)
                             try:
@@ -2471,8 +2474,8 @@ class SmartDubbing:
                     ratio_normal = original_duration / estimated_duration_normal
                     deviation_normal = self._calculate_percentage_deviation(
                         ratio_normal,
-                        COMFORT_MIN_ADJUSTMENT_RATIO,
-                        COMFORT_MAX_ADJUSTMENT_RATIO,
+                        TEXT_DURATION_MIN_RATIO,
+                        TEXT_DURATION_MAX_RATIO,
                     )
                     best_ratio = ratio_normal
                     best_deviation = deviation_normal
@@ -2486,13 +2489,13 @@ class SmartDubbing:
                     else:
                         alternatives = []
                         # Decide which alternatives to consider based on whether we need to shorten or lengthen
-                        if ratio_normal < COMFORT_MIN_ADJUSTMENT_RATIO:
+                        if ratio_normal < TEXT_DURATION_MIN_RATIO:
                             # Synthesized audio longer than original – try shorter variants first
                             if "very_short_translation" in segment_dict:
                                 alternatives.append(("very_short_translation", segment_dict["very_short_translation"]))
                             if "short_translation" in segment_dict:
                                 alternatives.append(("short_translation", segment_dict["short_translation"]))
-                        elif ratio_normal > COMFORT_MAX_ADJUSTMENT_RATIO:
+                        elif ratio_normal > TEXT_DURATION_MAX_RATIO:
                             # Synthesized audio shorter than original – try longer variant
                             if "long_translation" in segment_dict:
                                 alternatives.append(("long_translation", segment_dict["long_translation"]))
@@ -2522,8 +2525,8 @@ class SmartDubbing:
                             ratio_alt = original_duration / estimated_duration_alt
                             deviation_alt = self._calculate_percentage_deviation(
                                 ratio_alt,
-                                COMFORT_MIN_ADJUSTMENT_RATIO,
-                                COMFORT_MAX_ADJUSTMENT_RATIO,
+                                TEXT_DURATION_MIN_RATIO,
+                                TEXT_DURATION_MAX_RATIO,
                             )
                             logger.debug(f"    {alt_key.replace('_', ' ').title()} - Estimated duration: {estimated_duration_alt:.2f}s, Ratio: {ratio_alt:.2f}, Deviation: {deviation_alt:.2%}")
                             
@@ -2608,7 +2611,7 @@ class SmartDubbing:
                     # Check if file was created successfully
                     if os.path.exists(output_path):
                         audio_info = AudioSegment.from_file(output_path)
-                        segment_dict['_tts_cache_contract'] = 'anchor_raw_v1'
+                        segment_dict['_tts_cache_contract'] = 'anchor_raw_v2'
                         segment_dict['synthesized_speech_len'] = self._measure_raw_tts_for_timing(
                             output_path,
                             metadata['index'],
@@ -2621,7 +2624,11 @@ class SmartDubbing:
                         # Cache the synthesized segment
                         if self.cache_manager.use_cache and self._plan_dependent_cache_allowed and segment_dict['synthesized_speech_len'] > 0:
                             try:
-                                self._cache_raw_tts_segment(output_path, metadata["cache_path"])
+                                self._cache_raw_tts_segment(
+                                    output_path,
+                                    metadata["cache_path"],
+                                    synthesized_text=segment_dict['synthesized_text'],
+                                )
                                 logger.debug(f"Cached synthesized segment {metadata['index']+1} ({tts_system})")
                             except Exception as e:
                                 logger.error(f"Error caching segment {metadata['index']+1}: {e}")
@@ -2631,13 +2638,13 @@ class SmartDubbing:
                         actual_dur = segment_dict['synthesized_speech_len']
                         ratio = original_dur / actual_dur if actual_dur > 0 else 1.0
                         deviation = abs(original_dur - actual_dur) / original_dur if original_dur > 0 else 0.0
-                        if actual_dur <= 0 or not (COMFORT_MIN_ADJUSTMENT_RATIO <= ratio <= COMFORT_MAX_ADJUSTMENT_RATIO):
+                        if actual_dur <= 0 or not (TEXT_DURATION_MIN_RATIO <= ratio <= TEXT_DURATION_MAX_RATIO):
                             logger.debug(f"Segment {metadata['index']+1}: duration mismatch after synthesis (ratio={ratio:.2f}, dev={deviation:.2%}). Trying alternatives...")
                             self._resynthesize_segment(
                                 metadata,
                                 tts_instance,
-                                COMFORT_MIN_ADJUSTMENT_RATIO,
-                                COMFORT_MAX_ADJUSTMENT_RATIO,
+                                TEXT_DURATION_MIN_RATIO,
+                                TEXT_DURATION_MAX_RATIO,
                                 current_ratio=ratio,
                             )
                     else:
@@ -2662,8 +2669,8 @@ class SmartDubbing:
                     segments_metadata,
                     tts_instance,
                     tts_system,
-                    COMFORT_MIN_ADJUSTMENT_RATIO,
-                    COMFORT_MAX_ADJUSTMENT_RATIO,
+                    TEXT_DURATION_MIN_RATIO,
+                    TEXT_DURATION_MAX_RATIO,
                     pool_key=pool_key,
                 )
 
@@ -2693,7 +2700,7 @@ class SmartDubbing:
                         
                         if os.path.exists(output_path):
                             audio_info = AudioSegment.from_file(output_path)
-                            segment_dict['_tts_cache_contract'] = 'anchor_raw_v1'
+                            segment_dict['_tts_cache_contract'] = 'anchor_raw_v2'
                             segment_dict['synthesized_speech_len'] = self._measure_raw_tts_for_timing(
                                 output_path,
                                 metadata['index'],
@@ -2705,20 +2712,24 @@ class SmartDubbing:
 
                             # Cache the synthesized segment
                             if self.cache_manager.use_cache and self._plan_dependent_cache_allowed and segment_dict['synthesized_speech_len'] > 0:
-                                self._cache_raw_tts_segment(output_path, metadata["cache_path"])
+                                self._cache_raw_tts_segment(
+                                    output_path,
+                                    metadata["cache_path"],
+                                    synthesized_text=segment_dict['synthesized_text'],
+                                )
                         
                         # After fallback individual synthesis, validate duration again
                         original_dur = segment_dict["_timing_available_window"]
                         actual_dur = segment_dict.get('synthesized_speech_len', 0)
                         ratio = original_dur / actual_dur if actual_dur > 0 else 1.0
                         deviation = abs(original_dur - actual_dur) / original_dur if original_dur > 0 else 0.0
-                        if actual_dur <= 0 or not (COMFORT_MIN_ADJUSTMENT_RATIO <= ratio <= COMFORT_MAX_ADJUSTMENT_RATIO):
+                        if actual_dur <= 0 or not (TEXT_DURATION_MIN_RATIO <= ratio <= TEXT_DURATION_MAX_RATIO):
                             logger.info(f"Segment {metadata['index']+1}: duration mismatch after fallback synthesis (ratio={ratio:.2f}, dev={deviation:.2%}). Trying alternatives...")
                             self._resynthesize_segment(
                                 metadata,
                                 tts_instance,
-                                COMFORT_MIN_ADJUSTMENT_RATIO,
-                                COMFORT_MAX_ADJUSTMENT_RATIO,
+                                TEXT_DURATION_MIN_RATIO,
+                                TEXT_DURATION_MAX_RATIO,
                                 current_ratio=ratio,
                             )
                         
@@ -2742,8 +2753,8 @@ class SmartDubbing:
                     segments_metadata,
                     tts_instance,
                     tts_system,
-                    COMFORT_MIN_ADJUSTMENT_RATIO,
-                    COMFORT_MAX_ADJUSTMENT_RATIO,
+                    TEXT_DURATION_MIN_RATIO,
+                    TEXT_DURATION_MAX_RATIO,
                     pool_key=pool_key,
                 )
         
@@ -2881,7 +2892,7 @@ class SmartDubbing:
                             pass
                         continue
 
-                    segment_dict['_tts_cache_contract'] = 'anchor_raw_v1'
+                    segment_dict['_tts_cache_contract'] = 'anchor_raw_v2'
                     segment_dict['synthesized_speech_len'] = self._measure_raw_tts_for_timing(
                         output_path,
                         metadata['index'],
@@ -2896,7 +2907,11 @@ class SmartDubbing:
                     )
                     if self.cache_manager.use_cache and getattr(self, "_plan_dependent_cache_allowed", True) and segment_dict['synthesized_speech_len'] > 0:
                         try:
-                            self._cache_raw_tts_segment(output_path, metadata["cache_path"])
+                            self._cache_raw_tts_segment(
+                                output_path,
+                                metadata["cache_path"],
+                                synthesized_text=segment_dict['synthesized_text'],
+                            )
                         except Exception:
                             pass
 
@@ -3049,7 +3064,7 @@ class SmartDubbing:
                         pass
                     continue
 
-                segment_dict['_tts_cache_contract'] = 'anchor_raw_v1'
+                segment_dict['_tts_cache_contract'] = 'anchor_raw_v2'
                 segment_dict['synthesized_speech_len'] = self._measure_raw_tts_for_timing(
                     output_path,
                     segment_index,
@@ -3282,6 +3297,23 @@ class SmartDubbing:
     ) -> str:
         """Build a raw-unit cache identity without timing-policy settings."""
         translation_hash = hashlib.md5(translation.encode()).hexdigest()[:8]
+        variant_payload = {
+            "selection_policy": "text_fit_v2",
+            "available_window": round(
+                float(segment.get("_timing_available_window", 0.0)), 3
+            ),
+            "translation": translation,
+            "very_short_translation": segment.get("very_short_translation", ""),
+            "short_translation": segment.get("short_translation", ""),
+            "long_translation": segment.get("long_translation", ""),
+        }
+        variant_hash = hashlib.md5(
+            json.dumps(
+                variant_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()[:8]
         voice_prompt_hash = hashlib.md5((style_prompt or "").encode()).hexdigest()[:8]
         ref_audio_hash = hashlib.md5(
             str(reference_audio_path or "").encode()
@@ -3290,27 +3322,44 @@ class SmartDubbing:
         semantic_plan_identity = segment.get("semantic_plan_fingerprint", "legacy")
         return (
             f"{base_cache_prefix}_{tts_system}_{semantic_plan_identity}_"
-            f"{semantic_unit_identity}_{speaker}_{translation_hash}_"
+            f"{semantic_unit_identity}_{speaker}_{translation_hash}_{variant_hash}_"
             f"{voice_prompt_hash}_{ref_audio_hash}"
         )
 
-    def _cache_raw_tts_segment(self, source_path: str, cache_path: Path) -> None:
+    def _cache_raw_tts_segment(
+        self,
+        source_path: str,
+        cache_path: Path,
+        *,
+        synthesized_text: str = "",
+    ) -> None:
         """Cache raw TTS plus a version marker, independent of timing policy."""
         shutil.copy(source_path, cache_path)
         metadata_path = self._segment_cache_metadata_path(cache_path)
         metadata_path.write_text(
-            json.dumps({"audio_contract": "anchor_raw_v1"}, sort_keys=True),
+            json.dumps(
+                {
+                    "audio_contract": "anchor_raw_v2",
+                    "synthesized_text": synthesized_text,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
             encoding="utf-8",
         )
 
-    def _cached_segment_contract(self, cache_path: Path) -> str:
+    def _cached_segment_metadata(self, cache_path: Path) -> Dict[str, Any]:
         metadata_path = self._segment_cache_metadata_path(cache_path)
         try:
             data = json.loads(metadata_path.read_text(encoding="utf-8"))
-            if data.get("audio_contract") == "anchor_raw_v1":
-                return "anchor_raw_v1"
+            return data if isinstance(data, dict) else {}
         except (OSError, ValueError, TypeError):
-            pass
+            return {}
+
+    def _cached_segment_contract(self, cache_path: Path) -> str:
+        contract = self._cached_segment_metadata(cache_path).get("audio_contract")
+        if contract in {"anchor_raw_v1", "anchor_raw_v2"}:
+            return contract
         return "legacy"
 
     def _calculate_percentage_deviation(self, ratio: float, min_ratio_comfort: float, max_ratio_comfort: float) -> float:
@@ -3552,7 +3601,7 @@ class SmartDubbing:
             
             # Update segment data
             audio_info = AudioSegment.from_file(output_path)
-            segment_dict['_tts_cache_contract'] = 'anchor_raw_v1'
+            segment_dict['_tts_cache_contract'] = 'anchor_raw_v2'
             segment_dict["synthesized_speech_len"] = self._measure_raw_tts_for_timing(
                 output_path,
                 metadata['index'],
@@ -3570,7 +3619,11 @@ class SmartDubbing:
             # Update cache if needed
             if self.cache_manager.use_cache and getattr(self, "_plan_dependent_cache_allowed", True) and len(audio_info) > 0:
                 try:
-                    self._cache_raw_tts_segment(output_path, metadata["cache_path"])
+                    self._cache_raw_tts_segment(
+                        output_path,
+                        metadata["cache_path"],
+                        synthesized_text=segment_dict["synthesized_text"],
+                    )
                 except Exception:
                     pass
 
@@ -3920,7 +3973,10 @@ class SmartDubbing:
                 try:
                     raw_clip = AudioSegment.from_file(segment_file)
                     if len(raw_clip) > 0:
-                        if segment.get("_tts_cache_contract") == "anchor_raw_v1":
+                        if segment.get("_tts_cache_contract") in {
+                            "anchor_raw_v1",
+                            "anchor_raw_v2",
+                        }:
                             timing_path = self.su_audio_chunks_dir / f"timed_{item.original_index}.wav"
                             trim_result = trim_audio_edges(segment_file, timing_path)
                             raw_duration = trim_result.raw_duration
@@ -3976,7 +4032,7 @@ class SmartDubbing:
             actual_tempo = timing.tempo
             adjusted_clip = clip
             tempo_error = None
-            if timing.tempo > 1.0005 and len(clip) > 0 and not used_fallback:
+            if abs(timing.tempo - 1.0) > 0.0005 and len(clip) > 0 and not used_fallback:
                 input_path = self.su_audio_chunks_dir / f"tempo_in_{item.original_index}.wav"
                 output_path = self.su_audio_chunks_dir / f"tempo_{item.original_index}.wav"
                 try:

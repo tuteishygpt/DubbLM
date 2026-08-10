@@ -91,6 +91,7 @@ SETTINGS_FIELDS = [
     "timing_short_segment_threshold",
     "timing_short_segment_max_speed",
     "timing_max_speed",
+    "timing_max_stretch",
     "timing_max_overflow",
     "semantic_split_enabled",
     "tts_preferred_segment_duration",
@@ -1675,6 +1676,11 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         value=defaults.get("timing_max_speed", 1.15),
                         precision=3,
                     )
+                    timing_max_stretch = gr.Number(
+                        label="Maximum timing stretch",
+                        value=defaults.get("timing_max_stretch", 1.15),
+                        precision=3,
+                    )
                     timing_max_overflow = gr.Number(
                         label="Maximum timing overflow",
                         value=defaults.get("timing_max_overflow", 0.25),
@@ -1756,6 +1762,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         timing_short_segment_threshold,
                         timing_short_segment_max_speed,
                         timing_max_speed,
+                        timing_max_stretch,
                         timing_max_overflow,
                         semantic_split_enabled,
                         tts_preferred_segment_duration,

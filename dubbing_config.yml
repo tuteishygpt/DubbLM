@@ -53,6 +53,7 @@ emotion_model: gemini-3.1-flash-lite
 timing_short_segment_threshold: 1.5
 timing_short_segment_max_speed: 1.08
 timing_max_speed: 1.15
+timing_max_stretch: 1.15
 timing_max_overflow: 0.25
 semantic_split_enabled: true
 tts_preferred_segment_duration: 15.0
