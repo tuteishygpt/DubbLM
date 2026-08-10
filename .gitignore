@@ -99,7 +99,7 @@ artifacts/
 # Project specifics
 tmp/
 prj/videoplayback*/
-prj/NA_Matthew Manarino_shorts_3/*.srt
+prj/**/*.srt
 
 *.yml
 

@@ -4,7 +4,7 @@ debug_info: false
 debug_diarize_only: false
 debug_tts: true
 whisper_model: large-v3
-keep_background: false
+keep_background: true
 no_cache: false
 remove_pauses: false
 normalize_audio: true
@@ -19,9 +19,9 @@ llm_provider: gemini
 llm_model_name: gemini-3.1-pro-preview
 llm_temperature: 1
 refinement_llm_provider: gemini
-refinement_model_name: gemini-3.1-pro-preview
-refinement_temperature: 1.8
-refinement_persona: ai_buddy
+refinement_model_name: gemini-3.5-flash
+refinement_temperature: 1
+refinement_persona: normal
 save_original_subtitles: false
 save_translated_subtitles: true
 voice_auto_selection: true
@@ -45,7 +45,7 @@ voices:
     reference_text: И тут прямо какие-то Анадырь, Чита, и с этой стороны какие-то
       американские города, стоят печати аэропортов. Очень живописно выглядит, где-то
       по-русски...
-duration: 180
+duration: 500
 transcription_model: best
 inner_transcription_system: assemblyai
 emotion_provider: gemini
