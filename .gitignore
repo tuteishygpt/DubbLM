@@ -98,8 +98,7 @@ artifacts/
 
 # Project specifics
 tmp/
-prj/videoplayback*/
-prj/**/*.srt
+prj/
 
 *.yml
 
