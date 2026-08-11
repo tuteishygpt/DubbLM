@@ -1213,13 +1213,43 @@ class GeminiTTSWrapper(TTSInterface):
                     shutil.rmtree(temp_dir_for_chunks)
 
                 if self.api_client.config.enable_audio_validation:
+                    expected_min_duration = 1.0
                     is_valid, reason, silence_ratio = AudioValidator.validate_audio_sample(
-                        temp_attempt_path, 
+                        temp_attempt_path,
+                        expected_min_duration=expected_min_duration,
                         max_silence_ratio=max_silence_ratio
                     )
 
+                    # Edge silence is removed non-destructively by SmartDubbing
+                    # before duration comparison and final assembly. Do not ask the
+                    # generative model for another take solely because the usable
+                    # speech has a long silent tail: retries can change voice identity.
+                    recoverable_trailing_silence = False
+                    if (not is_valid) and reason.startswith("Too much trailing silence"):
+                        duration = AudioFileUtils.get_audio_duration_seconds(temp_attempt_path)
+                        audible_duration = (
+                            duration * max(0.0, 1.0 - silence_ratio)
+                            if duration is not None
+                            else 0.0
+                        )
+                        recoverable_trailing_silence = (
+                            audible_duration >= expected_min_duration
+                        )
+                        if recoverable_trailing_silence:
+                            logger.debug(
+                                "Accepting segment for %s with recoverable trailing "
+                                "silence %.2f%% (estimated audible duration %.2fs)",
+                                speaker_id,
+                                silence_ratio * 100.0,
+                                audible_duration,
+                            )
+
                     # If invalid due to silence and debug saving enabled, persist rejected attempt
-                    if (not is_valid) and self.debug_save_rejected:
+                    if (
+                        (not is_valid)
+                        and (not recoverable_trailing_silence)
+                        and self.debug_save_rejected
+                    ):
                         try:
                             reason_lower = (reason or "").lower()
                             if ("silence" in reason_lower) or ("no energy" in reason_lower) or ("flat/constant" in reason_lower):
@@ -1249,7 +1279,7 @@ class GeminiTTSWrapper(TTSInterface):
                         except OSError as e:
                             logger.warning(f"Could not remove temp_attempt_path: {e}")
 
-                    if is_valid:
+                    if is_valid or recoverable_trailing_silence:
                         return True, silence_ratio, best_attempt_path
                     else:
                         logger.debug(f"Segment validation failed for {speaker_id} (attempt {attempt + 1}): {reason}")
