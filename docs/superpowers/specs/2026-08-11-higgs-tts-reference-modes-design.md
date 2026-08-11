@@ -41,6 +41,8 @@ settings surface. It adds no CLI flags and does not modify a user's local
 - Falling back between configured, segment, and speaker references.
 - Repairing unrelated baseline test failures.
 - Editing the user's current `dubbing_config.yml`.
+- Refactoring the factory registry, cache subsystem, or all TTS wrappers beyond
+  the small changes required to enforce this contract.
 
 ## Current State and Problems
 
@@ -167,6 +169,13 @@ The application classifies Higgs as `required` even though the underlying
 Space accepts an empty reference, because the product requirement is to use
 Higgs only with an explicitly sourced clone reference.
 
+OpenAI and Gemini may still read `TTSSegmentData.reference_audio_path` for
+catalog voice similarity matching. That is not voice cloning: the reference is
+not sent to their synthesis API and does not alter this capability table. Their
+existing optional matching path remains unchanged and does not require
+`reference_mode`. Strict mode resolution is applied only to providers marked
+`optional` or `required` above.
+
 Validation rules:
 
 - `unsupported` plus any `reference_mode` is an error;
@@ -182,6 +191,9 @@ Reference resolution becomes a focused, provider-independent operation rather
 than a fallback chain. Given a profile, speaker, source segment, and requested
 mode, it returns one resolved audio path and reference text or raises a
 descriptive error.
+
+Implementation stays in the existing reference helper path in `SmartDubbing`;
+this feature does not introduce a new resolver framework or service layer.
 
 ### `configured`
 
@@ -212,6 +224,16 @@ descriptive error.
 - Clear reference audio and text in `TTSSegmentData`.
 - Rely on provider capability validation to allow or reject the mode.
 
+### Wrapper fallback removal
+
+For providers classified as `optional` or `required`, synthesis must consume
+only the pipeline-resolved `TTSSegmentData.reference_audio_path`. OmniVoice,
+BexTTS, and XTTS must not consult constructor defaults or voice mappings after
+an explicit mode has been resolved. `none` must therefore remain `None` all the
+way to an optional provider's API request. F5 may derive missing reference text
+from the already-resolved audio as it does today, but it may not select or
+create a different reference-audio source.
+
 ## Preflight and Data Flow
 
 For a generation pass that is not satisfied by a complete final-audio cache:
@@ -221,12 +243,15 @@ For a generation pass that is not satisfied by a complete final-audio cache:
 2. Determine the provider's reference capability.
 3. Validate that the explicit mode is allowed for that capability.
 4. Materialize the single configured reference source for every segment.
-5. Build all final `TTSSegmentData` objects, including `reference_mode`.
+5. Build all final `TTSSegmentData` objects, including `reference_mode` and the
+   original zero-based `segment_index`.
 6. In a separate preflight loop, call `validate_segments()` on every active TTS
-   client.
-7. Aggregate all reference errors across providers, speakers, and segments.
-8. If any error exists, raise one `TTSReferenceValidationError` before entering
-   the synthesis loop.
+   client. The method returns `list[tuple[int, str]]`: an empty list means
+   success; each item contains `segment_index` and one complete, user-facing
+   validation issue.
+7. Concatenate all returned issues and sort them by `segment_index`.
+8. If any issue exists, raise one `ValueError` with the aggregate message before
+   entering the synthesis loop.
 9. Only after all pools pass preflight may the first `synthesize()` call run.
 
 The preflight loop must be outside the existing batch-synthesis `try` block so
@@ -238,7 +263,26 @@ pass do not bypass validation for segments that still require synthesis.
 
 Single-segment resynthesis must use the same strict resolver and client
 validation before its call. It may validate only the selected segment because
-that operation is itself a one-segment TTS stage.
+that operation is itself a one-segment TTS stage. For `segment` mode it reuses
+the persisted `speakers_audio/segments/<speaker>_<segment_index>.wav` created by
+the full synthesis pass and fails if that file is missing. It does not recreate
+the reference from `source.wav`, so a prior separated-vocals reference cannot
+silently change during UI resynthesis.
+
+## Cache Identity
+
+Add one canonical effective-TTS fingerprint; do not redesign caching. The
+fingerprint contains a contract version plus, for each active speaker, the
+effective provider, model, fallback model, voice, style prompt,
+`reference_mode`, configured reference path/text, and sorted provider `params`.
+It is included in both the final synthesized-audio cache key and the base prefix
+used by segment cache keys.
+
+Segment cache identity additionally includes the resolved reference mode,
+resolved reference path, reference text, and client-pool settings. This makes
+old cache entries ineligible and prevents changes to Higgs parameters or
+reference configuration from reusing audio produced under another contract.
+No other cache layout or cache manager behavior changes.
 
 ## TTS Interface Changes
 
@@ -246,10 +290,11 @@ Add the following shared concepts without making existing implementations
 reimplement boilerplate:
 
 - a reference capability class attribute with default `unsupported`;
-- a concrete `validate_segments(segments_data)` hook on `TTSInterface`;
+- a concrete `validate_segments(segments_data) -> list[tuple[int, str]]` hook on
+  `TTSInterface`;
 - generic validation for mode/capability compatibility and required local
   files;
-- an explicit `reference_mode` field on `TTSSegmentData`.
+- explicit `reference_mode` and `segment_index` fields on `TTSSegmentData`.
 
 Cloning wrappers set their capability. Each wrapper calls
 `validate_segments()` defensively at the start of `synthesize()` so direct
@@ -321,8 +366,9 @@ filepath shapes already handled by the OmniVoice integration, load the result
 with `pydub`, measure actual duration, copy it to the requested output, and
 return a `SegmentAlignment` per successful segment.
 
-The wrapper uses the existing text-length heuristic for duration estimation;
-Higgs has no duration or speed input in the inspected Space API.
+The wrapper estimates duration as `max(word_count * 0.45, 0.8)` seconds and
+returns `0.0` for empty text. Higgs has no duration or speed input in the
+inspected Space API, so no shared estimator refactor is introduced.
 
 ### Error behavior
 
@@ -341,9 +387,8 @@ Higgs has no duration or speed input in the inspected Space API.
 - Add `higgs` to the Gradio TTS dropdown.
 - Update the `voices` YAML placeholder to demonstrate `reference_mode` and
   Higgs `params`.
-- Document strict reference modes and the legacy migration requirement.
-- Update provider lists in repository guidance where they describe supported
-  TTS systems.
+- Keep documentation changes limited to this design/plan and the existing
+  Gradio configuration help required to use the feature.
 - Do not add CLI choices or flags.
 
 ## Error Messages
@@ -414,8 +459,11 @@ segment, mode, and the concrete reason.
 
 - Run focused new and modified test modules during TDD.
 - Run the complete test suite at the end.
-- Compare final full-suite results with the recorded baseline of 258 passing
-  and 2 unrelated pre-existing failures; no new failures are acceptable.
+- Compare final results with the two accepted baseline failures:
+  `tests/test_audio_processor.py::test_process_background_audio_skips_when_audio_separator_missing`
+  and
+  `tests/test_runner.py::test_run_pipeline_uses_separated_vocals_for_segment_references_when_keep_background_enabled`.
+  No other failure is acceptable.
 
 ## Compatibility and Migration
 
@@ -442,5 +490,7 @@ settings; reference mode and files remain per-segment data.
 - Missing references produce one aggregate, actionable exception.
 - Existing final-audio cache reuse remains possible without an unnecessary
   reference check.
+- Effective TTS and reference configuration participates in final and segment
+  cache identity.
 - Focused tests pass, and the full suite introduces no failures beyond the two
   confirmed baseline failures.
