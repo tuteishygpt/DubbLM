@@ -97,6 +97,12 @@ def _run_combine_video_step(dubber: Any, config: DubbingConfig) -> str:
     expected_translated_audio = config.get("translated_audio_path")
     expected_background_audio = None
 
+    rebuild_audio = getattr(dubber, "rebuild_translated_audio_from_chunks", None)
+    if callable(rebuild_audio):
+        rebuilt_audio_path = rebuild_audio()
+        if rebuilt_audio_path:
+            expected_translated_audio = rebuilt_audio_path
+
     if config.get("keep_background"):
         expected_background_audio = config.get("background_audio_path")
         if not os.path.exists(expected_background_audio):

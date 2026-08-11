@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from ..core.config import create_argument_parser, create_config_from_args
 from ..core.smart_dubbing import SmartDubbing
+from ..core.runner import _extract_output_path, _run_combine_video_step
 from ..core.log_config import setup_logging, get_logger
 
 # Setup logging
@@ -62,43 +63,9 @@ def main():
             
         elif config.get('run_step') == 'combine_video':
             logger.info("Running only the 'combine_audio_with_video' step...")
-            
-            expected_translated_audio = config.get('translated_audio_path')
-            expected_background_audio = None
-            
-            if config.get('keep_background'):
-                expected_background_audio = config.get('background_audio_path')
-                if not os.path.exists(expected_background_audio):
-                    logger.warning(f"Expected background audio {expected_background_audio} not found. Proceeding without it.")
-                    expected_background_audio = None
-
-            if not os.path.exists(expected_translated_audio):
-                logger.error(f"Error: Expected translated audio {expected_translated_audio} not found.")
-                sys.exit(1)
-            
-            watermark_input_path = config.get('watermark_path')
-            if watermark_input_path and not os.path.exists(watermark_input_path):
-                logger.warning(f"Watermark image {watermark_input_path} not found. Proceeding without it.")
-                watermark_input_path = None
-            
             try:
-                output_video_path = dubber.video_processor.combine_audio_with_video(
-                    video_path=config.get('input'),
-                    translated_audio_path=expected_translated_audio,
-                    background_audio_path=expected_background_audio,
-                    watermark_path=watermark_input_path,
-                    watermark_text=config.get('watermark_text'),
-                    include_original_audio=config.get('include_original_audio', False),
-                    output_file=config.get('output'),
-                    start_time=config.get('start_time'),
-                    duration=config.get('duration'),
-                    keep_original_audio_ranges=config.get('keep_original_audio_ranges'),
-                    source_language=config.get('source_language'),
-                    target_language=config.get('target_language'),
-                    dubbed_volume=config.get('dubbed_volume', 1.0),
-                    background_volume=config.get('background_volume', 0.562341),
-                    upscale_factor=config.get('upscale_factor', 1.0),
-                    upscale_sharpen=config.get('upscale_sharpen', True)
+                output_video_path = _extract_output_path(
+                    _run_combine_video_step(dubber, config)
                 )
                 logger.info(f"Video combination complete. Output saved to: {output_video_path}")
             except Exception as e:

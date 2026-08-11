@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from pydub import AudioSegment
+from pydub.generators import Sine
 import pytest
 
 import dubbing.core.config as config_module
@@ -223,6 +224,82 @@ def test_run_dubbing_job_explains_missing_combine_video_artifacts(tmp_path):
     assert result.status.startswith("Failed:")
     assert "combine_video" in result.status
     assert "Run step" in result.status
+
+
+def test_combine_video_rebuilds_translated_audio_from_regenerated_chunks(tmp_path):
+    source_audio_path = tmp_path / "source.wav"
+    translated_audio_path = tmp_path / "output.wav"
+    audio_chunks_dir = tmp_path / "audio_chunks"
+    su_audio_chunks_dir = tmp_path / "su_audio_chunks"
+    audio_chunks_dir.mkdir()
+    su_audio_chunks_dir.mkdir()
+
+    AudioSegment.silent(duration=1000).export(source_audio_path, format="wav")
+    AudioSegment.silent(duration=1000).export(translated_audio_path, format="wav")
+    regenerated_chunk_path = audio_chunks_dir / "0.wav"
+    Sine(440).to_audio_segment(duration=1000).export(
+        regenerated_chunk_path, format="wav"
+    )
+
+    segments = [
+        {
+            "speaker": "SPEAKER_00",
+            "start": 0.0,
+            "end": 1.0,
+            "text": "Hello",
+            "translation": "Pryvitanne",
+            "synthesized_speech_file": str(regenerated_chunk_path),
+        }
+    ]
+
+    class CacheStub:
+        use_cache = True
+
+        def cache_exists(self, step_name, cache_key):
+            return step_name == "dubbing_texts" and cache_key == "snapshot-key"
+
+        def load_from_cache(self, step_name, cache_key):
+            assert step_name == "dubbing_texts"
+            assert cache_key == "snapshot-key"
+            return {
+                "version": 1,
+                "segments": segments,
+                "translation_cache_reusable": True,
+                "translation_cache_key": "translation-key",
+            }
+
+    config = {
+        "input": str(tmp_path / "clip.mp4"),
+        "audio_artifacts_dir": str(tmp_path),
+        "audio_chunks_dir": str(audio_chunks_dir),
+        "su_audio_chunks_dir": str(su_audio_chunks_dir),
+        "translated_audio_path": str(translated_audio_path),
+        "output": str(tmp_path / "clip_be.mp4"),
+        "source_language": "en",
+        "target_language": "be",
+        "debug_info": False,
+    }
+    Path(config["input"]).write_bytes(b"video")
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = config
+    dubber.cache_manager = CacheStub()
+    dubber.audio_chunks_dir = audio_chunks_dir
+    dubber.su_audio_chunks_dir = su_audio_chunks_dir
+    dubber.debug_data = {}
+    dubber._build_dubbing_text_snapshot_key = lambda _audio_file: "snapshot-key"
+
+    class VideoProcessorStub:
+        def combine_audio_with_video(self, **kwargs):
+            rebuilt_audio = AudioSegment.from_file(kwargs["translated_audio_path"])
+            assert rebuilt_audio.rms > 0
+            return config["output"], []
+
+    dubber.video_processor = VideoProcessorStub()
+
+    result = runner._run_combine_video_step(dubber, config)
+
+    assert result == (config["output"], [])
 
 
 def test_run_dubbing_job_extracts_file_path_from_combine_video_tuple(tmp_path, monkeypatch):

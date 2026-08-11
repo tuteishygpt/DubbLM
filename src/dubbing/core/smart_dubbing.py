@@ -3164,6 +3164,52 @@ class SmartDubbing:
             f"Reference audio: {segment_data.reference_audio_path!r}"
         )
 
+    def rebuild_translated_audio_from_chunks(self) -> Optional[str]:
+        """Rebuild the aggregate dubbed track from the latest editor snapshot.
+
+        ``Regenerate selected row`` deliberately updates only one raw chunk.
+        The combine-video step calls this method so its mux input reflects that
+        chunk without invoking TTS again for the other segments.
+        """
+        source_audio_path = Path(self.config.get("audio_artifacts_dir")) / "source.wav"
+        if not source_audio_path.is_file():
+            logger.warning(
+                "Cannot rebuild translated audio from chunks because source audio is missing: %s",
+                source_audio_path,
+            )
+            return None
+
+        snapshot_key = self._build_dubbing_text_snapshot_key(str(source_audio_path))
+        if not self.cache_manager.cache_exists("dubbing_texts", snapshot_key):
+            logger.info(
+                "No Dubbing Texts snapshot found; reusing the existing translated audio track."
+            )
+            return None
+
+        snapshot = self.cache_manager.load_from_cache("dubbing_texts", snapshot_key)
+        if isinstance(snapshot, list):
+            segments = snapshot
+        elif isinstance(snapshot, dict) and snapshot.get("version") == 1:
+            segments = snapshot.get("segments")
+        else:
+            raise ValueError("Unexpected Dubbing Texts snapshot payload")
+
+        if not isinstance(segments, list) or not segments:
+            raise ValueError("Dubbing Texts snapshot has no segments to combine")
+
+        self._timing_source_audio_file = str(source_audio_path)
+        self._timing_source_duration = len(AudioSegment.from_file(source_audio_path)) / 1000.0
+        combined_audio, real_segment_positions = self._adjust_and_combine_audio_grouped(
+            segments
+        )
+
+        output_path = Path(self.config.get("translated_audio_path"))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        combined_audio.export(output_path, format="wav")
+        self.real_segment_positions = real_segment_positions
+        logger.info("Rebuilt translated audio from current chunks: %s", output_path)
+        return str(output_path)
+
     def _save_transcription_file(self, transcription: List[Dict]) -> None:
         """Save transcription to a readable text file."""
         from src.utils.time_utils import format_seconds_to_hms
