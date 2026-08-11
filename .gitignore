@@ -113,3 +113,4 @@ tts/samples/gemini/gemini_voice_stats.json
 # Generated local run artifacts
 app_out.txt
 wav2vec2_checkpoints/
+.worktrees/
