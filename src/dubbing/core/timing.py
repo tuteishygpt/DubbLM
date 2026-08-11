@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping, MutableMapping, Optional, Sequence
 from pydub import AudioSegment
 
 
-ANCHOR_TIMING_VERSION = "anchor_timing_v2"
+ANCHOR_TIMING_VERSION = "segment_bounded_timing_v3"
 TIMING_DEFAULTS = {
     "timing_short_segment_threshold": 1.5,
     "timing_short_segment_max_speed": 1.08,
@@ -55,7 +55,6 @@ class AnchorWindow:
     original_index: int
     start: float
     end: float
-    next_start: Optional[float]
     available_window: float
 
 
@@ -197,26 +196,15 @@ def plan_anchor_windows(
         validated.append((start, end, original_index, segment))
 
     ordered = sorted(validated, key=lambda item: (item[0], item[1], item[2]))
-    distinct_starts = sorted({item[0] for item in ordered})
-    next_by_start = {
-        start: (distinct_starts[index + 1] if index + 1 < len(distinct_starts) else None)
-        for index, start in enumerate(distinct_starts)
-    }
-
     planned: list[AnchorWindow] = []
     for start, end, original_index, segment in ordered:
-        next_start = next_by_start[start]
-        window_end = max(end, next_start) if next_start is not None else source_duration
-        window_end = min(window_end, source_duration)
-        available_window = max(0.0, window_end - start)
         planned.append(
             AnchorWindow(
                 segment=segment,
                 original_index=original_index,
                 start=start,
                 end=end,
-                next_start=next_start,
-                available_window=available_window,
+                available_window=max(0.0, end - start),
             )
         )
     return planned
@@ -234,9 +222,9 @@ def calculate_segment_timing(
 ) -> SegmentTiming:
     """Select the least tempo change permitted by the anchor timing policy."""
 
-    window_end = max(end, next_start) if next_start is not None else source_duration
-    window_end = min(window_end, source_duration)
-    available_window = max(0.0, window_end - start)
+    # ``next_start`` and ``source_duration`` remain accepted for compatibility
+    # with older callers, but recognized bounds alone define the timing target.
+    available_window = max(0.0, end - start)
     allowed_duration = available_window + policy.max_overflow
     recognized_duration = end - start
     speed_limit = (

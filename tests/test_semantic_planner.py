@@ -688,8 +688,12 @@ def test_raw_tts_cache_key_includes_semantic_plan_fingerprint():
     )
 
     assert first != second
-    assert first != with_long_variant
+    assert first == with_long_variant
     assert first != with_larger_window
+    assert first != SmartDubbing._raw_tts_segment_cache_key(
+        segment={"semantic_unit_id": "unit-a", "semantic_plan_fingerprint": "plan-a"},
+        **{**common, "translation": "different candidate"},
+    )
 
 
 def test_emotions_cache_key_includes_provider_model_and_semantic_plan_fingerprint():

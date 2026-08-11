@@ -135,7 +135,7 @@ class AudioValidator:
     
     @staticmethod
     def validate_audio_sample(audio_path: Union[str, Path], 
-                            expected_min_duration: float = 1.0,
+                            expected_min_duration: Optional[float] = 1.0,
                             silence_threshold_db: float = -40.0,
                             max_silence_ratio: float = 0.03) -> tuple[bool, str, float]:
         """
@@ -143,7 +143,8 @@ class AudioValidator:
         
         Args:
             audio_path: Path to the audio file
-            expected_min_duration: Minimum expected duration in seconds
+            expected_min_duration: Minimum duration in seconds, or ``None``
+                when duration alone must not reject the audio
             silence_threshold_db: Threshold below which audio is considered silence (in dB)
             max_silence_ratio: Maximum allowed ratio of trailing silence vs total duration (0.1 = 10%)
             
@@ -165,7 +166,7 @@ class AudioValidator:
             if duration is None:
                 return False, "Could not determine audio duration", 1.0
             
-            if duration < expected_min_duration:
+            if expected_min_duration is not None and duration < expected_min_duration:
                 return False, f"Audio too short ({duration:.2f}s < {expected_min_duration:.2f}s)", 1.0
             
             # Analyze audio content for silence
@@ -227,11 +228,10 @@ class AudioValidator:
             silence_mask = rms_db < adaptive_threshold
             non_silent_indices = np.where(~silence_mask)[0]
             if non_silent_indices.size == 0:
-                trailing_silence_ratio = 1.0
-            else:
-                last_non_silent = int(non_silent_indices[-1])
-                trailing_silent_frames = max(0, total_frames - (last_non_silent + 1))
-                trailing_silence_ratio = trailing_silent_frames / total_frames
+                return False, "Audio contains no non-silent analysis frames", 1.0
+            last_non_silent = int(non_silent_indices[-1])
+            trailing_silent_frames = max(0, total_frames - (last_non_silent + 1))
+            trailing_silence_ratio = trailing_silent_frames / total_frames
             
             # Debug info
             logger.debug(f"Audio analysis - Dynamic range: {dynamic_range:.1f}dB, "
@@ -306,11 +306,10 @@ class AudioValidator:
             silence_mask = (chunk_db_values < adaptive_threshold)
             non_silent_indices = torch.nonzero(~silence_mask, as_tuple=False).flatten()
             if non_silent_indices.numel() == 0:
-                trailing_silence_ratio = 1.0
-            else:
-                last_non_silent = int(non_silent_indices[-1].item())
-                trailing_silent_chunks = max(0, num_chunks - (last_non_silent + 1))
-                trailing_silence_ratio = trailing_silent_chunks / num_chunks
+                return False, "Audio contains no non-silent analysis frames", 1.0
+            last_non_silent = int(non_silent_indices[-1].item())
+            trailing_silent_chunks = max(0, num_chunks - (last_non_silent + 1))
+            trailing_silence_ratio = trailing_silent_chunks / num_chunks
             
             # Debug info
             logger.debug(f"Audio analysis - Dynamic range: {dynamic_range:.1f}dB, "
@@ -1128,27 +1127,16 @@ class GeminiTTSWrapper(TTSInterface):
                     os.remove(primary_best_path)
                 return
 
-        # Both models failed, compare the best attempts
-        if primary_best_path and fallback_best_path:
-            if primary_silence <= fallback_silence:
-                logger.warning(f"Both models failed validation. Using best attempt from primary model (silence: {primary_silence:.2f})")
-                shutil.move(primary_best_path, temp_output_path)
-                os.remove(fallback_best_path)
-            else:
-                logger.warning(f"Both models failed validation. Using best attempt from fallback model (silence: {fallback_silence:.2f})")
-                shutil.move(fallback_best_path, temp_output_path)
-                os.remove(primary_best_path)
-            return
-
-        # Handle cases where one of the models didn't produce any output
-        if primary_best_path:
-            logger.warning(f"Fallback model failed. Using best attempt from primary model (silence: {primary_silence:.2f})")
-            shutil.move(primary_best_path, temp_output_path)
-            return
-        if fallback_best_path:
-            logger.warning(f"Primary model failed. Using best attempt from fallback model (silence: {fallback_silence:.2f})")
-            shutil.move(fallback_best_path, temp_output_path)
-            return
+        # Every recoverable trailing-silence take already returns success from
+        # ``_attempt_segment_synthesis``. Any remaining best attempt failed a
+        # structural validation (flat, energy-free, unreadable, or too small)
+        # and must never be promoted to final segment audio.
+        for rejected_path in {primary_best_path, fallback_best_path}:
+            if rejected_path and os.path.exists(rejected_path):
+                try:
+                    os.remove(rejected_path)
+                except OSError:
+                    pass
 
         raise RuntimeError(f"Failed to synthesize segment for speaker {segment_data.speaker} after all attempts.")
 
@@ -1213,10 +1201,9 @@ class GeminiTTSWrapper(TTSInterface):
                     shutil.rmtree(temp_dir_for_chunks)
 
                 if self.api_client.config.enable_audio_validation:
-                    expected_min_duration = 1.0
                     is_valid, reason, silence_ratio = AudioValidator.validate_audio_sample(
                         temp_attempt_path,
-                        expected_min_duration=expected_min_duration,
+                        expected_min_duration=None,
                         max_silence_ratio=max_silence_ratio
                     )
 
@@ -1224,25 +1211,17 @@ class GeminiTTSWrapper(TTSInterface):
                     # before duration comparison and final assembly. Do not ask the
                     # generative model for another take solely because the usable
                     # speech has a long silent tail: retries can change voice identity.
-                    recoverable_trailing_silence = False
-                    if (not is_valid) and reason.startswith("Too much trailing silence"):
-                        duration = AudioFileUtils.get_audio_duration_seconds(temp_attempt_path)
-                        audible_duration = (
-                            duration * max(0.0, 1.0 - silence_ratio)
-                            if duration is not None
-                            else 0.0
+                    recoverable_trailing_silence = (
+                        (not is_valid)
+                        and reason.startswith("Too much trailing silence")
+                    )
+                    if recoverable_trailing_silence:
+                        logger.debug(
+                            "Accepting segment for %s with recoverable trailing "
+                            "silence %.2f%%",
+                            speaker_id,
+                            silence_ratio * 100.0,
                         )
-                        recoverable_trailing_silence = (
-                            audible_duration >= expected_min_duration
-                        )
-                        if recoverable_trailing_silence:
-                            logger.debug(
-                                "Accepting segment for %s with recoverable trailing "
-                                "silence %.2f%% (estimated audible duration %.2fs)",
-                                speaker_id,
-                                silence_ratio * 100.0,
-                                audible_duration,
-                            )
 
                     # If invalid due to silence and debug saving enabled, persist rejected attempt
                     if (

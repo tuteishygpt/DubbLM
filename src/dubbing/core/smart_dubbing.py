@@ -548,6 +548,13 @@ class SmartDubbing:
                     }
                 )
             provider_params.update(profile.params or {})
+            effective_reference_path = profile.reference_audio
+            if profile.reference_mode == "speaker":
+                speakers_dir = getattr(self, "speakers_audio_dir", None)
+                if speakers_dir is not None:
+                    effective_reference_path = str(
+                        Path(speakers_dir) / f"{speaker}.wav"
+                    )
             profiles.append(
                 {
                     "speaker": speaker,
@@ -559,6 +566,9 @@ class SmartDubbing:
                     "style_prompt": profile.style_prompt,
                     "reference_mode": profile.reference_mode,
                     "reference_audio": profile.reference_audio,
+                    "reference_audio_identity": self._file_content_identity(
+                        effective_reference_path
+                    ),
                     "reference_text": profile.reference_text,
                     "params": dict(sorted(provider_params.items())),
                 }
@@ -566,6 +576,24 @@ class SmartDubbing:
         return self._cache_fingerprint(
             {"contract": "strict-reference-v1", "speakers": profiles}
         )
+
+    @staticmethod
+    def _file_content_identity(path: Optional[str]) -> str:
+        """Return a path-plus-content identity for a readable local file."""
+        identity = str(path or "")
+        if not path:
+            return identity
+        try:
+            file_path = Path(path)
+            if not file_path.is_file():
+                return identity
+            digest = hashlib.sha256()
+            with file_path.open("rb") as source_file:
+                for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return f"{file_path.resolve(strict=False)}:{digest.hexdigest()}"
+        except OSError:
+            return identity
 
     def _shared_audio_transcription_identity(self, audio_file: str) -> str:
         """Return the shared audio/transcription identity used by text caches."""
@@ -2227,41 +2255,32 @@ class SmartDubbing:
                 segment.setdefault("style_prompt", "")
     
     def synthesize_speech(self, segments: List[Dict], speakers_rolls: Dict, audio_file: str) -> str:
-        """
-        Synthesize speech for translated segments with optimized batching and estimation.
-        
-        Args:
-            segments: List of transcript segments with translations
-            speakers_rolls: Dictionary mapping time ranges to speaker IDs
-            audio_file: Path to the audio file for cache key
-            
-        Returns:
-            Path to the output audio file
-        """
+        """Synthesize measured text candidates within each recognized segment."""
         if not segments:
             raise ValueError("Cannot synthesize speech with no segments.")
 
         from .timing import TimingPolicy, plan_anchor_windows, timing_cache_fingerprint
+        from tts.models import TTSSegmentData
 
         try:
             self._timing_source_duration = len(AudioSegment.from_file(audio_file)) / 1000.0
         except Exception as exc:
             raise ValueError(f"Cannot measure processed source audio for timing: {audio_file}") from exc
         self._timing_source_audio_file = audio_file
-        anchor_plan = plan_anchor_windows(segments, self._timing_source_duration)
-        for item in anchor_plan:
+
+        planned = plan_anchor_windows(segments, self._timing_source_duration)
+        for item in planned:
             item.segment["_timing_original_index"] = item.original_index
-            item.segment["_timing_next_anchor"] = item.next_start
             item.segment["_timing_available_window"] = item.available_window
-        segments[:] = [item.segment for item in anchor_plan]
-        timing_policy = TimingPolicy.from_config(self.config)
+            item.segment.pop("_timing_next_anchor", None)
+        segments[:] = [item.segment for item in planned]
+
+        policy = TimingPolicy.from_config(self.config)
         self._plan_dependent_cache_allowed = getattr(
             self, "_semantic_plan_cache_persistable", True
         )
-
-        # Start timing
         self.performance_tracker.start_timing("speech_synthesis")
-        
+
         semantic_fingerprints = {
             segment.get("semantic_plan_fingerprint")
             for segment in segments
@@ -2285,730 +2304,393 @@ class SmartDubbing:
             if len(semantic_fingerprints) == 1
             else ""
         )
-        tts_cache_fingerprint = self._effective_tts_cache_fingerprint(
+        tts_fingerprint = self._effective_tts_cache_fingerprint(
             segment["speaker"] for segment in segments
         )
-        cache_key = f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}_{self.config.get('target_language')}_{self.config.get('tts_system')}_{timing_cache_fingerprint(timing_policy)}_{tts_cache_fingerprint}{semantic_suffix}"
-        step_name = "synthesized_speech"
-        
-        # Final audio is stored as WAV rather than CacheManager's pickle
-        # payload, so its existence must be checked directly.
-        cached_audio_path = self.cache_manager.get_cache_path(step_name) / f"{cache_key}.wav"
+        source_cache_key = self.cache_manager.generate_cache_key(
+            audio_file,
+            self.config.get("source_language"),
+            self.config.get("target_language"),
+            self.config.get("whisper_model", "large-v3"),
+            self.config.get("start_time"),
+            self.config.get("duration"),
+        )
+        selection_fingerprint = self._tts_selection_cache_fingerprint(segments)
+        cache_key = (
+            f"{source_cache_key}_{self.config.get('target_language')}_"
+            f"{self.config.get('tts_system')}_{timing_cache_fingerprint(policy)}_"
+            f"{tts_fingerprint}_{selection_fingerprint}{semantic_suffix}"
+        )
+        aggregate_cache_dir = self.cache_manager.get_cache_path("synthesized_speech")
+        cached_audio_path = aggregate_cache_dir / f"{cache_key}.wav"
+        output_path = self.config.get("translated_audio_path")
         if (
             self.cache_manager.use_cache
             and self._plan_dependent_cache_allowed
             and not self.config.get("debug_info", False)
             and cached_audio_path.exists()
         ):
-            logger.debug("Loading synthesized speech from cache...")
-            output_path = self.config.get("translated_audio_path")
             shutil.copy(cached_audio_path, output_path)
             self.performance_tracker.end_timing("speech_synthesis")
             return output_path
-        
-        logger.info(f"Synthesizing translated speech using multiple TTS systems...")
-        
-        # Create segment cache directory if needed
-        segment_cache_path = self.cache_manager.get_cache_path("segment_synthesis")
-        base_cache_prefix = (
-            self.cache_manager.generate_cache_key(
-                audio_file,
-                self.config.get('source_language'),
-                self.config.get('target_language'),
-                self.config.get('whisper_model', 'large-v3'),
-                self.config.get('start_time'),
-                self.config.get('duration'),
-            )
-            + f"_{tts_cache_fingerprint}"
-        )
-        
-        # Check if any TTS clients are initialized
+
         if not self.tts_clients:
             raise ValueError("No TTS systems are initialized properly")
-        
-        # Import TTSSegmentData for synthesis
-        from tts.models import TTSSegmentData
-        
-        # Text-variant selection is independent from the physical tempo policy.
-        # Underfilled windows must still consider long_translation even though
-        # the assembler applies only bounded audio stretching.
-        TEXT_DURATION_MIN_RATIO = 0.75
-        TEXT_DURATION_MAX_RATIO = 1.15
 
-        # Lazily-loaded original audio for creating segment-specific reference clips
+        segment_cache_dir = self.cache_manager.get_cache_path("segment_synthesis")
+        base_cache_prefix = f"{source_cache_key}_{tts_fingerprint}"
+        self.audio_chunks_dir.mkdir(parents=True, exist_ok=True)
+        self.su_audio_chunks_dir.mkdir(parents=True, exist_ok=True)
+
+        segment_reference_min_duration = self.config.get(
+            "segment_reference_min_duration", 2.0
+        )
+        try:
+            segment_reference_min_duration = max(
+                0.0, float(segment_reference_min_duration)
+            )
+        except (TypeError, ValueError, OverflowError):
+            segment_reference_min_duration = 2.0
+
+        prepared: List[Dict[str, Any]] = []
+        preflight_segments: Dict[tuple, List[Any]] = {}
+        preflight_clients: Dict[tuple, Any] = {}
+        reference_issues: List[tuple[int, str]] = []
         original_audio_segment = None
 
-        # Minimum duration threshold for exporting segment reference audio
-        segment_reference_min_duration = self.config.get('segment_reference_min_duration', 2.0)
-        try:
-            segment_reference_min_duration = float(segment_reference_min_duration)
-        except (TypeError, ValueError):
-            logger.warning(
-                "Invalid segment_reference_min_duration value '%s'. Falling back to 2.0 seconds.",
-                segment_reference_min_duration
-            )
-            segment_reference_min_duration = 2.0
-        if segment_reference_min_duration < 0.0:
-            logger.warning("segment_reference_min_duration cannot be negative. Using 0 seconds instead.")
-            segment_reference_min_duration = 0.0
-        # Group segments by (pool_key, profile) — profiles that share a pool_key
-        # share the same TTS client and are synthesised together in one batch call.
-        segments_by_pool_key: Dict[tuple, List[Tuple[int, Dict[str, Any]]]] = {}
-        pool_key_profile: Dict[tuple, VoiceProfile] = {}
-        segment_to_pool_key: Dict[int, tuple] = {}
-        pool_key_label: Dict[tuple, str] = {}
-
-        for i, segment_dict in enumerate(segments):
-            speaker = segment_dict["speaker"]
+        for chronological_index, segment in enumerate(segments):
+            speaker = segment["speaker"]
             profile = self._resolve_voice_profile(speaker)
             pool_key = self._profile_pool_key(profile)
-            segments_by_pool_key.setdefault(pool_key, []).append((i, segment_dict))
-            pool_key_profile.setdefault(pool_key, profile)
-            segment_to_pool_key[i] = pool_key
-            pool_key_label.setdefault(
-                pool_key,
-                f"{profile.tts_system or self._default_tts_system()}"
-                + (f":{profile.model}" if profile.model else ""),
+            tts_instance = self.tts_clients.get(pool_key) or getattr(
+                self, "default_tts", None
             )
-
-        logger.debug(
-            "Segments grouped by TTS pool: %s",
-            [(pool_key_label[k], len(v)) for k, v in segments_by_pool_key.items()],
-        )
-
-        # First pass: Determine the best text version for each segment using estimation
-        segments_to_synthesize_by_pool: Dict[tuple, List[Any]] = {k: [] for k in segments_by_pool_key.keys()}
-        segments_metadata = []
-        reference_resolution_issues: List[tuple[int, str]] = []
-        
-        # Initialize progress tracking
-        total_segments = len(segments)
-        completed_segments = 0
-        
-        logger.info(f"Estimating audio durations to select optimal text versions for {total_segments} segments...")
-        
-        for pool_key, segment_list in segments_by_pool_key.items():
-            pool_profile = pool_key_profile[pool_key]
-            tts_system = pool_key_label[pool_key]
-            # Get the shared TTS instance for this pool
-            tts_instance = self.tts_clients.get(pool_key)
-            if not tts_instance:
-                logger.warning(f"Warning: TTS client for {tts_system} not available, using default")
-                tts_instance = self.default_tts
+            if tts_instance is None:
+                raise ValueError(
+                    f"TTS client for {profile.tts_system or self._default_tts_system()} is not available"
+                )
+            tts_system = profile.tts_system or self._default_tts_system()
+            original_index = int(
+                segment.get("_timing_original_index", chronological_index)
+            )
+            style_prompt = (
+                (segment.get("style_prompt") or "").strip()
+                or profile.style_prompt
+            )
+            voice_name = profile.voice_name
+            if voice_name is None and isinstance(self.config.get("voice_name"), str):
+                voice_name = self.config.get("voice_name")
+            if self.config.get("debug_info", False):
+                self.debug_data.setdefault("voices", {})[chronological_index] = {
+                    "speaker": speaker,
+                    "voice": voice_name,
+                    "style_prompt": style_prompt,
+                    "tts_system": tts_system,
+                    "model": profile.model,
+                }
+            base_args: Dict[str, Any] = {
+                "speaker": speaker,
+                "text": segment.get("translation", ""),
+                "emotion": segment.get("emotion", "Neutral"),
+                "style_prompt": style_prompt,
+                "reference_audio_path": profile.reference_audio,
+                "reference_text": profile.reference_text,
+                "reference_mode": profile.reference_mode,
+                "segment_index": original_index,
+                "voice": voice_name,
+                "speed": 1.0,
+                "target_duration": segment["_timing_available_window"],
+            }
             provider_capability = getattr(
                 tts_instance, "reference_capability", "unsupported"
             )
-
-            logger.debug(f"Processing {len(segment_list)} segments with {tts_system} TTS ...")
-
-            for i, segment_dict in segment_list:
-                speaker = segment_dict["speaker"]
-                profile = self._resolve_voice_profile(speaker)
-                original_segment_index = int(
-                    segment_dict.get("_timing_original_index", i)
-                )
-
-                segment_style_override = (segment_dict.get("style_prompt") or "").strip()
-                segment_style_prompt = segment_style_override or profile.style_prompt
-
-                voice_name = profile.voice_name
-                if voice_name is None:
-                    # Legacy fallback: bare string voice_name applies to every speaker.
-                    voice_cfg = self.config.get('voice_name')
-                    if isinstance(voice_cfg, str):
-                        voice_name = voice_cfg
-
-                # Store the voice information for debug
-                if self.config.get('debug_info', False):
-                    self.debug_data["voices"][i] = {
-                        "speaker": speaker,
-                        "voice": voice_name,
-                        "style_prompt": segment_style_prompt,
-                        "tts_system": profile.tts_system or self._default_tts_system(),
-                        "model": profile.model,
-                    }
-
-                # Prepare base TTSSegmentData & resolve reference audio/text first
-                tts_segment_data_args = {
-                    "speaker": speaker,
-                    "text": segment_dict["translation"],
-                    "emotion": segment_dict.get("emotion", "Neutral"),
-                    "style_prompt": segment_style_prompt,
-                    "reference_audio_path": profile.reference_audio,
-                    "reference_text": profile.reference_text,
-                    "reference_mode": profile.reference_mode,
-                    "segment_index": original_segment_index,
-                    "voice": voice_name,
-                    "speed": 1.0,
-                    "target_duration": segment_dict["_timing_available_window"],
-                }
-                resolution_error: Optional[str] = None
-                try:
-                    if (
-                        provider_capability in {"optional", "required"}
-                        and profile.reference_mode == "segment"
-                        and original_audio_segment is None
-                    ):
-                        original_audio_segment = AudioSegment.from_file(audio_file)
-
-                    tts_segment_data_args, original_audio_segment = self._resolve_segment_reference(
-                        tts_segment_data_args=tts_segment_data_args,
-                        segment_dict=segment_dict,
-                        profile=profile,
-                        provider_capability=provider_capability,
-                        speaker=speaker,
-                        segment_index=original_segment_index,
-                        original_audio_segment=original_audio_segment,
-                        segment_reference_min_duration=segment_reference_min_duration,
-                    )
-                except Exception as exc:
-                    resolution_error = str(exc)
-
-                # Check cache (including semantic-plan and reference identities).
-                segment_cache_key = self._raw_tts_segment_cache_key(
-                    base_cache_prefix=base_cache_prefix,
-                    tts_system=tts_system,
-                    segment=segment_dict,
+            try:
+                if (
+                    provider_capability in {"optional", "required"}
+                    and profile.reference_mode == "segment"
+                    and original_audio_segment is None
+                ):
+                    original_audio_segment = AudioSegment.from_file(audio_file)
+                base_args, original_audio_segment = self._resolve_segment_reference(
+                    tts_segment_data_args=base_args,
+                    segment_dict=segment,
+                    profile=profile,
+                    provider_capability=provider_capability,
                     speaker=speaker,
-                    translation=segment_dict["translation"],
-                    style_prompt=segment_style_prompt,
-                    reference_audio_path=tts_segment_data_args.get("reference_audio_path"),
-                    reference_mode=tts_segment_data_args.get("reference_mode"),
-                    reference_text=tts_segment_data_args.get("reference_text"),
-                    client_pool_settings=pool_key,
-                    legacy_index=original_segment_index,
+                    segment_index=original_index,
+                    original_audio_segment=original_audio_segment,
+                    segment_reference_min_duration=segment_reference_min_duration,
                 )
-                current_segment_output_path = str(self.audio_chunks_dir / f"{i}.wav")
-                os.makedirs(os.path.dirname(current_segment_output_path), exist_ok=True)
-                
-                segment_cached_file_path = segment_cache_path / f"{segment_cache_key}.wav"
-                
-                # Try to use cached segment
-                if self.cache_manager.use_cache and self._plan_dependent_cache_allowed and segment_cached_file_path.exists():
-                    try:
-                        cached_audio_info = AudioSegment.from_file(segment_cached_file_path)
-                        if len(cached_audio_info) > 0:
-                            logger.debug(f"Using valid cached segment {i+1}/{len(segments)} ({tts_system})")
-                            shutil.copy(segment_cached_file_path, current_segment_output_path)
-                            cache_contract = self._cached_segment_contract(segment_cached_file_path)
-                            segment_dict['_tts_cache_contract'] = cache_contract
-                            if cache_contract in {"anchor_raw_v1", "anchor_raw_v2"}:
-                                measured_duration = self._measure_raw_tts_for_timing(current_segment_output_path, i)
-                            else:
-                                measured_duration = len(cached_audio_info) / 1000.0
-                            if measured_duration > 0:
-                                segment_dict['synthesized_speech_len'] = measured_duration
-                                segment_dict['synthesized_speech_file'] = current_segment_output_path
-                                cache_metadata = self._cached_segment_metadata(segment_cached_file_path)
-                                segment_dict['synthesized_text'] = cache_metadata.get(
-                                    'synthesized_text', segment_dict.get('translation', '')
-                                )
-                                continue
-                            os.remove(segment_cached_file_path)
-                            try:
-                                self._segment_cache_metadata_path(segment_cached_file_path).unlink()
-                            except OSError:
-                                pass
-                        else:
-                            os.remove(segment_cached_file_path)
-                    except Exception as e:
-                        try:
-                            os.remove(segment_cached_file_path)
-                        except:
-                            pass
-                
-                # Calculate original duration and estimate current translation
-                original_duration = segment_dict["_timing_available_window"]
-                
-                # Create TTSSegmentData for estimation
-                segment_data_model = TTSSegmentData(**tts_segment_data_args)
-                
-                # Estimate duration for normal translation
-                estimated_duration_normal = tts_instance.estimate_audio_segment_length(
-                    segment_data_model,
-                    language=self.config.get('target_language')
+            except Exception as exc:
+                reference_issues.append(
+                    (
+                        original_index,
+                        f"provider={tts_system} speaker={speaker} segment={original_index} "
+                        f"mode={profile.reference_mode or '<missing>'}: {exc}",
+                    )
                 )
-                
-                best_text = segment_dict["translation"]
-                best_estimated_duration = estimated_duration_normal
-                best_ratio = float('inf')
-                best_deviation = float('inf')
-                best_track_type = "translation"  # Track which translation variant was selected
-                
-                if estimated_duration_normal is None or estimated_duration_normal <= 0:
-                    logger.warning(f"Segment {i+1}: Duration estimation failed for normal translation, using it directly.")
-                else:
-                    ratio_normal = original_duration / estimated_duration_normal
-                    deviation_normal = self._calculate_percentage_deviation(
-                        ratio_normal,
-                        TEXT_DURATION_MIN_RATIO,
-                        TEXT_DURATION_MAX_RATIO,
-                    )
-                    best_ratio = ratio_normal
-                    best_deviation = deviation_normal
-                    logger.debug(
-                        f"Segment {i+1} ({tts_system}): Normal translation - Estimated duration: {estimated_duration_normal:.2f}s, Ratio: {ratio_normal:.2f}, Deviation: {deviation_normal:.2%}"
-                    )
-                    
-                    # If normal is perfect, no need to check alternatives
-                    if deviation_normal == 0.0:
-                        logger.debug(f"  Normal translation is within comfort zone. Selecting it.")
-                    else:
-                        alternatives = []
-                        # Decide which alternatives to consider based on whether we need to shorten or lengthen
-                        if ratio_normal < TEXT_DURATION_MIN_RATIO:
-                            # Synthesized audio longer than original – try shorter variants first
-                            if "very_short_translation" in segment_dict:
-                                alternatives.append(("very_short_translation", segment_dict["very_short_translation"]))
-                            if "short_translation" in segment_dict:
-                                alternatives.append(("short_translation", segment_dict["short_translation"]))
-                        elif ratio_normal > TEXT_DURATION_MAX_RATIO:
-                            # Synthesized audio shorter than original – try longer variant
-                            if "long_translation" in segment_dict:
-                                alternatives.append(("long_translation", segment_dict["long_translation"]))
-                            # Fallback to original text if long not available (handled later)
-                        
-                        if alternatives:
-                            logger.debug(f"  Normal translation is outside comfort. Estimating {len(alternatives)} alternative(s)...")
-                        
-                        # Preference: when remove_pauses enabled and non-zero deviation remains, prefer negative deviation (shorter) in tie
-                        prefer_shorter = self.config.get('remove_pauses', True)
-                        def deviation_key(dev: float) -> tuple:
-                            # Primary: minimal absolute deviation; Secondary: prefer negative when enabled
-                            return (abs(dev), 0 if (prefer_shorter and dev < 0) else 1)
 
-                        for alt_key, alt_text_content in alternatives:
-                            alt_segment_data_args = {**tts_segment_data_args, "text": alt_text_content}
-                            alt_segment_data_model = TTSSegmentData(**alt_segment_data_args)
-                            estimated_duration_alt = tts_instance.estimate_audio_segment_length(
-                                alt_segment_data_model,
-                                language=self.config.get('target_language')
-                            )
-                            
-                            if estimated_duration_alt is None or estimated_duration_alt <= 0:
-                                logger.warning(f"    {alt_key.replace('_', ' ').title()}: Estimation failed.")
-                                continue
-                            
-                            ratio_alt = original_duration / estimated_duration_alt
-                            deviation_alt = self._calculate_percentage_deviation(
-                                ratio_alt,
-                                TEXT_DURATION_MIN_RATIO,
-                                TEXT_DURATION_MAX_RATIO,
-                            )
-                            logger.debug(f"    {alt_key.replace('_', ' ').title()} - Estimated duration: {estimated_duration_alt:.2f}s, Ratio: {ratio_alt:.2f}, Deviation: {deviation_alt:.2%}")
-                            
-                            # Update if this alternative is better per deviation_key
-                            if deviation_key(deviation_alt) < deviation_key(best_deviation):
-                                best_deviation = deviation_alt
-                                best_ratio = ratio_alt
-                                best_text = alt_text_content
-                                best_estimated_duration = estimated_duration_alt
-                                best_track_type = alt_key  # Track the selected variant
-                                logger.debug(
-                                    f"      New best: {alt_key.replace('_', ' ').title()} (Deviation: {best_deviation:.2%})"
-                                )
-                                if best_deviation == 0.0:
-                                    break
-                
-                logger.debug(f"  Selected for synthesis: '{best_text[:50]}...' (Ratio: {best_ratio:.2f}, Deviation: {best_deviation:.2%})")
-                
-                # Remove any stale wav left over from a previous run so a
-                # silent TTS failure (e.g. OmniVoice AcceleratorError) can't
-                # be masked by an old file with the same index — otherwise
-                # ``os.path.exists(output_path)`` below would happily accept
-                # audio produced by a completely different TTS backend.
-                try:
-                    if os.path.exists(current_segment_output_path):
-                        os.remove(current_segment_output_path)
-                except OSError as exc:
-                    logger.debug(
-                        f"Could not remove stale chunk {current_segment_output_path}: {exc}"
-                    )
-
-                # Prepare segment for synthesis with chosen text
-                final_segment_data = TTSSegmentData(**{**tts_segment_data_args, "text": best_text, "output_path": current_segment_output_path})
-                segments_to_synthesize_by_pool[pool_key].append(final_segment_data)
-                if resolution_error:
-                    provider = profile.tts_system or self._default_tts_system()
-                    reference_resolution_issues.append(
-                        (
-                            original_segment_index,
-                            f"provider={provider} speaker={speaker} segment={original_segment_index} "
-                            f"mode={profile.reference_mode or '<missing>'}: {resolution_error}",
-                        )
-                    )
-                segments_metadata.append({
-                    "index": i,
-                    "segment_dict": segment_dict,
-                    "cache_path": segment_cached_file_path,
-                    "output_path": current_segment_output_path,
-                    "chosen_text": best_text,
-                    "estimated_ratio": best_ratio,
-                    "tts_system": tts_system,
+            final_path = str(self.audio_chunks_dir / f"{chronological_index}.wav")
+            initial_data = TTSSegmentData(
+                **{
+                    **base_args,
+                    "text": segment.get("translation", ""),
+                    "output_path": final_path,
+                }
+            )
+            preflight_segments.setdefault(pool_key, []).append(initial_data)
+            preflight_clients[pool_key] = tts_instance
+            prepared.append(
+                {
+                    "index": chronological_index,
+                    "segment": segment,
+                    "profile": profile,
                     "pool_key": pool_key,
-                    "segment_data_args": tts_segment_data_args,
-                    "selected_track_type": best_track_type  # Store the selected track type
-                })
+                    "tts_instance": tts_instance,
+                    "tts_system": tts_system,
+                    "base_args": base_args,
+                    "base_cache_prefix": base_cache_prefix,
+                    "segment_cache_dir": segment_cache_dir,
+                    "final_path": final_path,
+                    "style_prompt": style_prompt,
+                }
+            )
 
         self._preflight_tts_pools(
-            segments_to_synthesize_by_pool,
-            self.tts_clients,
-            reference_resolution_issues,
+            preflight_segments,
+            preflight_clients,
+            reference_issues,
         )
 
-        # Second pass: Batch synthesize all segments by pool_key
-        for pool_key, segments_to_synthesize in segments_to_synthesize_by_pool.items():
-            if not segments_to_synthesize:
-                continue
+        for metadata in prepared:
+            self._synthesize_measured_candidates(metadata, policy)
 
-            tts_system = pool_key_label[pool_key]
-            tts_instance = self.tts_clients.get(pool_key)
-            if not tts_instance:
-                logger.warning(f"Warning: TTS client for {tts_system} not available, skipping segments")
-                continue
-            
-            logger.info(f"Synthesizing {len(segments_to_synthesize)} segments with {tts_system} TTS ...")
-            
-            try:
-                # Synthesize all segments for this TTS system in one call
-                segment_alignments = tts_instance.synthesize(
-                    segments_data=segments_to_synthesize,
-                    language=self.config.get('target_language')
-                )
-                
-                # Process results and update segment metadata
-                for segment_data in segments_to_synthesize:
-                    # Find corresponding metadata
-                    metadata = next((m for m in segments_metadata if m["output_path"] == segment_data.output_path), None)
-                    if not metadata:
-                        continue
-                    
-                    segment_dict = metadata["segment_dict"]
-                    output_path = metadata["output_path"]
-                    
-                    # Update progress tracking
-                    completed_segments += 1
-                    logger.info(f"Processing segment {completed_segments}/{total_segments} (Speaker: {segment_dict['speaker']})")
-                    
-                    # Check if file was created successfully
-                    if os.path.exists(output_path):
-                        audio_info = AudioSegment.from_file(output_path)
-                        segment_dict['_tts_cache_contract'] = 'anchor_raw_v2'
-                        segment_dict['synthesized_speech_len'] = self._measure_raw_tts_for_timing(
-                            output_path,
-                            metadata['index'],
-                        )
-                        segment_dict['synthesized_speech_file'] = (
-                            output_path if segment_dict['synthesized_speech_len'] > 0 else None
-                        )
-                        segment_dict['synthesized_text'] = metadata.get('chosen_text', segment_dict.get('translation', ''))
-
-                        # Cache the synthesized segment
-                        if self.cache_manager.use_cache and self._plan_dependent_cache_allowed and segment_dict['synthesized_speech_len'] > 0:
-                            try:
-                                self._cache_raw_tts_segment(
-                                    output_path,
-                                    metadata["cache_path"],
-                                    synthesized_text=segment_dict['synthesized_text'],
-                                )
-                                logger.debug(f"Cached synthesized segment {metadata['index']+1} ({tts_system})")
-                            except Exception as e:
-                                logger.error(f"Error caching segment {metadata['index']+1}: {e}")
-
-                        # Validate actual duration and resynthesize if needed
-                        original_dur = segment_dict["_timing_available_window"]
-                        actual_dur = segment_dict['synthesized_speech_len']
-                        ratio = original_dur / actual_dur if actual_dur > 0 else 1.0
-                        deviation = abs(original_dur - actual_dur) / original_dur if original_dur > 0 else 0.0
-                        if actual_dur <= 0 or not (TEXT_DURATION_MIN_RATIO <= ratio <= TEXT_DURATION_MAX_RATIO):
-                            logger.debug(f"Segment {metadata['index']+1}: duration mismatch after synthesis (ratio={ratio:.2f}, dev={deviation:.2%}). Trying alternatives...")
-                            self._resynthesize_segment(
-                                metadata,
-                                tts_instance,
-                                TEXT_DURATION_MIN_RATIO,
-                                TEXT_DURATION_MAX_RATIO,
-                                current_ratio=ratio,
-                            )
-                    else:
-                        logger.warning(
-                            f"Segment {metadata['index']+1} ({tts_system}) skipped by TTS. "
-                            f"Will retry individually."
-                        )
-                        segment_dict['synthesized_speech_len'] = 0
-                        segment_dict['synthesized_speech_file'] = None
-                        # Remove any stale empty file left over from a previous run so
-                        # the downstream combiner treats this slot as truly missing
-                        # instead of loading a 0ms clip.
-                        try:
-                            if os.path.exists(output_path):
-                                os.remove(output_path)
-                        except OSError:
-                            pass
-
-                # Retry any segments that the batch pass produced no audio for.
-                self._retry_missing_segments(
-                    segments_to_synthesize,
-                    segments_metadata,
-                    tts_instance,
-                    tts_system,
-                    TEXT_DURATION_MIN_RATIO,
-                    TEXT_DURATION_MAX_RATIO,
-                    pool_key=pool_key,
-                )
-
-                logger.debug(f"Batch synthesis completed for {len(segments_to_synthesize)} segments with {tts_system}")
-                
-            except Exception as e:
-                logger.error(f"Batch synthesis failed for {tts_system}: {e}. Falling back to individual synthesis...")
-                
-                # Fallback: synthesize individually
-                for segment_data in segments_to_synthesize:
-                    metadata = next((m for m in segments_metadata if m["output_path"] == segment_data.output_path), None)
-                    if not metadata:
-                        continue
-                    
-                    segment_dict = metadata["segment_dict"]
-                    output_path = metadata["output_path"]
-                    
-                    # Update progress tracking for fallback synthesis
-                    completed_segments += 1
-                    logger.info(f"Processing segment {completed_segments}/{total_segments} (Fallback - Speaker: {segment_dict['speaker']})")
-                    
-                    try:
-                        tts_instance.synthesize(
-                            segments_data=[segment_data],
-                            language=self.config.get('target_language')
-                        )
-                        
-                        if os.path.exists(output_path):
-                            audio_info = AudioSegment.from_file(output_path)
-                            segment_dict['_tts_cache_contract'] = 'anchor_raw_v2'
-                            segment_dict['synthesized_speech_len'] = self._measure_raw_tts_for_timing(
-                                output_path,
-                                metadata['index'],
-                            )
-                            segment_dict['synthesized_speech_file'] = (
-                                output_path if segment_dict['synthesized_speech_len'] > 0 else None
-                            )
-                            segment_dict['synthesized_text'] = metadata.get('chosen_text', segment_dict.get('translation', ''))
-
-                            # Cache the synthesized segment
-                            if self.cache_manager.use_cache and self._plan_dependent_cache_allowed and segment_dict['synthesized_speech_len'] > 0:
-                                self._cache_raw_tts_segment(
-                                    output_path,
-                                    metadata["cache_path"],
-                                    synthesized_text=segment_dict['synthesized_text'],
-                                )
-                        
-                        # After fallback individual synthesis, validate duration again
-                        original_dur = segment_dict["_timing_available_window"]
-                        actual_dur = segment_dict.get('synthesized_speech_len', 0)
-                        ratio = original_dur / actual_dur if actual_dur > 0 else 1.0
-                        deviation = abs(original_dur - actual_dur) / original_dur if original_dur > 0 else 0.0
-                        if actual_dur <= 0 or not (TEXT_DURATION_MIN_RATIO <= ratio <= TEXT_DURATION_MAX_RATIO):
-                            logger.info(f"Segment {metadata['index']+1}: duration mismatch after fallback synthesis (ratio={ratio:.2f}, dev={deviation:.2%}). Trying alternatives...")
-                            self._resynthesize_segment(
-                                metadata,
-                                tts_instance,
-                                TEXT_DURATION_MIN_RATIO,
-                                TEXT_DURATION_MAX_RATIO,
-                                current_ratio=ratio,
-                            )
-                        
-                        logger.debug(f"Synthesized segment {metadata['index']+1}/{len(segments)} individually ({tts_system})")
-                        
-                    except Exception as e_synth:
-                        logger.error(f"Failed to synthesize segment {metadata['index']+1} ({tts_system}): {e_synth}")
-                        segment_dict['synthesized_speech_len'] = 0
-                        segment_dict['synthesized_speech_file'] = None
-                        try:
-                            if os.path.exists(output_path):
-                                os.remove(output_path)
-                        except OSError:
-                            pass
-
-                # After the fallback pass, retry anything that is still missing
-                # once more with the same TTS – handles transient network errors
-                # from cloud TTS backends (OmniVoice, Gemini, OpenAI).
-                self._retry_missing_segments(
-                    segments_to_synthesize,
-                    segments_metadata,
-                    tts_instance,
-                    tts_system,
-                    TEXT_DURATION_MIN_RATIO,
-                    TEXT_DURATION_MAX_RATIO,
-                    pool_key=pool_key,
-                )
-        
-        # Adjust timing and combine audio segments
-        combined_audio, real_segment_positions = self._adjust_and_combine_audio_grouped(segments)
-        output_path = self.config.get("translated_audio_path")
+        combined_audio, real_segment_positions = self._adjust_and_combine_audio_grouped(
+            segments
+        )
         combined_audio.export(output_path, format="wav")
-        
-        # Store real segment positions for later use in pause removal
         self.real_segment_positions = real_segment_positions
-        
-        # Log information about real vs original timing
-        if real_segment_positions:
-            total_real_duration = real_segment_positions[-1]["end"] - real_segment_positions[0]["start"]
-            total_original_duration = max(s["original_end"] for s in real_segment_positions) - min(s["original_start"] for s in real_segment_positions)
-            logger.debug(f"Real segments timing: {len(real_segment_positions)} segments, "
-                        f"Real duration: {total_real_duration:.2f}s, Original duration: {total_original_duration:.2f}s")
-        
-        # Save to cache
-        if self.cache_manager.use_cache and self._plan_dependent_cache_allowed:
-            # Save the output audio
-            shutil.copy(output_path, self.cache_manager.get_cache_path(step_name) / f"{cache_key}.wav")
-        
-        # Generate track usage report
-        track_usage_stats = {}
-        for metadata in segments_metadata:
-            track_type = metadata.get("selected_track_type", "translation")
-            track_usage_stats[track_type] = track_usage_stats.get(track_type, 0) + 1
-        
-        # Log the track usage report
-        logger.debug("Voice sample track usage report:")
-        total_samples = sum(track_usage_stats.values())
-        for track_type, count in sorted(track_usage_stats.items()):
-            percentage = (count / total_samples * 100) if total_samples > 0 else 0
-            logger.debug(f"  {track_type}: {count} samples ({percentage:.1f}%)")
-        logger.debug(f"Total voice samples processed: {total_samples}")
-        
-        # Log completion summary
-        logger.info(f"Speech synthesis completed! Processed {total_segments} segments successfully.")
-        
-        # End timing
-        self.performance_tracker.end_timing("speech_synthesis")
-        
-        return output_path
-    
-    def _retry_missing_segments(
-        self,
-        segments_to_synthesize: List[Any],
-        segments_metadata: List[Dict[str, Any]],
-        tts_instance,
-        tts_system: str,
-        min_ratio: float,
-        max_ratio: float,
-        max_attempts: int = 2,
-        pool_key: Optional[tuple] = None,
-    ) -> None:
-        """Retry any segments for which the previous synthesis pass did not
-        produce an audio file. Cloud TTS backends (OmniVoice, Gemini API) can
-        silently drop segments on transient errors — one more attempt clears
-        those up and stops empty WAVs from ending up in the final track.
 
-        Only segments belonging to ``pool_key`` are retried. Passing ``None``
-        preserves legacy behaviour (retry every metadata entry regardless of
-        pool) and is only there so older callers keep working; every new call
-        site sets a pool_key so segments routed to a different TTS client are
-        never synthesised by the wrong backend.
-        """
+        if self.cache_manager.use_cache and self._plan_dependent_cache_allowed:
+            shutil.copy(output_path, cached_audio_path)
+
+        track_usage: Dict[str, int] = {}
+        for segment in segments:
+            variant = segment.get("selected_variant", "missing")
+            track_usage[variant] = track_usage.get(variant, 0) + 1
+        logger.debug("Measured TTS candidate usage: %s", track_usage)
+        self.performance_tracker.end_timing("speech_synthesis")
+        return output_path
+
+    def _tts_selection_cache_fingerprint(self, segments: List[Dict[str, Any]]) -> str:
+        payload = {
+            "selection_policy": "sequential_measured_v1",
+            "tts_prompt_prefix": self.config.get("tts_prompt_prefix"),
+            "voice_prompt": self.config.get("voice_prompt"),
+            "segments": [
+                {
+                    "start": segment.get("start"),
+                    "end": segment.get("end"),
+                    "speaker": segment.get("speaker"),
+                    "emotion": segment.get("emotion", "Neutral"),
+                    "style_prompt": segment.get("style_prompt", ""),
+                    "translation": segment.get("translation", ""),
+                    "long_translation": segment.get("long_translation", ""),
+                    "short_translation": segment.get("short_translation", ""),
+                    "very_short_translation": segment.get(
+                        "very_short_translation", ""
+                    ),
+                }
+                for segment in segments
+            ],
+        }
+        return hashlib.sha256(
+            json.dumps(
+                payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+
+    def _synthesize_measured_candidates(
+        self,
+        metadata: Dict[str, Any],
+        policy,
+    ) -> None:
+        segment = metadata["segment"]
+        target_duration = float(segment["_timing_available_window"])
+        generated: List[Dict[str, Any]] = []
+        tried_texts: set[str] = set()
+        try:
+            Path(metadata["final_path"]).unlink()
+        except OSError:
+            pass
+
+        def generate(variant: str, attempts: int = 1) -> Optional[Dict[str, Any]]:
+            value = segment.get(variant, "")
+            text = value.strip() if isinstance(value, str) else ""
+            if not text or text in tried_texts:
+                return None
+            tried_texts.add(text)
+            candidate = self._load_or_synthesize_candidate(
+                metadata,
+                variant=variant,
+                text=text,
+                attempts=attempts,
+            )
+            if candidate is not None:
+                generated.append(candidate)
+            return candidate
+
+        normal = generate("translation", attempts=3)
+        if normal is None:
+            segment["synthesized_speech_len"] = 0.0
+            segment["synthesized_speech_file"] = None
+            segment["selected_variant"] = "missing"
+            return
+
+        if normal["duration"] < target_duration:
+            generate("long_translation")
+        elif normal["duration"] > target_duration + policy.max_overflow:
+            short = generate("short_translation")
+            if (
+                short is not None
+                and short["duration"] > target_duration + policy.max_overflow
+            ):
+                generate("very_short_translation")
+
+        winner = generated[0]
+        best_difference = abs(winner["duration"] - target_duration)
+        for candidate in generated[1:]:
+            difference = abs(candidate["duration"] - target_duration)
+            if difference + 1e-9 < best_difference:
+                winner = candidate
+                best_difference = difference
+        final_path = metadata["final_path"]
+        shutil.copy(winner["path"], final_path)
+        segment["_tts_cache_contract"] = "anchor_raw_v2"
+        segment["synthesized_speech_len"] = winner["duration"]
+        segment["synthesized_speech_file"] = final_path
+        segment["synthesized_text"] = winner["text"]
+        segment["selected_variant"] = winner["variant"]
+
+        for candidate in generated:
+            try:
+                Path(candidate["path"]).unlink()
+            except OSError:
+                pass
+
+    def _load_or_synthesize_candidate(
+        self,
+        metadata: Dict[str, Any],
+        *,
+        variant: str,
+        text: str,
+        attempts: int,
+    ) -> Optional[Dict[str, Any]]:
         from tts.models import TTSSegmentData
 
-        # Build a mapping from output_path back to the original segment_data so
-        # we can rerun exactly the same request.
-        segment_data_by_path = {s.output_path: s for s in segments_to_synthesize if s.output_path}
+        segment = metadata["segment"]
+        index = metadata["index"]
+        candidate_path = str(
+            self.audio_chunks_dir / f"candidate_{index}_{variant}.wav"
+        )
+        cache_key = self._raw_tts_segment_cache_key(
+            base_cache_prefix=metadata["base_cache_prefix"],
+            tts_system=metadata["tts_system"],
+            segment=segment,
+            speaker=segment["speaker"],
+            translation=text,
+            style_prompt=metadata["style_prompt"],
+            reference_audio_path=metadata["base_args"].get("reference_audio_path"),
+            reference_mode=metadata["base_args"].get("reference_mode"),
+            reference_text=metadata["base_args"].get("reference_text"),
+            client_pool_settings=metadata["pool_key"],
+            legacy_index=segment.get("_timing_original_index", index),
+            emotion=segment.get("emotion", "Neutral"),
+            tts_prompt_prefix=self.config.get("tts_prompt_prefix"),
+            voice_prompt=self.config.get("voice_prompt"),
+        )
+        cache_path = metadata["segment_cache_dir"] / f"{cache_key}.wav"
 
-        for attempt in range(max_attempts):
-            still_missing: List[Dict[str, Any]] = []
-            for metadata in segments_metadata:
-                if pool_key is not None and metadata.get("pool_key") != pool_key:
+        if (
+            self.cache_manager.use_cache
+            and self._plan_dependent_cache_allowed
+            and cache_path.exists()
+        ):
+            try:
+                shutil.copy(cache_path, candidate_path)
+                duration = self._measure_raw_tts_for_timing(candidate_path, index)
+                if duration > 0:
+                    return {
+                        "variant": variant,
+                        "text": text,
+                        "path": candidate_path,
+                        "duration": duration,
+                    }
+            except Exception as exc:
+                logger.warning("Could not reuse cached TTS candidate %s: %s", variant, exc)
+            try:
+                cache_path.unlink()
+                self._segment_cache_metadata_path(cache_path).unlink()
+            except OSError:
+                pass
+
+        segment_data = TTSSegmentData(
+            **{
+                **metadata["base_args"],
+                "text": text,
+                "output_path": candidate_path,
+            }
+        )
+        last_error = None
+        for attempt in range(max(1, attempts)):
+            try:
+                Path(candidate_path).unlink()
+            except OSError:
+                pass
+            try:
+                metadata["tts_instance"].synthesize(
+                    segments_data=[segment_data],
+                    language=self.config.get("target_language"),
+                )
+                if not os.path.exists(candidate_path):
                     continue
-                segment_dict = metadata["segment_dict"]
-                output_path = metadata["output_path"]
-                if segment_dict.get("synthesized_speech_file") and os.path.exists(output_path):
-                    try:
-                        if len(AudioSegment.from_file(output_path)) > 0:
-                            continue
-                    except Exception:
-                        pass
-                still_missing.append(metadata)
-
-            if not still_missing:
-                return
-
-            logger.warning(
-                f"Retrying {len(still_missing)} missing segment(s) with {tts_system} (attempt {attempt + 1}/{max_attempts})"
-            )
-
-            for metadata in still_missing:
-                segment_dict = metadata["segment_dict"]
-                output_path = metadata["output_path"]
-                segment_data = segment_data_by_path.get(output_path)
-                if segment_data is None:
-                    text = metadata.get("chosen_text") or segment_dict.get("translation", "")
-                    segment_data = TTSSegmentData(**{**metadata.get("segment_data_args", {}), "text": text, "output_path": output_path})
-
-                # Ensure the reference audio still resolves; fall back to the
-                # per-speaker wav in speakers_audio_dir when the previous
-                # attempt lost it (e.g. temp segment ref clip removed).
-                if not segment_data.reference_audio_path:
-                    speaker_ref = self.speakers_audio_dir / f"{segment_dict.get('speaker', '')}.wav"
-                    if speaker_ref.is_file():
-                        segment_data.reference_audio_path = str(speaker_ref)
-
-                try:
-                    tts_instance.synthesize(
-                        segments_data=[segment_data],
-                        language=self.config.get('target_language'),
-                    )
-                except Exception as exc:
-                    logger.error(
-                        f"Retry {attempt + 1}: segment {metadata['index']+1} ({tts_system}) failed again: {exc}"
-                    )
+                duration = self._measure_raw_tts_for_timing(candidate_path, index)
+                if duration <= 0:
                     continue
-
-                if os.path.exists(output_path):
-                    try:
-                        audio_info = AudioSegment.from_file(output_path)
-                    except Exception as exc:
-                        logger.error(
-                            f"Retry {attempt + 1}: segment {metadata['index']+1} produced unreadable audio: {exc}"
-                        )
-                        continue
-                    if len(audio_info) <= 0:
-                        try:
-                            os.remove(output_path)
-                        except OSError:
-                            pass
-                        continue
-
-                    segment_dict['_tts_cache_contract'] = 'anchor_raw_v2'
-                    segment_dict['synthesized_speech_len'] = self._measure_raw_tts_for_timing(
-                        output_path,
-                        metadata['index'],
+                if self.cache_manager.use_cache and self._plan_dependent_cache_allowed:
+                    self._cache_raw_tts_segment(
+                        candidate_path,
+                        cache_path,
+                        synthesized_text=text,
                     )
-                    if segment_dict['synthesized_speech_len'] <= 0:
-                        segment_dict['synthesized_speech_file'] = None
-                        continue
-                    segment_dict['synthesized_speech_file'] = output_path
-                    segment_dict['synthesized_text'] = metadata.get('chosen_text', segment_dict.get('translation', ''))
-                    logger.info(
-                        f"Retry {attempt + 1}: recovered segment {metadata['index']+1} ({tts_system})"
-                    )
-                    if self.cache_manager.use_cache and getattr(self, "_plan_dependent_cache_allowed", True) and segment_dict['synthesized_speech_len'] > 0:
-                        try:
-                            self._cache_raw_tts_segment(
-                                output_path,
-                                metadata["cache_path"],
-                                synthesized_text=segment_dict['synthesized_text'],
-                            )
-                        except Exception:
-                            pass
-
-        # Log any that are still missing after all retries (scoped to this pool).
-        missing_indexes = [
-            metadata["index"] + 1
-            for metadata in segments_metadata
-            if (pool_key is None or metadata.get("pool_key") == pool_key)
-            and not metadata["segment_dict"].get("synthesized_speech_file")
-        ]
-        if missing_indexes:
+                return {
+                    "variant": variant,
+                    "text": text,
+                    "path": candidate_path,
+                    "duration": duration,
+                }
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "TTS candidate %s failed for segment %d (attempt %d/%d): %s",
+                    variant,
+                    index,
+                    attempt + 1,
+                    max(1, attempts),
+                    exc,
+                )
+        if last_error is not None:
             logger.error(
-                f"Segments still missing audio after {max_attempts} retries ({tts_system}): {missing_indexes}. "
-                "Use the 'Regenerate selected row' button in the Dubbing Texts tab to retry individually."
+                "No usable %s candidate for segment %d: %s",
+                variant,
+                index,
+                last_error,
             )
+        try:
+            Path(candidate_path).unlink()
+        except OSError:
+            pass
+        return None
 
     def resynthesize_one_segment(
         self,
@@ -3474,30 +3156,30 @@ class SmartDubbing:
         reference_text: Optional[str] = None,
         client_pool_settings: Any = None,
         legacy_index: Any = 0,
+        emotion: Optional[str] = "Neutral",
+        tts_prompt_prefix: Optional[str] = None,
+        voice_prompt: Any = None,
     ) -> str:
         """Build a raw-unit cache identity without timing-policy settings."""
         translation_hash = hashlib.md5(translation.encode()).hexdigest()[:8]
-        variant_payload = {
-            "selection_policy": "text_fit_v2",
-            "available_window": round(
-                float(segment.get("_timing_available_window", 0.0)), 3
-            ),
-            "translation": translation,
-            "very_short_translation": segment.get("very_short_translation", ""),
-            "short_translation": segment.get("short_translation", ""),
-            "long_translation": segment.get("long_translation", ""),
-        }
-        variant_hash = hashlib.md5(
-            json.dumps(
-                variant_payload,
-                ensure_ascii=False,
-                sort_keys=True,
+        target_duration = round(
+            float(segment.get("_timing_available_window", 0.0)), 6
+        )
+        target_hash = hashlib.md5(str(target_duration).encode()).hexdigest()[:8]
+        instruction_hash = hashlib.md5(
+            SmartDubbing._cache_fingerprint(
+                {
+                    "style_prompt": style_prompt,
+                    "emotion": emotion or "Neutral",
+                    "tts_prompt_prefix": tts_prompt_prefix,
+                    "voice_prompt": voice_prompt,
+                }
             ).encode("utf-8")
         ).hexdigest()[:8]
-        voice_prompt_hash = hashlib.md5((style_prompt or "").encode()).hexdigest()[:8]
-        ref_audio_hash = hashlib.md5(
-            str(reference_audio_path or "").encode()
-        ).hexdigest()[:8]
+        reference_identity = SmartDubbing._file_content_identity(
+            reference_audio_path
+        )
+        ref_audio_hash = hashlib.md5(reference_identity.encode()).hexdigest()[:8]
         reference_contract_hash = hashlib.md5(
             SmartDubbing._cache_fingerprint(
                 {
@@ -3512,8 +3194,9 @@ class SmartDubbing:
         semantic_plan_identity = segment.get("semantic_plan_fingerprint", "legacy")
         return (
             f"{base_cache_prefix}_{tts_system}_{semantic_plan_identity}_"
-            f"{semantic_unit_identity}_{speaker}_{translation_hash}_{variant_hash}_"
-            f"{voice_prompt_hash}_{ref_audio_hash}_{reference_contract_hash}"
+            f"{semantic_unit_identity}_{speaker}_{translation_hash}_raw_candidate_v4_"
+            f"{target_hash}_"
+            f"{instruction_hash}_{ref_audio_hash}_{reference_contract_hash}"
         )
 
     def _cache_raw_tts_segment(
@@ -3552,286 +3235,6 @@ class SmartDubbing:
             return contract
         return "legacy"
 
-    def _calculate_percentage_deviation(self, ratio: float, min_ratio_comfort: float, max_ratio_comfort: float) -> float:
-        """
-        Calculates the signed percentage deviation of a given ratio from the comfort zone.
-        
-        Args:
-            ratio: The speech ratio (original_duration / synthesized_duration).
-            min_ratio_comfort: The minimum acceptable ratio for comfort.
-            max_ratio_comfort: The maximum acceptable ratio for comfort.
-            
-        Returns:
-            0.0 if the ratio is within the comfort zone.
-            Positive value if the synthesized segment is longer than comfortable (ratio < min).
-            Negative value if the synthesized segment is shorter than comfortable (ratio > max).
-        """
-        if ratio >= min_ratio_comfort and ratio <= max_ratio_comfort:
-            return 0.0
-        elif ratio < min_ratio_comfort:
-            if min_ratio_comfort == 0:
-                return float('inf')  # Avoid division by zero
-            # Synthesized audio is longer than original → ratio is too small → positive deviation
-            return (min_ratio_comfort - ratio) / min_ratio_comfort
-        else:  # ratio > max_ratio_comfort
-            if max_ratio_comfort == 0:
-                return float('inf')  # Avoid division by zero
-            # Synthesized audio is shorter than original → ratio is too large → negative deviation
-            return -((ratio - max_ratio_comfort) / max_ratio_comfort)
-
-    def _resynthesize_segment(
-        self,
-        metadata: Dict[str, Any],
-        tts_instance,
-        min_ratio: float,
-        max_ratio: float,
-        current_ratio: Optional[float] = None,
-    ) -> None:
-        """Attempt to resynthesize a segment using alternative translations,
-        focusing on minimizing deviation from the target ratio range.
-
-        Args:
-            metadata: Metadata dictionary for the segment.
-            tts_instance: The TTS instance used for synthesis.
-            min_ratio: Minimum acceptable ratio original/actual.
-            max_ratio: Maximum acceptable ratio original/actual.
-            current_ratio: Current ratio to help prioritize alternatives.
-        """
-
-        from tts.models import TTSSegmentData
-
-        segment_dict = metadata["segment_dict"]
-        original_duration = segment_dict.get(
-            "_timing_available_window",
-            segment_dict["end"] - segment_dict["start"],
-        )
-        output_path = metadata["output_path"]
-        base_args = metadata["segment_data_args"]
-        
-        # Log resynthesis attempt
-        logger.info(f"Resynthesizing segment {metadata['index']+1} (Speaker: {segment_dict['speaker']}) for better duration matching...")
-
-        # Decide search direction based on how the current ratio deviates
-        if current_ratio is None and segment_dict.get("synthesized_speech_len", 0) > 0:
-            current_ratio = original_duration / max(segment_dict["synthesized_speech_len"], 1e-6)
-
-        if current_ratio is not None:
-            if current_ratio < min_ratio:
-                # synthesized audio longer than original – prioritize shorter variants
-                candidate_keys = ["very_short_translation", "short_translation", "translation", "long_translation"]
-            elif current_ratio > max_ratio:
-                # synthesized audio shorter than original – prioritize longer variants
-                candidate_keys = ["long_translation", "translation", "short_translation", "very_short_translation"]
-            else:
-                candidate_keys = ["very_short_translation", "short_translation", "translation", "long_translation"]
-        else:
-            candidate_keys = ["very_short_translation", "short_translation", "translation", "long_translation"]
-
-        # Calculate current deviation to ensure we only accept improvements
-        current_deviation = float('inf')
-        if current_ratio is not None:
-            current_deviation = self._calculate_percentage_deviation(current_ratio, min_ratio, max_ratio)
-            logger.debug(f"Current ratio: {current_ratio:.2f}, current deviation: {current_deviation:.2%}")
-        
-        best_alternative = None
-        best_deviation_from_range = current_deviation  # Start with current deviation as baseline
-        best_ratio = None
-        best_key = None
-
-        # Preference for shorter audio when pause removal is enabled
-        prefer_shorter = self.config.get('remove_pauses', True)
-        def deviation_key(dev: float) -> tuple:
-            # Primary: minimal absolute deviation; Secondary: prefer negative when enabled
-            return (abs(dev), 0 if (prefer_shorter and dev < 0) else 1)
-
-        # Keep track of already tried texts to avoid duplicate synthesis
-        tried_texts = {metadata["chosen_text"]}
-
-        # Try all alternatives and find the one with minimum deviation from target range
-        for key in candidate_keys:
-            if key not in segment_dict:
-                continue
-
-            alt_text = segment_dict[key]
-            # Skip already used text or duplicate text
-            if alt_text in tried_texts:
-                continue
-            
-            # Add this text to tried set
-            tried_texts.add(alt_text)
-
-            # Create temporary output path for this alternative
-            temp_output_path = f"{output_path}.temp_{key}"
-            new_segment_data = TTSSegmentData(**{**base_args, "text": alt_text, "output_path": temp_output_path})
-
-            try:
-                tts_instance.synthesize(
-                    segments_data=[new_segment_data],
-                    language=self.config.get('target_language')
-                )
-
-                if not os.path.exists(temp_output_path):
-                    continue
-
-                audio_info = AudioSegment.from_file(temp_output_path)
-                actual_duration = self._measure_raw_tts_for_timing(
-                    temp_output_path,
-                    metadata['index'],
-                )
-
-                if actual_duration == 0:
-                    os.remove(temp_output_path)
-                    continue
-
-                ratio = original_duration / actual_duration
-
-                # Calculate deviation from target range
-                deviation_from_range = self._calculate_percentage_deviation(ratio, min_ratio, max_ratio)
-                
-                logger.debug(f"Alternative '{key}': ratio={ratio:.2f}, deviation_from_range={deviation_from_range:.2%}")
-
-                # Check if this is the best alternative so far (consider signed deviation preference)
-                if deviation_key(deviation_from_range) < deviation_key(best_deviation_from_range):
-                    # Clean up previous best alternative if exists
-                    if best_alternative and os.path.exists(best_alternative):
-                        os.remove(best_alternative)
-                    
-                    best_alternative = temp_output_path
-                    best_deviation_from_range = deviation_from_range
-                    best_ratio = ratio
-                    best_key = key
-                    
-                    logger.debug(f"New best alternative: '{key}' with deviation {deviation_from_range:.2%}")
-                else:
-                    # Clean up this alternative since it's not the best
-                    os.remove(temp_output_path)
-
-            except Exception as e:
-                logger.error(f"Alternative synthesis failed for segment {metadata['index']+1} with '{key}': {e}")
-                if os.path.exists(temp_output_path):
-                    os.remove(temp_output_path)
-
-        # If deviation remains large (>15%), try LLM-based text length adjustment
-        try:
-            LLM_DEVIATION_THRESHOLD = 0.15
-            # Compute absolute deviation key for comparison
-            if self.translator and self.translator.is_available() and deviation_key(current_deviation) > deviation_key(0.0) and abs(current_deviation) > LLM_DEVIATION_THRESHOLD:
-                baseline_text = metadata.get("chosen_text") or segment_dict.get("translation", "")
-                if baseline_text:
-                    # Aim for center of comfort zone (prefer near 1.0), compute duration factor
-                    target_ratio = 1.0
-                    actual_duration = segment_dict.get("synthesized_speech_len", 0) or 1e-6
-                    desired_duration = original_duration / max(target_ratio, 1e-6)
-                    duration_factor = max(0.2, min(2.0, desired_duration / max(actual_duration, 1e-6)))
-
-                    # Ask LLM to adjust text length
-                    adjusted_text = self.translator.adjust_segment_text_length(
-                        original_text=baseline_text,
-                        source_language=self.config.get('source_language'),
-                        target_language=self.config.get('target_language'),
-                        desired_ratio=duration_factor,
-                        target_char_count=int(len(baseline_text) * duration_factor),
-                        context_info=None,
-                        max_attempts=2,
-                    )
-
-                    if adjusted_text and adjusted_text.strip() and adjusted_text.strip() != baseline_text.strip():
-                        # Estimate duration and synthesize to temp file
-                        temp_output_path = f"{output_path}.temp_llm_adjusted"
-                        from tts.models import TTSSegmentData
-                        new_segment_data = TTSSegmentData(**{**base_args, "text": adjusted_text, "output_path": temp_output_path})
-
-                        try:
-                            tts_instance.synthesize(
-                                segments_data=[new_segment_data],
-                                language=self.config.get('target_language')
-                            )
-
-                            if os.path.exists(temp_output_path):
-                                audio_info = AudioSegment.from_file(temp_output_path)
-                                actual_duration_llm = self._measure_raw_tts_for_timing(
-                                    temp_output_path,
-                                    metadata['index'],
-                                )
-                                if actual_duration_llm > 0:
-                                    ratio_llm = original_duration / actual_duration_llm
-                                    deviation_llm = self._calculate_percentage_deviation(ratio_llm, min_ratio, max_ratio)
-                                    logger.info(f"LLM-adjusted alternative: ratio={ratio_llm:.2f}, deviation_from_range={deviation_llm:.2%}")
-
-                                    if deviation_key(deviation_llm) < deviation_key(best_deviation_from_range):
-                                        # Clean up previous best alternative if exists
-                                        if best_alternative and os.path.exists(best_alternative):
-                                            os.remove(best_alternative)
-
-                                        best_alternative = temp_output_path
-                                        best_deviation_from_range = deviation_llm
-                                        best_ratio = ratio_llm
-                                        best_key = "llm_adjusted"
-                                        # Also update chosen text on success path later
-                                        metadata["_llm_adjusted_text"] = adjusted_text
-                                    else:
-                                        # Not better; remove temp
-                                        os.remove(temp_output_path)
-                        except Exception as e:
-                            logger.error(f"LLM-adjusted synthesis failed for segment {metadata['index']+1}: {e}")
-                            if os.path.exists(temp_output_path):
-                                try:
-                                    os.remove(temp_output_path)
-                                except Exception:
-                                    pass
-        except Exception as e:
-            logger.warning(f"LLM adjustment step encountered an error: {e}")
-
-        # Use the best alternative found only if it's actually better than current
-        if best_alternative and os.path.exists(best_alternative) and deviation_key(best_deviation_from_range) < deviation_key(current_deviation):
-            # Move the best alternative to the final output path
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            shutil.move(best_alternative, output_path)
-            
-            # Update segment data
-            audio_info = AudioSegment.from_file(output_path)
-            segment_dict['_tts_cache_contract'] = 'anchor_raw_v2'
-            segment_dict["synthesized_speech_len"] = self._measure_raw_tts_for_timing(
-                output_path,
-                metadata['index'],
-            )
-            segment_dict["synthesized_speech_file"] = output_path
-            if best_key == "llm_adjusted":
-                # Persist the adjusted text
-                segment_dict["translation"] = metadata.get("_llm_adjusted_text", segment_dict.get("translation"))
-                metadata["chosen_text"] = segment_dict["translation"]
-            else:
-                metadata["chosen_text"] = segment_dict[best_key]
-            metadata["selected_track_type"] = best_key  # Update the selected track type
-            segment_dict["synthesized_text"] = metadata["chosen_text"]
-
-            # Update cache if needed
-            if self.cache_manager.use_cache and getattr(self, "_plan_dependent_cache_allowed", True) and len(audio_info) > 0:
-                try:
-                    self._cache_raw_tts_segment(
-                        output_path,
-                        metadata["cache_path"],
-                        synthesized_text=segment_dict["synthesized_text"],
-                    )
-                except Exception:
-                    pass
-
-            logger.info(f"Resynthesis successful for segment {metadata['index']+1} using '{best_key}' "
-                        f"(improved from {current_deviation:.2%} to {best_deviation_from_range:.2%} deviation)")
-        else:
-            # Clean up the best alternative if it exists but isn't better
-            if best_alternative and os.path.exists(best_alternative):
-                os.remove(best_alternative)
-            
-            if current_ratio is not None:
-                logger.info(f"No alternative found that improves deviation for segment {metadata['index']+1} "
-                           f"(current: {current_deviation:.2%}). Keeping original synthesis.")
-            else:
-                logger.warning(f"No suitable alternative translation could improve duration for segment {metadata['index']+1}.")
-
-
-    
     def _adjust_and_combine_audio_grouped_legacy(self, segments: List[Dict]) -> Tuple[AudioSegment, List[Dict]]:
         """
         Adjusts timing and combines audio segments with optimizations for speaker continuity.
@@ -4128,8 +3531,8 @@ class SmartDubbing:
         planned = plan_anchor_windows(segments, source_duration)
         for item in planned:
             item.segment["_timing_original_index"] = item.original_index
-            item.segment["_timing_next_anchor"] = item.next_start
             item.segment["_timing_available_window"] = item.available_window
+            item.segment.pop("_timing_next_anchor", None)
         segments[:] = [item.segment for item in planned]
 
         source_duration_ms = max(0, round(float(source_duration) * 1000))
@@ -4149,7 +3552,7 @@ class SmartDubbing:
             segment = item.segment
             segment_file = segment.get("synthesized_speech_file")
             if not segment_file:
-                candidate_path = self.audio_chunks_dir / f"{item.original_index}.wav"
+                candidate_path = self.audio_chunks_dir / f"{chronological_index}.wav"
                 segment_file = str(candidate_path) if candidate_path.exists() else None
 
             raw_duration = None
@@ -4213,7 +3616,7 @@ class SmartDubbing:
             timing = calculate_segment_timing(
                 start=item.start,
                 end=item.end,
-                next_start=item.next_start,
+                next_start=None,
                 source_duration=float(source_duration),
                 audio_duration=trimmed_duration,
                 policy=policy,
@@ -4294,7 +3697,6 @@ class SmartDubbing:
                     "speaker": segment.get("speaker", "UNKNOWN"),
                     "recognized_start": item.start,
                     "recognized_end": item.end,
-                    "next_anchor_start": "" if item.next_start is None else item.next_start,
                     "available_window": item.available_window,
                     "raw_tts_duration": "" if raw_duration is None else raw_duration,
                     "trimmed_tts_duration": trimmed_duration,
@@ -4310,6 +3712,7 @@ class SmartDubbing:
                     "trim_error": trim_error or "",
                     "tempo_error": tempo_error or "",
                     "cache_contract": segment.get("_tts_cache_contract", "legacy"),
+                    "selected_variant": segment.get("selected_variant", ""),
                     "semantic_unit_id": segment.get("semantic_unit_id", ""),
                     "semantic_plan_fingerprint": segment.get("semantic_plan_fingerprint", ""),
                     "continuation_id": segment.get("continuation_id", ""),
