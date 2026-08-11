@@ -1503,7 +1503,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                 with gr.Row():
                     tts_system = gr.Dropdown(
                         label="TTS system",
-                        choices=["coqui", "xtts", "openai", "f5_tts", "gemini", "bextts", "omnivoice"],
+                        choices=["coqui", "xtts", "openai", "f5_tts", "gemini", "bextts", "omnivoice", "higgs"],
                         value=defaults.get("tts_system", "coqui"),
                         info="Default backend used when a voice profile doesn't set one.",
                     )
@@ -1587,14 +1587,21 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         "  model: gemini-2.5-flash-preview-tts\n"
                         "  voice_name: Kore\n"
                         "  style_prompt: calm, friendly\n"
+                        '"*":\n'
+                        "  tts_system: higgs\n"
+                        "  reference_mode: segment\n"
+                        "  params:\n"
+                        "    space_id: archivartaunik/higgs-audio-v3-tts\n"
+                        "    api_name: /synthesize\n"
+                        "    temperature: 0.7\n"
+                        "    top_p: 0.95\n"
+                        "    top_k: 50\n"
+                        "    max_new_tokens: 2048\n"
+                        "    seed: -1\n"
                         "SPEAKER_01:\n"
-                        "  tts_system: omnivoice\n"
+                        "  reference_mode: configured\n"
                         "  reference_audio: D:/path/to/reference.wav\n"
                         "  reference_text: sample text\n"
-                        "  params:\n"
-                        "    num_steps: 32\n"
-                        '"*":\n'
-                        "  tts_system: omnivoice\n"
                     ),
                     info=(
                         "Each key is a diarization speaker ID (SPEAKER_00, SPEAKER_01, …). "

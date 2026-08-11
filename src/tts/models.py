@@ -12,6 +12,8 @@ class TTSSegmentData(BaseModel):
     style_prompt: Optional[str] = Field(None, description="Specific style prompt for this segment, overriding any global speaker-to-style_prompt mappings.")
     reference_audio_path: Optional[str] = Field(None, description="Path to a reference audio file for voice cloning for this specific segment/speaker.")
     reference_text: Optional[str] = Field(None, description="Text corresponding to the reference_audio_path, if required by the TTS system.")
+    reference_mode: Optional[str] = Field(None, description="Explicit source mode for voice-cloning reference audio.")
+    segment_index: int = Field(0, description="Original zero-based segment index.")
     output_path: Optional[str] = Field(None, description="Path to save the synthesized audio for this specific segment.")
 
     class Config:

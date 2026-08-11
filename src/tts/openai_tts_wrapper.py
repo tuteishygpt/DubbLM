@@ -60,6 +60,8 @@ class OpenAITTSWrapper(TTSInterface):
     """
     OpenAI TTS wrapper with voice matching capabilities.
     """
+
+    provider_name = "openai"
     
     def __init__(
         self,
@@ -410,6 +412,7 @@ class OpenAITTSWrapper(TTSInterface):
         if not segments_data:
             logger.warning("Warning: No segments provided to OpenAITTSWrapper.synthesize.")
             return []
+        self.require_valid_segments(segments_data)
 
         assigned_voices: List[str] = [] # Keep track of voices assigned to speakers
 

@@ -92,6 +92,9 @@ class F5TTSWrapper(TTSInterface):
     Uses per-segment reference audio and text.
     Includes logic to create reference samples.
     """
+
+    provider_name = "f5"
+    reference_capability = "required"
     # Class-level cache for transcribed reference audio texts to avoid re-transcribing
     _transcribed_ref_text_cache: Dict[str, str] = {}
     
@@ -316,40 +319,16 @@ class F5TTSWrapper(TTSInterface):
         if not segments_data:
             logger.warning("Warning: No segments provided to F5TTSWrapper.synthesize.")
             return []
+        self.require_valid_segments(segments_data)
 
         alignments = []
-        # Ensure dubbing_tool provides these if it wants per-segment ref audio creation by F5 wrapper
-        original_full_audio_path_from_kwargs = kwargs.get("original_full_audio_path")
-        speaker_timestamps_from_kwargs = kwargs.get("speaker_timestamps_map") # Dict[speaker_id, List[Tuple[float,float]]]
-
         try:
             for i, segment in enumerate(segments_data):
                 temp_segment_file_path = self._create_temp_file(suffix=f"_seg_{i}_{segment.speaker}.wav")
                 logger.debug(f"F5: Synthesizing segment {i+1}/{len(segments_data)} for speaker '{segment.speaker}'")
                 
-                current_segment_data = segment
-                # If reference audio/text are not in segment, try to create/fetch them
-                if not current_segment_data.reference_audio_path or not current_segment_data.reference_text:
-                    if original_full_audio_path_from_kwargs and speaker_timestamps_from_kwargs and segment.speaker in speaker_timestamps_from_kwargs:
-                        logger.debug(f"  F5: Ref audio/text missing for segment {i+1} (speaker {segment.speaker}). Attempting to create.")
-                        ref_audio, ref_text = self.create_reference_sample(
-                            speaker_id=segment.speaker,
-                            original_full_audio_path=original_full_audio_path_from_kwargs,
-                            speaker_segments_timestamps=speaker_timestamps_from_kwargs[segment.speaker]
-                        )
-                        # Update the segment data model for this call if ref created. 
-                        # This is a mutable update to a Pydantic model field, which is fine.
-                        if ref_audio and ref_text:
-                            current_segment_data.reference_audio_path = ref_audio
-                            current_segment_data.reference_text = ref_text
-                        else:
-                            logger.warning(f"  F5: Failed to create reference for segment of speaker {segment.speaker}. Synthesis may fail or be poor.")
-                    else:
-                        logger.warning(f"  F5: Ref audio/text missing for seg {i+1} ({segment.speaker}), and insufficient data to create it. Needs reference_audio_path and reference_text in TTSSegmentData.")
-                        # Allow _synthesize_single_segment to raise error if still missing critical refs
-
                 try:
-                    self._synthesize_single_segment(current_segment_data, temp_segment_file_path, language)
+                    self._synthesize_single_segment(segment, temp_segment_file_path, language)
                     
                     # Get duration of the synthesized audio
                     audio_segment = AudioSegment.from_wav(temp_segment_file_path)

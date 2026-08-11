@@ -65,6 +65,9 @@ class XTTSLocalWrapper(TTSInterface):
     - get_conditioning_latents(...) + inference(...)
     """
 
+    provider_name = "xtts"
+    reference_capability = "required"
+
     def __init__(
         self,
         repo_id: str = "archivartaunik/BE_XTTS_V2_10ep250k",
@@ -243,22 +246,7 @@ class XTTSLocalWrapper(TTSInterface):
         return text
 
     def _resolve_reference_audio(self, segment: TTSSegmentData) -> Optional[str]:
-        candidates = [
-            segment.reference_audio_path,
-            self.voice_mapping.get(segment.speaker) if segment.speaker else None,
-            self.default_voice_path,
-        ]
-
-        for path in candidates:
-            if path and os.path.exists(path):
-                return path
-            if path:
-                logger.debug(
-                    "XTTS: reference audio '%s' for speaker '%s' was not found.",
-                    path,
-                    segment.speaker,
-                )
-        return None
+        return segment.reference_audio_path
 
     def _get_conditioning_latents(self, reference_audio: str) -> Optional[_ConditioningLatents]:
         """Поўны аналаг прыкладу get_conditioning_latents(...)."""
@@ -392,6 +380,7 @@ class XTTSLocalWrapper(TTSInterface):
         if not segments_data:
             logger.warning("XTTS: no segments provided for synthesis.")
             return []
+        self.require_valid_segments(segments_data)
 
         alignments: List[SegmentAlignment] = []
 

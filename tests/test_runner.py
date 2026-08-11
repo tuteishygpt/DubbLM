@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from pydub import AudioSegment
+import pytest
 
 import dubbing.core.config as config_module
 import dubbing.core.runner as runner
@@ -11,6 +12,7 @@ from dubbing.core.smart_dubbing import (
     SmartDubbing,
 )
 from dubbing.core.runner import build_config_from_overrides, run_dubbing_job
+from dubbing.core.voice_profiles import VoiceProfile
 
 
 def _patch_projects_root(monkeypatch, tmp_path):
@@ -699,24 +701,36 @@ def test_segment_reference_clip_uses_segment_transcription_as_reference_text(tmp
     assert returned_audio is original_audio
 
 
-def test_manual_speaker_reference_mapping_overrides_auto_segment_reference(tmp_path):
+def test_configured_reference_mode_does_not_fallback_when_file_is_missing(tmp_path):
     dubber = SmartDubbing.__new__(SmartDubbing)
-    dubber.config = {
-        "reference_audio_mapping": {"SPEAKER_00": "D:/voices/manual.wav"},
-        "reference_text_mapping": {"SPEAKER_00": "Manual reference text"},
-    }
+    dubber.speakers_audio_dir = tmp_path / "speakers_audio"
+    dubber.speakers_audio_dir.mkdir()
+    (dubber.speakers_audio_dir / "SPEAKER_00.wav").write_bytes(b"fallback")
+    profile = VoiceProfile(
+        tts_system="higgs",
+        reference_mode="configured",
+        reference_audio=str(tmp_path / "missing.wav"),
+        reference_text="Manual reference text",
+    )
 
     base_args = {
         "speaker": "SPEAKER_00",
         "text": "Translated text",
-        "reference_audio_path": str(tmp_path / "auto.wav"),
-        "reference_text": "Auto reference text",
+        "reference_audio_path": None,
+        "reference_text": None,
     }
 
-    updated_args = dubber._apply_configured_reference_mapping(base_args, "SPEAKER_00")
-
-    assert updated_args["reference_audio_path"] == "D:/voices/manual.wav"
-    assert updated_args["reference_text"] == "Manual reference text"
+    with pytest.raises(ValueError, match="reference file does not exist"):
+        dubber._resolve_segment_reference(
+            tts_segment_data_args=base_args,
+            segment_dict={"start": 0.0, "end": 2.0, "text": "Original"},
+            profile=profile,
+            provider_capability="required",
+            speaker="SPEAKER_00",
+            segment_index=0,
+            original_audio_segment=AudioSegment.silent(duration=2000),
+            segment_reference_min_duration=1.0,
+        )
 
 
 def test_adjust_and_combine_audio_grouped_handles_none_synthesized_speech_file(tmp_path):
@@ -744,14 +758,8 @@ def test_adjust_and_combine_audio_grouped_handles_none_synthesized_speech_file(t
     assert len(positions) == 1
 
 
-def test_segment_reference_clip_takes_priority_over_speaker_wav_and_keeps_matching_text(tmp_path):
+def test_segment_reference_mode_exports_exact_clip_and_keeps_matching_text(tmp_path):
     dubber = SmartDubbing.__new__(SmartDubbing)
-    dubber.config = {
-        "reference_audio_mapping": {},
-        "reference_text_mapping": {},
-    }
-    dubber.reference_audio_mapping = {}
-    dubber.reference_text_mapping = {}
     dubber.speakers_audio_dir = tmp_path / "speakers_audio"
     dubber.speakers_audio_dir.mkdir(parents=True, exist_ok=True)
     speaker_wav = dubber.speakers_audio_dir / "SPEAKER_00.wav"
@@ -772,14 +780,15 @@ def test_segment_reference_clip_takes_priority_over_speaker_wav_and_keeps_matchi
     }
     original_audio = AudioSegment.silent(duration=2000)
 
-    updated_args, returned_audio = dubber._apply_reference_fallbacks(
+    updated_args, returned_audio = dubber._resolve_segment_reference(
         tts_segment_data_args=base_args,
         segment_dict=segment_dict,
+        profile=VoiceProfile(tts_system="higgs", reference_mode="segment"),
+        provider_capability="required",
         speaker="SPEAKER_00",
         segment_index=0,
         original_audio_segment=original_audio,
         segment_reference_min_duration=1.0,
-        segment_reference_min_duration_ms=1000,
     )
 
     assert updated_args["reference_audio_path"] != str(speaker_wav)
@@ -787,6 +796,48 @@ def test_segment_reference_clip_takes_priority_over_speaker_wav_and_keeps_matchi
     assert Path(updated_args["reference_audio_path"]).name == "SPEAKER_00_0.wav"
     assert updated_args["reference_text"] == "Recognized original speech"
     assert returned_audio is original_audio
+
+
+def test_none_and_speaker_reference_modes_use_only_their_configured_source(tmp_path):
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.speakers_audio_dir = tmp_path / "speakers_audio"
+    dubber.speakers_audio_dir.mkdir()
+    speaker_wav = dubber.speakers_audio_dir / "SPEAKER_00.wav"
+    speaker_wav.write_bytes(b"speaker")
+    base_args = {
+        "speaker": "SPEAKER_00",
+        "text": "Translated",
+        "reference_audio_path": "stale.wav",
+        "reference_text": "stale",
+    }
+
+    none_args, _ = dubber._resolve_segment_reference(
+        tts_segment_data_args=dict(base_args),
+        segment_dict={"start": 0.0, "end": 2.0, "text": "Original"},
+        profile=VoiceProfile(tts_system="bextts", reference_mode="none"),
+        provider_capability="optional",
+        speaker="SPEAKER_00",
+        segment_index=0,
+        original_audio_segment=None,
+        segment_reference_min_duration=1.0,
+    )
+    speaker_args, _ = dubber._resolve_segment_reference(
+        tts_segment_data_args=dict(base_args),
+        segment_dict={"start": 0.0, "end": 2.0, "text": "Original"},
+        profile=VoiceProfile(
+            tts_system="higgs", reference_mode="speaker", reference_text="configured"
+        ),
+        provider_capability="required",
+        speaker="SPEAKER_00",
+        segment_index=0,
+        original_audio_segment=None,
+        segment_reference_min_duration=1.0,
+    )
+
+    assert none_args["reference_audio_path"] is None
+    assert none_args["reference_text"] is None
+    assert speaker_args["reference_audio_path"] == str(speaker_wav)
+    assert speaker_args["reference_text"] == "configured"
 
 
 def test_run_pipeline_uses_separated_vocals_for_segment_references_when_keep_background_enabled(tmp_path, monkeypatch):

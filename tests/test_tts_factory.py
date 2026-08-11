@@ -33,6 +33,15 @@ def test_tts_factory_lists_omnivoice_provider():
     assert "omnivoice" in factory.TTSFactory.get_available_providers()
 
 
+def test_tts_factory_lists_higgs_without_importing_wrapper():
+    _clear_tts_modules()
+
+    factory = importlib.import_module("tts.tts_factory")
+
+    assert "higgs" in factory.TTSFactory.get_available_providers()
+    assert "tts.higgs_audio_wrapper" not in sys.modules
+
+
 def test_gemini_tts_client_uses_vertex_ai_client_configuration(monkeypatch):
     module = importlib.import_module("tts.gemini_tts_wrapper")
 

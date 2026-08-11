@@ -18,7 +18,7 @@ import torch
 import warnings
 import shutil
 import subprocess
-from typing import Dict, List, Tuple, Optional, Any, Literal, Union
+from typing import Dict, Iterable, List, Tuple, Optional, Any, Literal, Union
 from pathlib import Path
 from urllib.parse import quote
 from dotenv import load_dotenv
@@ -526,6 +526,46 @@ class SmartDubbing:
             allow_nan=False,
         )
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:20]
+
+    def _effective_tts_cache_fingerprint(self, speakers: Iterable[str]) -> str:
+        """Return the canonical effective TTS/reference configuration identity."""
+        profiles = []
+        for speaker in sorted({str(value) for value in speakers}):
+            profile = self._resolve_voice_profile(speaker)
+            provider = profile.tts_system or self._default_tts_system()
+            voice_name = profile.voice_name
+            if voice_name is None:
+                global_voice_name = self.config.get("voice_name")
+                if isinstance(global_voice_name, str):
+                    voice_name = global_voice_name
+            provider_params: Dict[str, Any] = {}
+            if provider.lower() == "omnivoice":
+                provider_params.update(
+                    {
+                        key: value
+                        for key, value in self._global_omnivoice_kwargs().items()
+                        if value is not None
+                    }
+                )
+            provider_params.update(profile.params or {})
+            profiles.append(
+                {
+                    "speaker": speaker,
+                    "provider": provider,
+                    "model": profile.model or self.config.get("tts_model"),
+                    "fallback_model": profile.fallback_model
+                    or self.config.get("tts_fallback_model"),
+                    "voice": voice_name,
+                    "style_prompt": profile.style_prompt,
+                    "reference_mode": profile.reference_mode,
+                    "reference_audio": profile.reference_audio,
+                    "reference_text": profile.reference_text,
+                    "params": dict(sorted(provider_params.items())),
+                }
+            )
+        return self._cache_fingerprint(
+            {"contract": "strict-reference-v1", "speakers": profiles}
+        )
 
     def _shared_audio_transcription_identity(self, audio_file: str) -> str:
         """Return the shared audio/transcription identity used by text caches."""
@@ -2245,7 +2285,10 @@ class SmartDubbing:
             if len(semantic_fingerprints) == 1
             else ""
         )
-        cache_key = f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}_{self.config.get('target_language')}_{self.config.get('tts_system')}_{timing_cache_fingerprint(timing_policy)}{semantic_suffix}"
+        tts_cache_fingerprint = self._effective_tts_cache_fingerprint(
+            segment["speaker"] for segment in segments
+        )
+        cache_key = f"{self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))}_{self.config.get('target_language')}_{self.config.get('tts_system')}_{timing_cache_fingerprint(timing_policy)}_{tts_cache_fingerprint}{semantic_suffix}"
         step_name = "synthesized_speech"
         
         # Final audio is stored as WAV rather than CacheManager's pickle
@@ -2267,7 +2310,17 @@ class SmartDubbing:
         
         # Create segment cache directory if needed
         segment_cache_path = self.cache_manager.get_cache_path("segment_synthesis")
-        base_cache_prefix = self.cache_manager.generate_cache_key(audio_file, self.config.get('source_language'), self.config.get('target_language'), self.config.get('whisper_model', 'large-v3'), self.config.get('start_time'), self.config.get('duration'))
+        base_cache_prefix = (
+            self.cache_manager.generate_cache_key(
+                audio_file,
+                self.config.get('source_language'),
+                self.config.get('target_language'),
+                self.config.get('whisper_model', 'large-v3'),
+                self.config.get('start_time'),
+                self.config.get('duration'),
+            )
+            + f"_{tts_cache_fingerprint}"
+        )
         
         # Check if any TTS clients are initialized
         if not self.tts_clients:
@@ -2298,8 +2351,6 @@ class SmartDubbing:
         if segment_reference_min_duration < 0.0:
             logger.warning("segment_reference_min_duration cannot be negative. Using 0 seconds instead.")
             segment_reference_min_duration = 0.0
-        segment_reference_min_duration_ms = max(int(segment_reference_min_duration * 1000), 0)
-
         # Group segments by (pool_key, profile) — profiles that share a pool_key
         # share the same TTS client and are synthesised together in one batch call.
         segments_by_pool_key: Dict[tuple, List[Tuple[int, Dict[str, Any]]]] = {}
@@ -2328,6 +2379,7 @@ class SmartDubbing:
         # First pass: Determine the best text version for each segment using estimation
         segments_to_synthesize_by_pool: Dict[tuple, List[Any]] = {k: [] for k in segments_by_pool_key.keys()}
         segments_metadata = []
+        reference_resolution_issues: List[tuple[int, str]] = []
         
         # Initialize progress tracking
         total_segments = len(segments)
@@ -2343,12 +2395,18 @@ class SmartDubbing:
             if not tts_instance:
                 logger.warning(f"Warning: TTS client for {tts_system} not available, using default")
                 tts_instance = self.default_tts
+            provider_capability = getattr(
+                tts_instance, "reference_capability", "unsupported"
+            )
 
             logger.debug(f"Processing {len(segment_list)} segments with {tts_system} TTS ...")
 
             for i, segment_dict in segment_list:
                 speaker = segment_dict["speaker"]
                 profile = self._resolve_voice_profile(speaker)
+                original_segment_index = int(
+                    segment_dict.get("_timing_original_index", i)
+                )
 
                 segment_style_override = (segment_dict.get("style_prompt") or "").strip()
                 segment_style_prompt = segment_style_override or profile.style_prompt
@@ -2378,27 +2436,33 @@ class SmartDubbing:
                     "style_prompt": segment_style_prompt,
                     "reference_audio_path": profile.reference_audio,
                     "reference_text": profile.reference_text,
+                    "reference_mode": profile.reference_mode,
+                    "segment_index": original_segment_index,
                     "voice": voice_name,
                     "speed": 1.0,
                     "target_duration": segment_dict["_timing_available_window"],
                 }
+                resolution_error: Optional[str] = None
                 try:
-                    if original_audio_segment is None:
+                    if (
+                        provider_capability in {"optional", "required"}
+                        and profile.reference_mode == "segment"
+                        and original_audio_segment is None
+                    ):
                         original_audio_segment = AudioSegment.from_file(audio_file)
 
-                    tts_segment_data_args, original_audio_segment = self._apply_reference_fallbacks(
+                    tts_segment_data_args, original_audio_segment = self._resolve_segment_reference(
                         tts_segment_data_args=tts_segment_data_args,
                         segment_dict=segment_dict,
+                        profile=profile,
+                        provider_capability=provider_capability,
                         speaker=speaker,
-                        segment_index=i,
+                        segment_index=original_segment_index,
                         original_audio_segment=original_audio_segment,
                         segment_reference_min_duration=segment_reference_min_duration,
-                        segment_reference_min_duration_ms=segment_reference_min_duration_ms,
                     )
                 except Exception as exc:
-                    logger.warning(
-                        f"Failed to resolve reference audio for segment {i+1} ({speaker}): {exc}"
-                    )
+                    resolution_error = str(exc)
 
                 # Check cache (including semantic-plan and reference identities).
                 segment_cache_key = self._raw_tts_segment_cache_key(
@@ -2409,7 +2473,10 @@ class SmartDubbing:
                     translation=segment_dict["translation"],
                     style_prompt=segment_style_prompt,
                     reference_audio_path=tts_segment_data_args.get("reference_audio_path"),
-                    legacy_index=i,
+                    reference_mode=tts_segment_data_args.get("reference_mode"),
+                    reference_text=tts_segment_data_args.get("reference_text"),
+                    client_pool_settings=pool_key,
+                    legacy_index=original_segment_index,
                 )
                 current_segment_output_path = str(self.audio_chunks_dir / f"{i}.wav")
                 os.makedirs(os.path.dirname(current_segment_output_path), exist_ok=True)
@@ -2561,6 +2628,15 @@ class SmartDubbing:
                 # Prepare segment for synthesis with chosen text
                 final_segment_data = TTSSegmentData(**{**tts_segment_data_args, "text": best_text, "output_path": current_segment_output_path})
                 segments_to_synthesize_by_pool[pool_key].append(final_segment_data)
+                if resolution_error:
+                    provider = profile.tts_system or self._default_tts_system()
+                    reference_resolution_issues.append(
+                        (
+                            original_segment_index,
+                            f"provider={provider} speaker={speaker} segment={original_segment_index} "
+                            f"mode={profile.reference_mode or '<missing>'}: {resolution_error}",
+                        )
+                    )
                 segments_metadata.append({
                     "index": i,
                     "segment_dict": segment_dict,
@@ -2573,6 +2649,12 @@ class SmartDubbing:
                     "segment_data_args": tts_segment_data_args,
                     "selected_track_type": best_track_type  # Store the selected track type
                 })
+
+        self._preflight_tts_pools(
+            segments_to_synthesize_by_pool,
+            self.tts_clients,
+            reference_resolution_issues,
+        )
 
         # Second pass: Batch synthesize all segments by pool_key
         for pool_key, segments_to_synthesize in segments_to_synthesize_by_pool.items():
@@ -2951,6 +3033,9 @@ class SmartDubbing:
             raise IndexError(f"segment_index {segment_index} out of range (0..{len(segments)-1})")
 
         segment_dict = segments[segment_index]
+        original_segment_index = int(
+            segment_dict.get("_timing_original_index", segment_index)
+        )
         speaker = segment_dict.get("speaker") or "SPEAKER_00"
 
         profile = self._resolve_voice_profile(speaker)
@@ -2983,8 +3068,10 @@ class SmartDubbing:
             "text": text_to_synthesize,
             "emotion": segment_dict.get("emotion", "Neutral"),
             "style_prompt": segment_style_prompt,
-            "reference_audio_path": None,
-            "reference_text": None,
+            "reference_audio_path": profile.reference_audio,
+            "reference_text": profile.reference_text,
+            "reference_mode": profile.reference_mode,
+            "segment_index": original_segment_index,
             "voice": voice_name,
             "speed": 1.0,
             "target_duration": segment_dict.get(
@@ -2994,33 +3081,26 @@ class SmartDubbing:
         }
 
         segment_reference_min_duration = float(self.config.get('segment_reference_min_duration', 2.0) or 0.0)
-        segment_reference_min_duration_ms = max(int(segment_reference_min_duration * 1000), 0)
-
-        original_audio_segment: Optional[AudioSegment] = None
-        try:
-            audio_source_path = None
-            if os.path.exists(self.config.get("audio_artifacts_dir", "")):
-                candidate = Path(self.config.get("audio_artifacts_dir")) / "source.wav"
-                if candidate.is_file():
-                    audio_source_path = str(candidate)
-            if audio_source_path is None:
-                audio_source_path = self.config.get('input')
-            if audio_source_path and os.path.exists(audio_source_path):
-                original_audio_segment = AudioSegment.from_file(audio_source_path)
-
-            tts_segment_data_args, original_audio_segment = self._apply_reference_fallbacks(
-                tts_segment_data_args=tts_segment_data_args,
-                segment_dict=segment_dict,
-                speaker=speaker,
-                segment_index=segment_index,
-                original_audio_segment=original_audio_segment,
-                segment_reference_min_duration=segment_reference_min_duration,
-                segment_reference_min_duration_ms=segment_reference_min_duration_ms,
-            )
-        except Exception as exc:
-            logger.warning(f"Reference resolution failed for segment {segment_index}: {exc}")
+        provider_capability = getattr(
+            tts_instance, "reference_capability", "unsupported"
+        )
+        tts_segment_data_args, _ = self._resolve_segment_reference(
+            tts_segment_data_args=tts_segment_data_args,
+            segment_dict=segment_dict,
+            profile=profile,
+            provider_capability=provider_capability,
+            speaker=speaker,
+            segment_index=original_segment_index,
+            original_audio_segment=None,
+            segment_reference_min_duration=segment_reference_min_duration,
+            for_resynthesis=True,
+        )
 
         segment_data = TTSSegmentData(**{**tts_segment_data_args, "text": text_to_synthesize, "output_path": output_path})
+        self._preflight_tts_pools(
+            {pool_key: [segment_data]},
+            {pool_key: tts_instance},
+        )
 
         # Remove any stale zero-byte file so `os.path.exists` reflects reality.
         try:
@@ -3143,77 +3223,128 @@ class SmartDubbing:
         """
         return self._resolve_voice_profile(speaker_id).tts_system or self._default_tts_system()
 
-    def _apply_configured_reference_mapping(self, tts_segment_data_args: Dict[str, Any], speaker: str) -> Dict[str, Any]:
-        """Apply manual per-speaker reference settings with priority over auto-generated references.
-
-        Prefers the unified VoiceProfile; falls back to legacy per-speaker mappings on
-        the config or the SmartDubbing instance itself (older tests set those directly).
-        """
-        profile = None
-        profiles = getattr(self, "voice_profiles", None)
-        if isinstance(profiles, dict) and profiles:
-            profile = resolve_profile(profiles, speaker)
-
-        if profile and profile.reference_audio:
-            tts_segment_data_args["reference_audio_path"] = profile.reference_audio
-        else:
-            audio_mapping = getattr(self, "reference_audio_mapping", None)
-            if audio_mapping is None:
-                audio_mapping = self.config.get("reference_audio_mapping") or {}
-            reference_audio_path = audio_mapping.get(speaker)
-            if reference_audio_path:
-                tts_segment_data_args["reference_audio_path"] = reference_audio_path
-
-        if profile and profile.reference_text:
-            tts_segment_data_args["reference_text"] = profile.reference_text
-        else:
-            text_mapping = getattr(self, "reference_text_mapping", None)
-            if text_mapping is None:
-                text_mapping = self.config.get("reference_text_mapping") or {}
-            reference_text = text_mapping.get(speaker)
-            if reference_text:
-                tts_segment_data_args["reference_text"] = reference_text
-
-        return tts_segment_data_args
-
-    def _apply_reference_fallbacks(
+    def _resolve_segment_reference(
         self,
         *,
         tts_segment_data_args: Dict[str, Any],
         segment_dict: Dict[str, Any],
+        profile: VoiceProfile,
+        provider_capability: str,
         speaker: str,
         segment_index: int,
         original_audio_segment: Optional[AudioSegment],
         segment_reference_min_duration: float,
-        segment_reference_min_duration_ms: int,
+        for_resynthesis: bool = False,
     ) -> tuple[Dict[str, Any], Optional[AudioSegment]]:
-        """Resolve reference audio/text in priority order for synthesis.
+        """Resolve exactly one configured reference source without fallbacks."""
+        mode = profile.reference_mode
+        tts_segment_data_args["reference_mode"] = mode
+        tts_segment_data_args["segment_index"] = segment_index
 
-        Order:
-        1. Explicit per-speaker mappings from config
-        2. Segment-specific clip + matching original text
-        3. Extracted per-speaker wav in speakers_audio_dir
-        4. Wrapper-level global fallback (handled by the TTS wrapper)
-        """
-        tts_segment_data_args = self._apply_configured_reference_mapping(tts_segment_data_args, speaker)
+        if provider_capability == "unsupported" or mode not in {
+            "configured", "segment", "speaker", "none"
+        }:
+            return tts_segment_data_args, original_audio_segment
 
-        if not tts_segment_data_args["reference_audio_path"]:
-            tts_segment_data_args, original_audio_segment = self._attach_segment_reference(
-                tts_segment_data_args=tts_segment_data_args,
-                segment_dict=segment_dict,
-                speaker=speaker,
-                segment_index=segment_index,
-                original_audio_segment=original_audio_segment,
-                segment_reference_min_duration=segment_reference_min_duration,
-                segment_reference_min_duration_ms=segment_reference_min_duration_ms,
+        if mode == "none":
+            tts_segment_data_args["reference_audio_path"] = None
+            tts_segment_data_args["reference_text"] = None
+            return tts_segment_data_args, original_audio_segment
+
+        if mode == "configured":
+            configured = profile.reference_audio
+            reference_path = (
+                Path(configured).expanduser().resolve(strict=False)
+                if configured
+                else None
             )
+            if reference_path is None or not reference_path.is_file():
+                raise ValueError(
+                    f"reference file does not exist: {configured or '<missing>'}"
+                )
+            tts_segment_data_args["reference_audio_path"] = str(reference_path)
+            tts_segment_data_args["reference_text"] = profile.reference_text
+            return tts_segment_data_args, original_audio_segment
 
-        if not tts_segment_data_args["reference_audio_path"]:
-            potential_ref_audio_for_speaker = str(self.speakers_audio_dir / f"{speaker}.wav")
-            if os.path.exists(potential_ref_audio_for_speaker):
-                tts_segment_data_args["reference_audio_path"] = potential_ref_audio_for_speaker
+        if mode == "speaker":
+            reference_path = self.speakers_audio_dir / f"{speaker}.wav"
+            if not reference_path.is_file():
+                raise ValueError(f"reference file does not exist: {reference_path}")
+            tts_segment_data_args["reference_audio_path"] = str(reference_path)
+            tts_segment_data_args["reference_text"] = profile.reference_text
+            return tts_segment_data_args, original_audio_segment
 
+        segment_ref_path = self.speakers_audio_dir / "segments" / f"{speaker}_{segment_index}.wav"
+        if for_resynthesis:
+            if not segment_ref_path.is_file():
+                raise ValueError(f"reference file does not exist: {segment_ref_path}")
+            tts_segment_data_args["reference_audio_path"] = str(segment_ref_path)
+            tts_segment_data_args["reference_text"] = segment_dict.get("text")
+            return tts_segment_data_args, original_audio_segment
+
+        try:
+            start = float(segment_dict["start"])
+            end = float(segment_dict["end"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("segment reference requires valid start and end timestamps") from exc
+        duration = end - start
+        if duration <= 0:
+            raise ValueError("segment reference requires end to be greater than start")
+        if duration < segment_reference_min_duration:
+            raise ValueError(
+                f"recognized segment duration {duration:.2f}s is below the configured "
+                f"minimum {segment_reference_min_duration:.2f}s"
+            )
+        if original_audio_segment is None:
+            raise ValueError("selected reference-audio source could not be loaded")
+
+        start_ms = max(int(start * 1000), 0)
+        end_ms = min(int(end * 1000), len(original_audio_segment))
+        if end_ms <= start_ms:
+            raise ValueError("segment interval is outside the selected reference-audio source")
+        segment_audio = original_audio_segment[start_ms:end_ms]
+        if len(segment_audio) < int(segment_reference_min_duration * 1000):
+            raise ValueError(
+                f"exported segment duration {len(segment_audio) / 1000.0:.2f}s is below "
+                f"the configured minimum {segment_reference_min_duration:.2f}s"
+            )
+        segment_ref_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            segment_audio.export(segment_ref_path, format="wav")
+        except Exception as exc:
+            raise ValueError(f"could not export segment reference: {exc}") from exc
+        if not segment_ref_path.is_file():
+            raise ValueError(f"reference file does not exist after export: {segment_ref_path}")
+        tts_segment_data_args["reference_audio_path"] = str(segment_ref_path)
+        tts_segment_data_args["reference_text"] = segment_dict.get("text")
         return tts_segment_data_args, original_audio_segment
+
+    @staticmethod
+    def _preflight_tts_pools(
+        segments_by_pool: Dict[tuple, List[Any]],
+        clients: Dict[tuple, Any],
+        initial_issues: Optional[List[tuple[int, str]]] = None,
+    ) -> None:
+        """Validate every active pool before the first synthesis request."""
+        issues = list(initial_issues or [])
+        resolved_error_indices = {index for index, _ in issues}
+        for pool_key, segments_data in segments_by_pool.items():
+            if not segments_data:
+                continue
+            client = clients.get(pool_key)
+            if client is None:
+                continue
+            validator = getattr(client, "validate_segments", None)
+            if validator is None:
+                continue
+            for issue in validator(segments_data):
+                if issue[0] not in resolved_error_indices:
+                    issues.append(issue)
+
+        if issues:
+            issues.sort(key=lambda item: item[0])
+            details = "\n".join(f"- {message}" for _, message in issues)
+            raise ValueError(f"TTS reference validation failed before synthesis:\n{details}")
     
     @staticmethod
     def _trim_trailing_silence(
@@ -3293,6 +3424,9 @@ class SmartDubbing:
         translation: str,
         style_prompt: str,
         reference_audio_path: Optional[str],
+        reference_mode: Optional[str] = None,
+        reference_text: Optional[str] = None,
+        client_pool_settings: Any = None,
         legacy_index: Any = 0,
     ) -> str:
         """Build a raw-unit cache identity without timing-policy settings."""
@@ -3318,12 +3452,22 @@ class SmartDubbing:
         ref_audio_hash = hashlib.md5(
             str(reference_audio_path or "").encode()
         ).hexdigest()[:8]
+        reference_contract_hash = hashlib.md5(
+            SmartDubbing._cache_fingerprint(
+                {
+                    "reference_mode": reference_mode,
+                    "reference_audio_path": reference_audio_path,
+                    "reference_text": reference_text,
+                    "client_pool_settings": client_pool_settings,
+                }
+            ).encode("utf-8")
+        ).hexdigest()[:8]
         semantic_unit_identity = segment.get("semantic_unit_id", legacy_index)
         semantic_plan_identity = segment.get("semantic_plan_fingerprint", "legacy")
         return (
             f"{base_cache_prefix}_{tts_system}_{semantic_plan_identity}_"
             f"{semantic_unit_identity}_{speaker}_{translation_hash}_{variant_hash}_"
-            f"{voice_prompt_hash}_{ref_audio_hash}"
+            f"{voice_prompt_hash}_{ref_audio_hash}_{reference_contract_hash}"
         )
 
     def _cache_raw_tts_segment(

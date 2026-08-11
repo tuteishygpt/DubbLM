@@ -86,6 +86,21 @@ def test_build_app_lists_omnivoice_in_tts_system_choices():
     assert "omnivoice" in choice_values
 
 
+def test_build_app_exposes_higgs_and_strict_reference_yaml_example():
+    app = build_app()
+
+    tts_props = _component_props_by_label(app, "TTS system")
+    choice_values = [choice[1] if isinstance(choice, (list, tuple)) else choice for choice in tts_props["choices"]]
+    voices_props = _component_props_by_label(
+        app, "Voices (YAML) — per-speaker TTS profiles"
+    )
+
+    assert "higgs" in choice_values
+    assert "reference_mode: segment" in voices_props["placeholder"]
+    assert "space_id: archivartaunik/higgs-audio-v3-tts" in voices_props["placeholder"]
+    assert "temperature: 0.7" in voices_props["placeholder"]
+
+
 def test_build_app_lists_gemini_in_transcription_system_choices():
     app = build_app()
 

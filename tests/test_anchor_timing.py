@@ -7,6 +7,8 @@ import pytest
 from pydub import AudioSegment
 from pydub.generators import Sine
 
+from dubbing.core.voice_profiles import VoiceProfile
+
 
 def _segment(start, end, *, speaker="SPEAKER_00", audio_file=None):
     return {
@@ -76,6 +78,7 @@ def test_synthesis_selects_long_variant_when_primary_underfills_anchor_window(tm
         def synthesize(self, segments_data, language):
             observed["synthesized_targets"] = [item.target_duration for item in segments_data]
             observed["synthesized_texts"] = [item.text for item in segments_data]
+            observed["segment_indexes"] = [item.segment_index for item in segments_data]
             for item in segments_data:
                 duration = 1050 if item.text == "long target" else 800
                 Sine(440).to_audio_segment(duration=duration).export(item.output_path, format="wav")
@@ -108,16 +111,15 @@ def test_synthesis_selects_long_variant_when_primary_underfills_anchor_window(tm
         voice_name=None,
         reference_audio=None,
         reference_text=None,
+        reference_mode=None,
         tts_system="fake",
         model=None,
+        fallback_model=None,
+        params={},
     )
     dubber._resolve_voice_profile = lambda _speaker: profile
     dubber._profile_pool_key = lambda _profile: ("fake",)
     dubber._default_tts_system = lambda: "fake"
-    dubber._apply_reference_fallbacks = lambda **kwargs: (
-        kwargs["tts_segment_data_args"],
-        kwargs["original_audio_segment"],
-    )
     dubber.tts_clients = {("fake",): TTSStub()}
     dubber.default_tts = dubber.tts_clients[("fake",)]
     dubber._semantic_plan_cache_persistable = False
@@ -137,13 +139,14 @@ def test_synthesis_selects_long_variant_when_primary_underfills_anchor_window(tm
     )
     first = _segment(2.0, 2.5)
     first["long_translation"] = "long target"
-    segments = [first, _segment(3.1, 3.5)]
+    segments = [_segment(3.1, 3.5), first]
 
     dubber.synthesize_speech(segments, {}, str(source_path))
 
     assert observed["estimated_targets"][0] == pytest.approx(1.1)
     assert observed["synthesized_targets"][0] == pytest.approx(1.1)
     assert observed["synthesized_texts"][0] == "long target"
+    assert observed["segment_indexes"] == [1, 0]
 
 
 @pytest.mark.parametrize(
@@ -494,9 +497,6 @@ def test_synthesis_hits_policy_specific_wav_cache_without_pickle_marker(tmp_path
 
     cache = CacheStub()
     fingerprint = timing_cache_fingerprint(TimingPolicy())
-    cached_path = cache.get_cache_path("synthesized_speech") / f"base_be_fake_{fingerprint}.wav"
-    Sine(440).to_audio_segment(duration=2000).export(cached_path, format="wav")
-
     dubber = SmartDubbing.__new__(SmartDubbing)
     dubber.config = {
         "source_language": "en",
@@ -511,7 +511,17 @@ def test_synthesis_hits_policy_specific_wav_cache_without_pickle_marker(tmp_path
     }
     dubber.performance_tracker = PerformanceStub()
     dubber.cache_manager = cache
+    dubber.voice_profiles = {
+        "SPEAKER_00": VoiceProfile(tts_system="fake"),
+    }
     dubber.tts_clients = {}
+
+    tts_fingerprint = dubber._effective_tts_cache_fingerprint(["SPEAKER_00"])
+    cached_path = (
+        cache.get_cache_path("synthesized_speech")
+        / f"base_be_fake_{fingerprint}_{tts_fingerprint}.wav"
+    )
+    Sine(440).to_audio_segment(duration=2000).export(cached_path, format="wav")
 
     result = dubber.synthesize_speech([_segment(0.0, 1.0)], {}, str(source_path))
 

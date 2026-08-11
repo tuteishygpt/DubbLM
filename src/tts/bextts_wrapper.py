@@ -36,6 +36,9 @@ class BexTTSWrapper(TTSInterface):
     audio paths.
     """
 
+    provider_name = "bextts"
+    reference_capability = "optional"
+
     def __init__(
         self,
         space_id: str = "archivartaunik/Bextts",
@@ -114,11 +117,7 @@ class BexTTSWrapper(TTSInterface):
         return text
 
     def _resolve_reference_audio(self, segment: TTSSegmentData) -> Optional[str]:
-        if segment.reference_audio_path:
-            return segment.reference_audio_path
-        if segment.speaker and segment.speaker in self.voice_mapping:
-            return self.voice_mapping[segment.speaker]
-        return self.default_reference_audio
+        return segment.reference_audio_path
 
     def synthesize(
         self,
@@ -131,20 +130,13 @@ class BexTTSWrapper(TTSInterface):
         if not segments_data:
             logger.warning("No segments provided to BexTTS synthesis.")
             return []
+        self.require_valid_segments(segments_data)
 
         alignments: List[SegmentAlignment] = []
 
         for index, segment in enumerate(segments_data):
             prepared_text = self._prepare_text(segment)
             reference_audio = self._resolve_reference_audio(segment)
-
-            if reference_audio and not Path(reference_audio).exists():
-                logger.warning(
-                    "Reference audio '%s' for speaker '%s' does not exist. Falling back to default voice.",
-                    reference_audio,
-                    segment.speaker,
-                )
-                reference_audio = None
 
             logger.info(
                 "BexTTS: Synthesizing segment %d/%d for speaker '%s' (ref audio: %s)",

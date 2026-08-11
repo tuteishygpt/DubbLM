@@ -110,6 +110,86 @@ def test_new_style_voices_takes_precedence_over_legacy_for_same_speaker():
     assert voices["SPEAKER_01"].tts_system == "openai"
 
 
+def test_reference_mode_is_parsed_inherited_and_excluded_from_pool_identity():
+    voices = normalize_voices(
+        {
+            "voices": {
+                "*": {"tts_system": "higgs", "reference_mode": "segment"},
+                "SPEAKER_00": {"reference_mode": "configured"},
+                "SPEAKER_01": {"reference_mode": "speaker"},
+                "SPEAKER_02": {"reference_mode": "none"},
+            }
+        }
+    )
+
+    assert resolve_profile(voices, "SPEAKER_00").reference_mode == "configured"
+    assert resolve_profile(voices, "SPEAKER_01").reference_mode == "speaker"
+    assert resolve_profile(voices, "SPEAKER_02").reference_mode == "none"
+    assert resolve_profile(voices, "SPEAKER_99").reference_mode == "segment"
+    assert VoiceProfile(tts_system="higgs", reference_mode="segment").pool_key() == (
+        VoiceProfile(tts_system="higgs", reference_mode="configured").pool_key()
+    )
+
+
+def test_explicit_provider_switch_does_not_inherit_wildcard_reference_mode():
+    voices = normalize_voices(
+        {
+            "voices": {
+                "*": {"tts_system": "higgs", "reference_mode": "segment"},
+                "SPEAKER_00": {"tts_system": "gemini", "voice_name": "Kore"},
+            }
+        }
+    )
+
+    resolved = resolve_profile(voices, "SPEAKER_00")
+    assert resolved.tts_system == "gemini"
+    assert resolved.reference_mode is None
+
+
+def test_provider_switch_clears_mode_when_wildcard_provider_comes_from_global_default():
+    voices = normalize_voices(
+        {
+            "voices": {
+                "*": {"reference_mode": "segment"},
+                "SPEAKER_00": {"tts_system": "gemini"},
+            }
+        }
+    )
+
+    resolved = resolve_profile(
+        voices,
+        "SPEAKER_00",
+        tts_system_default="higgs",
+    )
+    assert resolved.tts_system == "gemini"
+    assert resolved.reference_mode is None
+
+
+def test_new_style_speaker_does_not_reuse_same_speaker_legacy_reference():
+    voices = normalize_voices(
+        {
+            "voices": {
+                "SPEAKER_00": {"tts_system": "higgs", "reference_mode": "segment"},
+            },
+            "reference_audio_mapping": {
+                "SPEAKER_00": "D:/legacy-zero.wav",
+                "SPEAKER_01": "D:/legacy-one.wav",
+            },
+            "reference_text_mapping": {
+                "SPEAKER_00": "legacy zero",
+                "SPEAKER_01": "legacy one",
+            },
+        }
+    )
+
+    assert voices["SPEAKER_00"].reference_audio is None
+    assert voices["SPEAKER_00"].reference_text is None
+    assert voices["SPEAKER_00"].reference_mode == "segment"
+    assert voices["SPEAKER_01"].reference_audio == "D:/legacy-one.wav"
+    assert voices["SPEAKER_01"].reference_text == "legacy one"
+    assert voices["SPEAKER_01"].reference_mode is None
+
+
 def test_resolve_profile_uses_star_fallback_and_default_system():
     profiles = {
         FALLBACK_SPEAKER: VoiceProfile(tts_system="omnivoice", voice_name="default"),

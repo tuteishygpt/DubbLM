@@ -7,6 +7,7 @@ import dubbing.core.smart_dubbing as smart_dubbing_module
 from dubbing.core.runner import build_config_from_overrides
 from dubbing.core.smart_dubbing import SmartDubbing
 from dubbing.core.voice_profiles import VoiceProfile
+from tts.models import TTSSegmentData
 
 
 class _StubTTSClient:
@@ -224,3 +225,39 @@ def test_pool_key_stable_across_param_ordering():
     a = VoiceProfile(tts_system="gemini", model="flash", params={"a": 1, "b": 2})
     b = VoiceProfile(tts_system="gemini", model="flash", params={"b": 2, "a": 1})
     assert a.pool_key() == b.pool_key()
+
+
+def test_preflight_collects_all_pool_errors_before_any_synthesis():
+    calls = []
+
+    class Client:
+        def __init__(self, issue):
+            self.issue = issue
+
+        def validate_segments(self, segments):
+            calls.append(("validate", segments[0].segment_index))
+            return [self.issue]
+
+        def synthesize(self, *args, **kwargs):
+            calls.append(("synthesize", None))
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    clients = {
+        ("a",): Client((8, "provider=a speaker=S2 segment=8 mode=speaker: missing a")),
+        ("b",): Client((3, "provider=b speaker=S1 segment=3 mode=configured: missing b")),
+    }
+    pools = {
+        ("a",): [TTSSegmentData(speaker="S2", text="x", segment_index=8)],
+        ("b",): [TTSSegmentData(speaker="S1", text="y", segment_index=3)],
+    }
+
+    try:
+        dubber._preflight_tts_pools(pools, clients)
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("preflight errors must abort the TTS stage")
+
+    assert calls == [("validate", 8), ("validate", 3)]
+    assert message.index("segment=3") < message.index("segment=8")
+    assert not any(call[0] == "synthesize" for call in calls)

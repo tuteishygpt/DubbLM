@@ -4,6 +4,7 @@ import dubbing.core.config as config_module
 import dubbing.core.smart_dubbing as smart_dubbing_module
 from dubbing.core.runner import build_config_from_overrides
 from dubbing.core.smart_dubbing import SmartDubbing
+from dubbing.core.voice_profiles import VoiceProfile
 from translation.llm_translator import LLMTranslator
 
 
@@ -50,6 +51,89 @@ def test_cache_fingerprint_is_canonical_and_rejects_unsupported_values():
 
     with pytest.raises(ValueError):
         SmartDubbing._cache_fingerprint({"not_json": float("nan")})
+
+
+def test_effective_tts_fingerprint_tracks_strict_reference_contract():
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {
+        "tts_system": "higgs",
+        "tts_model": None,
+        "tts_fallback_model": None,
+    }
+    dubber.voice_profiles = {
+        "SPEAKER_00": VoiceProfile(
+            tts_system="higgs",
+            voice_name="clone",
+            reference_mode="configured",
+            reference_audio="D:/voice.wav",
+            reference_text="sample",
+            params={"top_p": 0.95, "temperature": 0.7},
+        )
+    }
+
+    baseline = dubber._effective_tts_cache_fingerprint(["SPEAKER_00"])
+    dubber.voice_profiles["SPEAKER_00"].reference_mode = "speaker"
+    assert dubber._effective_tts_cache_fingerprint(["SPEAKER_00"]) != baseline
+    dubber.voice_profiles["SPEAKER_00"].reference_mode = "configured"
+    dubber.voice_profiles["SPEAKER_00"].params["temperature"] = 0.8
+    assert dubber._effective_tts_cache_fingerprint(["SPEAKER_00"]) != baseline
+
+
+def test_effective_tts_fingerprint_includes_global_voice_and_omnivoice_bootstrap():
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {
+        "tts_system": "omnivoice",
+        "voice_name": "global-a",
+        "omnivoice_num_steps": 32,
+        "omnivoice_speed": 1.0,
+    }
+    dubber.voice_profiles = {
+        "SPEAKER_00": VoiceProfile(tts_system="omnivoice"),
+    }
+
+    baseline = dubber._effective_tts_cache_fingerprint(["SPEAKER_00"])
+    dubber.config["voice_name"] = "global-b"
+    assert dubber._effective_tts_cache_fingerprint(["SPEAKER_00"]) != baseline
+    dubber.config["voice_name"] = "global-a"
+    dubber.config["omnivoice_num_steps"] = 64
+    assert dubber._effective_tts_cache_fingerprint(["SPEAKER_00"]) != baseline
+
+
+def test_segment_cache_identity_includes_resolved_reference_and_client_settings():
+    common = dict(
+        base_cache_prefix="base",
+        tts_system="higgs",
+        segment={},
+        speaker="SPEAKER_00",
+        translation="hello",
+        style_prompt="",
+        reference_audio_path="D:/voice.wav",
+    )
+
+    baseline = SmartDubbing._raw_tts_segment_cache_key(
+        **common,
+        reference_mode="configured",
+        reference_text="sample",
+        client_pool_settings=("higgs", "", "", (("temperature", 0.7),)),
+    )
+    assert baseline != SmartDubbing._raw_tts_segment_cache_key(
+        **common,
+        reference_mode="speaker",
+        reference_text="sample",
+        client_pool_settings=("higgs", "", "", (("temperature", 0.7),)),
+    )
+    assert baseline != SmartDubbing._raw_tts_segment_cache_key(
+        **common,
+        reference_mode="configured",
+        reference_text="different",
+        client_pool_settings=("higgs", "", "", (("temperature", 0.7),)),
+    )
+    assert baseline != SmartDubbing._raw_tts_segment_cache_key(
+        **common,
+        reference_mode="configured",
+        reference_text="sample",
+        client_pool_settings=("higgs", "", "", (("temperature", 0.8),)),
+    )
 
 
 def test_glossary_rendering_is_deterministic():

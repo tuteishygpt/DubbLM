@@ -766,6 +766,8 @@ class SampleManager:
 class GeminiTTSWrapper(TTSInterface):
     """Google Gemini TTS wrapper with simplified single-segment synthesis."""
 
+    provider_name = "gemini"
+
     def __init__(
         self,
         model: str = "gemini-2.5-pro-preview-tts",
@@ -1285,6 +1287,7 @@ class GeminiTTSWrapper(TTSInterface):
         if not segments_data:
             logger.warning("Warning: No segments provided.")
             return []
+        self.require_valid_segments(segments_data)
 
         valid_segments = [seg for seg in segments_data if seg.speaker and seg.text]
         if not valid_segments:

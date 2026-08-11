@@ -13,6 +13,7 @@ TTS_PROVIDERS: Dict[str, tuple[str, str]] = {
     "gemini": ("tts.gemini_tts_wrapper", "GeminiTTSWrapper"),
     "bextts": ("tts.bextts_wrapper", "BexTTSWrapper"),
     "omnivoice": ("tts.omnivoice_wrapper", "OmniVoiceWrapper"),
+    "higgs": ("tts.higgs_audio_wrapper", "HiggsAudioWrapper"),
 }
 
 
@@ -151,6 +152,7 @@ class TTSFactory:
         
         try:
             tts_client = provider_class(**init_args)
+            tts_client.provider_name = provider_name_lower
             tts_client.initialize()
             
             # voice_mapping and voice_prompt_mapping can be empty dicts if None initially

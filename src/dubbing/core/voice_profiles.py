@@ -64,6 +64,7 @@ class VoiceProfile:
     style_prompt: Optional[str] = None
     reference_audio: Optional[str] = None
     reference_text: Optional[str] = None
+    reference_mode: Optional[str] = None
     params: Dict[str, Any] = field(default_factory=dict)
 
     def pool_key(self) -> tuple:
@@ -79,6 +80,14 @@ class VoiceProfile:
         """Fill missing fields from *fallback*. Params are merged shallowly."""
         merged_params = dict(fallback.params)
         merged_params.update(self.params)
+        inherited_reference_mode = fallback.reference_mode
+        if (
+            self.reference_mode is None
+            and self.tts_system
+            and fallback.tts_system
+            and self.tts_system.lower() != fallback.tts_system.lower()
+        ):
+            inherited_reference_mode = None
         return VoiceProfile(
             tts_system=self.tts_system or fallback.tts_system,
             model=self.model or fallback.model,
@@ -87,6 +96,11 @@ class VoiceProfile:
             style_prompt=self.style_prompt or fallback.style_prompt,
             reference_audio=self.reference_audio or fallback.reference_audio,
             reference_text=self.reference_text or fallback.reference_text,
+            reference_mode=(
+                self.reference_mode
+                if self.reference_mode is not None
+                else inherited_reference_mode
+            ),
             params=merged_params,
         )
 
@@ -100,6 +114,7 @@ def _profile_from_dict(data: Mapping[str, Any]) -> VoiceProfile:
         "style_prompt",
         "reference_audio",
         "reference_text",
+        "reference_mode",
     }
     kwargs = {k: data.get(k) for k in known if data.get(k) is not None}
     params = dict(data.get("params") or {})
@@ -236,6 +251,15 @@ def resolve_profile(
     fallback = profiles.get(FALLBACK_SPEAKER, VoiceProfile())
     profile = profiles.get(speaker, VoiceProfile())
     merged = profile.merged_with_fallback(fallback)
+    fallback_system = fallback.tts_system or tts_system_default
+    if (
+        profile.reference_mode is None
+        and profile.tts_system
+        and fallback.reference_mode is not None
+        and fallback_system
+        and profile.tts_system.lower() != fallback_system.lower()
+    ):
+        merged.reference_mode = None
     if not merged.tts_system and tts_system_default:
         merged.tts_system = tts_system_default
     return merged

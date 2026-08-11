@@ -64,6 +64,9 @@ def resolve_omnivoice_language(override_lang: Optional[str], synthesis_lang: Opt
 class OmniVoiceWrapper(TTSInterface):
     """Text-to-speech wrapper around the public OmniVoice Space."""
 
+    provider_name = "omnivoice"
+    reference_capability = "required"
+
     def __init__(
         self,
         space_id: str = "k2-fsa/OmniVoice",
@@ -153,11 +156,7 @@ class OmniVoiceWrapper(TTSInterface):
         return segment.text
 
     def _resolve_reference_audio(self, segment: TTSSegmentData) -> Optional[str]:
-        if segment.reference_audio_path:
-            return segment.reference_audio_path
-        if segment.speaker and segment.speaker in self.voice_mapping:
-            return self.voice_mapping[segment.speaker]
-        return self.default_reference_audio
+        return segment.reference_audio_path
 
     def _resolve_reference_text(self, segment: TTSSegmentData) -> Optional[str]:
         reference_text = segment.reference_text
@@ -204,6 +203,7 @@ class OmniVoiceWrapper(TTSInterface):
         if not segments_data:
             logger.warning("No segments provided to OmniVoice synthesis.")
             return []
+        self.require_valid_segments(segments_data)
 
         alignments: List[SegmentAlignment] = []
 
@@ -212,21 +212,6 @@ class OmniVoiceWrapper(TTSInterface):
             reference_audio = self._resolve_reference_audio(segment)
             reference_text = self._resolve_reference_text(segment)
             target_duration = self._resolve_duration(segment)
-
-            if reference_audio and not Path(reference_audio).exists():
-                logger.warning(
-                    "Reference audio '%s' for speaker '%s' does not exist. Falling back to no clone reference.",
-                    reference_audio,
-                    segment.speaker,
-                )
-                reference_audio = None
-
-            if not reference_audio:
-                logger.error(
-                    "OmniVoice requires reference audio for speaker '%s'. Skipping segment.",
-                    segment.speaker,
-                )
-                continue
 
             speed = segment.speed if segment.speed is not None else self.speed
             reference_name = Path(reference_audio).name
