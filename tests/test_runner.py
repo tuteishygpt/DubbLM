@@ -955,10 +955,12 @@ def test_run_pipeline_uses_separated_vocals_for_segment_references_when_keep_bac
     _patch_projects_root(monkeypatch, tmp_path)
     config = build_config_from_overrides(
         {
+            "config": "",
             "input": str(video_path),
             "source_language": "en",
             "target_language": "be",
             "keep_background": True,
+            "enable_emotion_analysis": False,
         }
     )
 

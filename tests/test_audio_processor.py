@@ -1,3 +1,4 @@
+import builtins
 import logging
 import sys
 import types
@@ -8,9 +9,22 @@ from dubbing.core.cache_manager import CacheManager
 from dubbing.debug.performance_tracker import PerformanceTracker
 
 
-def test_process_background_audio_skips_when_audio_separator_missing(tmp_path, caplog):
+def test_process_background_audio_skips_when_audio_separator_missing(
+    tmp_path, caplog, monkeypatch
+):
     audio_file = tmp_path / "source.wav"
     audio_file.write_bytes(b"fake wav bytes")
+
+    real_import = builtins.__import__
+
+    def import_without_audio_separator(name, *args, **kwargs):
+        if name == "audio_separator.separator":
+            raise ModuleNotFoundError(
+                "No module named 'audio_separator'", name="audio_separator"
+            )
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_audio_separator)
 
     from dubbing.audio.audio_processor import AudioProcessor
 
