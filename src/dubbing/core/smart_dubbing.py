@@ -2225,26 +2225,25 @@ class SmartDubbing:
             segment.get("_semantic_plan_cache_persistable", True)
             for segment in transcription
         )
-        if not semantic_enabled or plan_persistable:
-            self.cache_manager.save_to_cache(
-                step_name,
-                cache_key,
-                {
-                    "diarization": speakers_rolls,
-                    "transcription": transcription,
-                    "semantic_diagnostics": semantic_diagnostics,
-                },
-            )
-        else:
+        if semantic_enabled and not plan_persistable:
             logger.warning(
                 "Semantic boundary classification used a transient fallback; "
-                "semantic plan and downstream plan-dependent caches will not be persisted."
+                "caching the deterministic fallback plan for resume."
             )
+        self.cache_manager.save_to_cache(
+            step_name,
+            cache_key,
+            {
+                "diarization": speakers_rolls,
+                "transcription": transcription,
+                "semantic_diagnostics": semantic_diagnostics,
+            },
+        )
         if transcription and semantic_enabled:
             self._semantic_plan_fingerprint = transcription[0].get(
                 "semantic_plan_fingerprint"
             )
-            self._semantic_plan_cache_persistable = plan_persistable
+            self._semantic_plan_cache_persistable = True
 
         self.debug_data["diarization"] = speakers_rolls
         self.debug_data["transcription"] = transcription

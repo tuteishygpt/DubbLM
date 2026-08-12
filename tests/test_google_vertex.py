@@ -1,3 +1,4 @@
+import os
 import pytest
 from pathlib import Path
 
@@ -33,6 +34,31 @@ def test_vertex_ai_settings_build_genai_and_llamaindex_configs(monkeypatch):
         "project": "demo-project",
         "location": "global",
     }
+
+
+def test_vertex_ai_settings_resolves_relative_credentials_from_parent_workspace(monkeypatch, tmp_path):
+    import google_vertex
+    from google_vertex import get_vertex_ai_settings
+
+    workspace = tmp_path / "workspace"
+    worktree = workspace / ".worktrees" / "feature"
+    source_file = worktree / "src" / "google_vertex.py"
+    credential_file = workspace / "cred" / "service-account.json"
+    source_file.parent.mkdir(parents=True)
+    credential_file.parent.mkdir(parents=True)
+    source_file.touch()
+    credential_file.write_text("{}", encoding="utf-8")
+
+    monkeypatch.chdir(worktree)
+    monkeypatch.setattr(google_vertex, "__file__", str(source_file))
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "demo-project")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "cred/service-account.json")
+
+    get_vertex_ai_settings()
+
+    assert Path(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]) == credential_file
 
 
 def test_env_example_lists_vertex_ai_variables():

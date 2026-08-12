@@ -10,9 +10,9 @@ remove_pauses: false
 normalize_audio: true
 dubbed_volume: 1
 use_two_pass_encoding: false
-tts_system: omnivoice
+tts_system: higgs
 omnivoice_space_id: k2-fsa/OmniVoice
-segment_reference_min_duration: 2
+segment_reference_min_duration: 1.3
 transcription_system: assemblyai
 translator_type: llm
 llm_provider: gemini
@@ -24,12 +24,12 @@ refinement_temperature: 1
 refinement_persona: normal
 save_original_subtitles: false
 save_translated_subtitles: true
-voice_auto_selection: true
+voice_auto_selection: false
 include_original_audio: false
 start_time: 0
 refinement_max_tokens: 0
-enable_emotion_analysis: true
-min_pause_duration: 3
+enable_emotion_analysis: false
+min_pause_duration: 300
 keyframe_buffer: 0.2
 background_volume: 0.762341
 gemini_transcription_model: gemini-3.1-pro-preview
@@ -38,24 +38,27 @@ voices:
     tts_system: gemini
     model: gemini-3.1-flash-tts-preview
     fallback_model: gemini-3.1-flash-tts-preview
-    voice_name: Alnilam
-  SPEAKER_01:
-    tts_system: gemini
-    model: gemini-3.1-flash-tts-preview
-    fallback_model: gemini-3.1-flash-tts-preview
-    voice_name: Umbriel
-  SPEAKER_02:
-    tts_system: gemini
-    model: gemini-3.1-flash-tts-preview
-    fallback_model: gemini-3.1-flash-tts-preview
     voice_name: Achird
-  SPEAKER_03:
+  SPEAKER_01:
+    tts_system: higgs
+    reference_mode: configured
+    reference_audio: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_07\reference.mp3
+    reference_text: С директорами работать особо не надо, это следует понимать. Ты
+      встречаешься раз в квартал по видео, там 2-3 часа, 4, иногда 5, иногда полчаса
+      даже, кстати. Раз в квартал смотришь отчёт, и ты там, наверное, оказался, потому
+      что у тебя уже опыта за свою жизнь столько, что тебе не надо на это тратить
+      время. Эти 3 часа раз в квартал — это и есть основное время, которое ты тратишь
+      на эту работу
+  SPEAKER_02:
     tts_system: omnivoice
     reference_audio: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_03\reference.mp3
     reference_text: И тут прямо какие-то Анадырь, Чита, и с этой стороны какие-то
       американские города, стоят печати аэропортов. Очень живописно выглядит, где-то
       по-русски...
-duration: 160
+  SPEAKER_09:
+    tts_system: higgs
+    reference_mode: segment
+duration: 90
 transcription_model: best
 inner_transcription_system: assemblyai
 emotion_provider: gemini
@@ -69,3 +72,11 @@ semantic_split_enabled: true
 tts_preferred_segment_duration: 15.0
 tts_hard_segment_duration: 35.0
 semantic_split_search_window: 10.0
+reference_audio_mapping:
+  SPEAKER_07: D:\CodexPRJ\DubbLM\.worktrees\higgs-reference-modes\speaker_reference_library\SPEAKER_07\reference.mp3
+reference_text_mapping:
+  SPEAKER_07: С директорами работать особо не надо, это следует понимать. Ты встречаешься
+    раз в квартал по видео, там 2-3 часа, 4, иногда 5, иногда полчаса даже, кстати.
+    Раз в квартал смотришь отчёт, и ты там, наверное, оказался, потому что у тебя
+    уже опыта за свою жизнь столько, что тебе не надо на это тратить время. Эти 3
+    часа раз в квартал — это и есть основное время, которое ты тратишь на эту работу

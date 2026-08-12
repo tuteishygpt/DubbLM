@@ -592,6 +592,72 @@ def test_isolated_raw_cache_key_tracks_audio_content_not_only_file_metadata(tmp_
     assert dubber._isolated_tracks_raw_cache_key(tracks) != first_key
 
 
+def test_isolated_transient_semantic_plan_is_cached_for_resume(monkeypatch):
+    import dubbing.audio.isolated_tracks as isolated
+    from dubbing.core.smart_dubbing import SmartDubbing
+
+    segments = [
+        {
+            "speaker": "SPEAKER_00",
+            "start": 0.0,
+            "end": 1.0,
+            "text": "Hello",
+            "semantic_unit_id": "unit-a",
+            "semantic_plan_fingerprint": "plan-a",
+            "_semantic_plan_cache_persistable": False,
+        }
+    ]
+
+    class Cache:
+        use_cache = True
+
+        def __init__(self):
+            self.saved = []
+
+        def cache_exists(self, *_args):
+            return False
+
+        def save_to_cache(self, step_name, cache_key, data):
+            self.saved.append((step_name, cache_key, data))
+
+    monkeypatch.setattr(
+        isolated,
+        "collect_isolated_tracks_raw",
+        lambda **_kwargs: [{"speaker": "SPEAKER_00"}],
+    )
+    monkeypatch.setattr(
+        isolated,
+        "run_isolated_tracks",
+        lambda **_kwargs: ({(0.0, 1.0): "SPEAKER_00"}, segments),
+    )
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {
+        "source_language": "en",
+        "target_language": "be",
+        "semantic_split_enabled": True,
+        "inner_transcription_system": "assemblyai",
+    }
+    dubber.cache_manager = Cache()
+    dubber.debug_data = {}
+    dubber._isolated_tracks_cache_key = lambda *_args: "plan-key"
+    dubber._isolated_tracks_raw_cache_key = lambda *_args: "raw-key"
+    dubber._isolated_inner_kwargs = lambda *_args: {}
+    dubber._semantic_classifier = lambda: (None, "ready")
+    dubber._semantic_classifier_identity = lambda: {"mode": "ready"}
+    dubber._save_transcription_file = lambda *_args: None
+
+    dubber._diarize_and_transcribe_isolated(
+        "source.wav", {"SPEAKER_00": "speaker.wav"}
+    )
+
+    assert [step for step, _key, _data in dubber.cache_manager.saved] == [
+        "isolated_tracks_raw_transcription",
+        "isolated_tracks_semantic_plan",
+    ]
+    assert dubber._semantic_plan_cache_persistable is True
+
+
 def test_semantic_plan_cache_separates_llm_and_deterministic_classifier_modes(tmp_path):
     from dubbing.core.smart_dubbing import SmartDubbing
 
