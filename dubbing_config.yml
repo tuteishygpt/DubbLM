@@ -38,14 +38,24 @@ voices:
     tts_system: gemini
     model: gemini-3.1-flash-tts-preview
     fallback_model: gemini-3.1-flash-tts-preview
-    voice_name: Achird
+    voice_name: Alnilam
   SPEAKER_01:
+    tts_system: gemini
+    model: gemini-3.1-flash-tts-preview
+    fallback_model: gemini-3.1-flash-tts-preview
+    voice_name: Umbriel
+  SPEAKER_02:
+    tts_system: gemini
+    model: gemini-3.1-flash-tts-preview
+    fallback_model: gemini-3.1-flash-tts-preview
+    voice_name: Achird
+  SPEAKER_03:
     tts_system: omnivoice
     reference_audio: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_03\reference.mp3
     reference_text: И тут прямо какие-то Анадырь, Чита, и с этой стороны какие-то
       американские города, стоят печати аэропортов. Очень живописно выглядит, где-то
       по-русски...
-duration: 500
+duration: 160
 transcription_model: best
 inner_transcription_system: assemblyai
 emotion_provider: gemini
