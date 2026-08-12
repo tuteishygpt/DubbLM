@@ -14,6 +14,7 @@ import time
 import hashlib
 import csv
 import json
+import math
 import torch
 import warnings
 import shutil
@@ -496,6 +497,246 @@ class SmartDubbing:
 
         return tts_segment_data_args, original_audio_segment
 
+    @staticmethod
+    def _canonical_segment_index(
+        segment_dict: Dict[str, Any], chronological_index: int
+    ) -> int:
+        """Return the stable segment index used by reference and TTS artifacts."""
+        stored = segment_dict.get("_timing_original_index")
+        if isinstance(stored, int) and not isinstance(stored, bool) and stored >= 0:
+            return stored
+        return chronological_index
+
+    def _segment_reference_artifact_paths(
+        self, processed_source_path: Optional[str] = None
+    ) -> tuple[Path, Path]:
+        """Return the rebased vocals and source artifact paths."""
+        if processed_source_path:
+            processed = Path(processed_source_path)
+            if self.config.get("keep_background", False):
+                vocals_path = processed
+                source_path = processed.with_name("source.wav")
+            else:
+                source_path = processed
+                vocals_path = processed.with_name("vocals.wav")
+        elif self.config.get("audio_artifacts_dir"):
+            configured_dir = self.config.get("audio_artifacts_dir")
+            audio_dir = Path(configured_dir)
+            source_path = audio_dir / "source.wav"
+            vocals_path = audio_dir / "vocals.wav"
+        else:
+            source_path = Path("source.wav")
+            vocals_path = Path("vocals.wav")
+        return vocals_path, source_path
+
+    @staticmethod
+    def _segment_reference_error(
+        speaker: str, segment_index: int, source_path: Path, reason: str
+    ) -> ValueError:
+        return ValueError(
+            f"speaker={speaker} segment={segment_index} mode=segment "
+            f"source={source_path}: {reason}"
+        )
+
+    def _prepare_segment_reference(
+        self,
+        *,
+        segment_dict: Dict[str, Any],
+        speaker: str,
+        chronological_index: int,
+        reuse_existing: bool,
+        processed_source_path: Optional[str] = None,
+        decoded_audio_cache: Optional[Dict[tuple[str, float], AudioSegment]] = None,
+    ) -> tuple[str, Optional[str]]:
+        """Prepare one segment reference from its authoritative audio source."""
+        canonical_index = self._canonical_segment_index(
+            segment_dict, chronological_index
+        )
+        reference_path = (
+            self.speakers_audio_dir
+            / "segments"
+            / f"{speaker}_{canonical_index}.wav"
+        )
+        reference_text = segment_dict.get("text")
+        try:
+            minimum_duration = max(
+                0.0,
+                float(self.config.get("segment_reference_min_duration", 2.0) or 0.0),
+            )
+        except (TypeError, ValueError, OverflowError):
+            minimum_duration = 2.0
+        minimum_ms = int(minimum_duration * 1000)
+
+        if reuse_existing and reference_path.is_file():
+            try:
+                existing = AudioSegment.from_file(reference_path)
+                if len(existing) > 0 and len(existing) >= minimum_ms:
+                    return str(reference_path), reference_text
+            except Exception:
+                pass
+
+        isolated_tracks = self.config.get("isolated_tracks")
+        mapped_isolated = (
+            isolated_tracks.get(speaker)
+            if isinstance(isolated_tracks, dict) and speaker in isolated_tracks
+            else None
+        )
+        vocals_path, source_path = self._segment_reference_artifact_paths(
+            processed_source_path
+        )
+        if isinstance(isolated_tracks, dict) and speaker in isolated_tracks:
+            candidates = [(Path(str(mapped_isolated or "")), True)]
+        else:
+            candidates = []
+            if self.config.get("keep_background", False):
+                candidates.append((vocals_path, False))
+            candidates.append((source_path, False))
+        authoritative_path = candidates[0][0]
+
+        try:
+            start = float(segment_dict["start"])
+            end = float(segment_dict["end"])
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise self._segment_reference_error(
+                speaker,
+                canonical_index,
+                authoritative_path,
+                "segment reference requires numeric start and end timestamps",
+            ) from exc
+        if not math.isfinite(start) or not math.isfinite(end):
+            raise self._segment_reference_error(
+                speaker,
+                canonical_index,
+                authoritative_path,
+                "segment timestamps must be finite",
+            )
+        if start < 0 or end < 0 or end <= start:
+            raise self._segment_reference_error(
+                speaker,
+                canonical_index,
+                authoritative_path,
+                "segment timestamps must be non-negative with end greater than start",
+            )
+        if end - start < minimum_duration:
+            raise self._segment_reference_error(
+                speaker,
+                canonical_index,
+                authoritative_path,
+                f"recognized segment duration {end - start:.2f}s is below the "
+                f"configured minimum {minimum_duration:.2f}s",
+            )
+
+        cache = decoded_audio_cache if decoded_audio_cache is not None else {}
+        prior_failures: List[str] = []
+        selected_audio: Optional[AudioSegment] = None
+        selected_path: Optional[Path] = None
+        selected_start_ms = 0
+        selected_end_ms = 0
+
+        for candidate_path, is_isolated in candidates:
+            offset = 0.0
+            if is_isolated:
+                try:
+                    offset = float(self.config.get("start_time") or 0.0)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise self._segment_reference_error(
+                        speaker,
+                        canonical_index,
+                        candidate_path,
+                        "start_time must be a finite non-negative number",
+                    ) from exc
+                if not math.isfinite(offset) or offset < 0:
+                    raise self._segment_reference_error(
+                        speaker,
+                        canonical_index,
+                        candidate_path,
+                        "start_time must be a finite non-negative number",
+                    )
+
+            candidate_start = start + offset
+            candidate_end = end + offset
+            failure: Optional[str] = None
+            audio: Optional[AudioSegment] = None
+            if not candidate_path.is_file():
+                failure = "reference source file is missing"
+            else:
+                cache_key = (str(candidate_path.resolve(strict=False)), offset)
+                try:
+                    audio = cache.get(cache_key)
+                    if audio is None:
+                        audio = AudioSegment.from_file(candidate_path)
+                        cache[cache_key] = audio
+                except Exception as exc:
+                    failure = f"reference source is unreadable: {exc}"
+            if audio is not None:
+                if len(audio) <= 0:
+                    failure = "reference source is empty"
+                elif candidate_end * 1000 > len(audio) + 1e-6:
+                    failure = (
+                        f"segment interval {candidate_start:.3f}..{candidate_end:.3f}s "
+                        f"is outside source duration {len(audio) / 1000.0:.3f}s"
+                    )
+
+            if failure is not None:
+                if is_isolated:
+                    raise self._segment_reference_error(
+                        speaker, canonical_index, candidate_path, failure
+                    )
+                prior_failures.append(f"{candidate_path}: {failure}")
+                continue
+
+            selected_audio = audio
+            selected_path = candidate_path
+            selected_start_ms = int(candidate_start * 1000)
+            selected_end_ms = int(candidate_end * 1000)
+            break
+
+        if selected_audio is None or selected_path is None:
+            reason = "no usable reference source"
+            if prior_failures:
+                reason += "; " + "; ".join(prior_failures)
+            raise self._segment_reference_error(
+                speaker, canonical_index, source_path, reason
+            )
+
+        segment_audio = selected_audio[selected_start_ms:selected_end_ms]
+        if len(segment_audio) <= 0 or len(segment_audio) < minimum_ms:
+            raise self._segment_reference_error(
+                speaker,
+                canonical_index,
+                selected_path,
+                f"exported duration {len(segment_audio) / 1000.0:.2f}s is below "
+                f"the configured minimum {minimum_duration:.2f}s",
+            )
+
+        reference_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            segment_audio.export(reference_path, format="wav")
+            exported = AudioSegment.from_file(reference_path)
+        except Exception as exc:
+            raise self._segment_reference_error(
+                speaker,
+                canonical_index,
+                selected_path,
+                f"could not export or read reference WAV {reference_path}: {exc}",
+            ) from exc
+        if not reference_path.is_file() or len(exported) <= 0:
+            raise self._segment_reference_error(
+                speaker,
+                canonical_index,
+                selected_path,
+                f"exported reference WAV is missing or empty: {reference_path}",
+            )
+        if len(exported) < minimum_ms:
+            raise self._segment_reference_error(
+                speaker,
+                canonical_index,
+                selected_path,
+                f"exported duration {len(exported) / 1000.0:.2f}s is below "
+                f"the configured minimum {minimum_duration:.2f}s",
+            )
+        return str(reference_path), reference_text
+
     def _prepare_audio_inputs(self) -> tuple[str, Optional[str], str]:
         """Extract the source audio and optional background/vocals tracks."""
         audio_file = self.audio_processor.extract_audio(
@@ -530,6 +771,19 @@ class SmartDubbing:
     def _effective_tts_cache_fingerprint(self, speakers: Iterable[str]) -> str:
         """Return the canonical effective TTS/reference configuration identity."""
         profiles = []
+        content_identities: Dict[str, str] = {}
+        use_content_hashes = getattr(
+            getattr(self, "cache_manager", None), "use_cache", True
+        )
+
+        def content_identity(path: Optional[str]) -> str:
+            identity_key = str(path or "")
+            if not use_content_hashes:
+                return identity_key
+            if identity_key not in content_identities:
+                content_identities[identity_key] = self._file_content_identity(path)
+            return content_identities[identity_key]
+
         for speaker in sorted({str(value) for value in speakers}):
             profile = self._resolve_voice_profile(speaker)
             provider = profile.tts_system or self._default_tts_system()
@@ -555,6 +809,25 @@ class SmartDubbing:
                     effective_reference_path = str(
                         Path(speakers_dir) / f"{speaker}.wav"
                     )
+            segment_source_identity = None
+            segment_source_offset = None
+            if profile.reference_mode == "segment":
+                isolated_tracks = self.config.get("isolated_tracks")
+                if isinstance(isolated_tracks, dict) and speaker in isolated_tracks:
+                    selected_source = isolated_tracks.get(speaker)
+                    segment_source_identity = content_identity(
+                        str(selected_source or "")
+                    )
+                    segment_source_offset = self.config.get("start_time") or 0.0
+                else:
+                    vocals_path, source_path = self._segment_reference_artifact_paths()
+                    segment_source_identity = {
+                        "vocals": content_identity(str(vocals_path))
+                        if self.config.get("keep_background", False)
+                        else None,
+                        "source": content_identity(str(source_path)),
+                    }
+                    segment_source_offset = 0.0
             profiles.append(
                 {
                     "speaker": speaker,
@@ -566,10 +839,12 @@ class SmartDubbing:
                     "style_prompt": profile.style_prompt,
                     "reference_mode": profile.reference_mode,
                     "reference_audio": profile.reference_audio,
-                    "reference_audio_identity": self._file_content_identity(
+                    "reference_audio_identity": content_identity(
                         effective_reference_path
                     ),
                     "reference_text": profile.reference_text,
+                    "segment_source_identity": segment_source_identity,
+                    "segment_source_offset": segment_source_offset,
                     "params": dict(sorted(provider_params.items())),
                 }
             )
@@ -2316,6 +2591,10 @@ class SmartDubbing:
             self.config.get("duration"),
         )
         selection_fingerprint = self._tts_selection_cache_fingerprint(segments)
+        has_segment_references = any(
+            self._resolve_voice_profile(segment["speaker"]).reference_mode == "segment"
+            for segment in segments
+        )
         cache_key = (
             f"{source_cache_key}_{self.config.get('target_language')}_"
             f"{self.config.get('tts_system')}_{timing_cache_fingerprint(policy)}_"
@@ -2328,6 +2607,7 @@ class SmartDubbing:
             self.cache_manager.use_cache
             and self._plan_dependent_cache_allowed
             and not self.config.get("debug_info", False)
+            and not has_segment_references
             and cached_audio_path.exists()
         ):
             shutil.copy(cached_audio_path, output_path)
@@ -2357,6 +2637,7 @@ class SmartDubbing:
         preflight_clients: Dict[tuple, Any] = {}
         reference_issues: List[tuple[int, str]] = []
         original_audio_segment = None
+        segment_reference_audio_cache: Dict[tuple[str, float], AudioSegment] = {}
 
         for chronological_index, segment in enumerate(segments):
             speaker = segment["speaker"]
@@ -2370,8 +2651,8 @@ class SmartDubbing:
                     f"TTS client for {profile.tts_system or self._default_tts_system()} is not available"
                 )
             tts_system = profile.tts_system or self._default_tts_system()
-            original_index = int(
-                segment.get("_timing_original_index", chronological_index)
+            original_index = self._canonical_segment_index(
+                segment, chronological_index
             )
             style_prompt = (
                 (segment.get("style_prompt") or "").strip()
@@ -2405,12 +2686,6 @@ class SmartDubbing:
                 tts_instance, "reference_capability", "unsupported"
             )
             try:
-                if (
-                    provider_capability in {"optional", "required"}
-                    and profile.reference_mode == "segment"
-                    and original_audio_segment is None
-                ):
-                    original_audio_segment = AudioSegment.from_file(audio_file)
                 base_args, original_audio_segment = self._resolve_segment_reference(
                     tts_segment_data_args=base_args,
                     segment_dict=segment,
@@ -2420,6 +2695,8 @@ class SmartDubbing:
                     segment_index=original_index,
                     original_audio_segment=original_audio_segment,
                     segment_reference_min_duration=segment_reference_min_duration,
+                    processed_source_path=audio_file,
+                    decoded_audio_cache=segment_reference_audio_cache,
                 )
             except Exception as exc:
                 reference_issues.append(
@@ -2491,7 +2768,9 @@ class SmartDubbing:
                 {
                     "start": segment.get("start"),
                     "end": segment.get("end"),
+                    "original_index": self._canonical_segment_index(segment, index),
                     "speaker": segment.get("speaker"),
+                    "reference_text": segment.get("text"),
                     "emotion": segment.get("emotion", "Neutral"),
                     "style_prompt": segment.get("style_prompt", ""),
                     "translation": segment.get("translation", ""),
@@ -2501,7 +2780,7 @@ class SmartDubbing:
                         "very_short_translation", ""
                     ),
                 }
-                for segment in segments
+                for index, segment in enumerate(segments)
             ],
         }
         return hashlib.sha256(
@@ -2715,8 +2994,8 @@ class SmartDubbing:
             raise IndexError(f"segment_index {segment_index} out of range (0..{len(segments)-1})")
 
         segment_dict = segments[segment_index]
-        original_segment_index = int(
-            segment_dict.get("_timing_original_index", segment_index)
+        original_segment_index = self._canonical_segment_index(
+            segment_dict, segment_index
         )
         speaker = segment_dict.get("speaker") or "SPEAKER_00"
 
@@ -2963,6 +3242,10 @@ class SmartDubbing:
         original_audio_segment: Optional[AudioSegment],
         segment_reference_min_duration: float,
         for_resynthesis: bool = False,
+        processed_source_path: Optional[str] = None,
+        decoded_audio_cache: Optional[
+            Dict[tuple[str, float], AudioSegment]
+        ] = None,
     ) -> tuple[Dict[str, Any], Optional[AudioSegment]]:
         """Resolve exactly one configured reference source without fallbacks."""
         mode = profile.reference_mode
@@ -3002,13 +3285,24 @@ class SmartDubbing:
             tts_segment_data_args["reference_text"] = profile.reference_text
             return tts_segment_data_args, original_audio_segment
 
-        segment_ref_path = self.speakers_audio_dir / "segments" / f"{speaker}_{segment_index}.wav"
-        if for_resynthesis:
-            if not segment_ref_path.is_file():
-                raise ValueError(f"reference file does not exist: {segment_ref_path}")
-            tts_segment_data_args["reference_audio_path"] = str(segment_ref_path)
-            tts_segment_data_args["reference_text"] = segment_dict.get("text")
+        if processed_source_path is not None or original_audio_segment is None:
+            reference_path, reference_text = self._prepare_segment_reference(
+                segment_dict=segment_dict,
+                speaker=speaker,
+                chronological_index=segment_index,
+                reuse_existing=for_resynthesis,
+                processed_source_path=processed_source_path,
+                decoded_audio_cache=decoded_audio_cache,
+            )
+            tts_segment_data_args["reference_audio_path"] = reference_path
+            tts_segment_data_args["reference_text"] = reference_text
+            tts_segment_data_args["segment_index"] = self._canonical_segment_index(
+                segment_dict, segment_index
+            )
             return tts_segment_data_args, original_audio_segment
+
+        # Compatibility for direct callers that supply an already-decoded source.
+        segment_ref_path = self.speakers_audio_dir / "segments" / f"{speaker}_{segment_index}.wav"
 
         try:
             start = float(segment_dict["start"])
@@ -3186,6 +3480,8 @@ class SmartDubbing:
                     "reference_mode": reference_mode,
                     "reference_audio_path": reference_audio_path,
                     "reference_text": reference_text,
+                    "segment_start": segment.get("start"),
+                    "segment_end": segment.get("end"),
                     "client_pool_settings": client_pool_settings,
                 }
             ).encode("utf-8")
