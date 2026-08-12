@@ -1,8 +1,16 @@
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
 from dubbing.debug.performance_tracker import PerformanceTracker
 from dubbing.video.video_processor import VideoProcessor
+
+
+def test_combine_audio_with_video_uses_safe_pause_defaults():
+    parameters = inspect.signature(VideoProcessor.combine_audio_with_video).parameters
+
+    assert parameters["remove_pauses"].default is False
+    assert parameters["min_pause_duration"].default == 300
 
 
 def test_combine_audio_with_video_two_pass_maps_only_primary_video_stream(tmp_path, monkeypatch):

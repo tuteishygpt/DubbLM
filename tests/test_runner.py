@@ -302,6 +302,38 @@ def test_combine_video_rebuilds_translated_audio_from_regenerated_chunks(tmp_pat
     assert result == (config["output"], [])
 
 
+def test_combine_video_step_forwards_pause_removal_settings(tmp_path):
+    video_path = tmp_path / "clip.mp4"
+    translated_audio_path = tmp_path / "translated.wav"
+    output_path = tmp_path / "clip_be.mp4"
+    video_path.write_bytes(b"video")
+    translated_audio_path.write_bytes(b"audio")
+
+    config = {
+        "input": str(video_path),
+        "translated_audio_path": str(translated_audio_path),
+        "output": str(output_path),
+        "source_language": "en",
+        "target_language": "be",
+        "remove_pauses": False,
+        "min_pause_duration": 300,
+    }
+    captured = {}
+
+    class VideoProcessorStub:
+        def combine_audio_with_video(self, **kwargs):
+            captured.update(kwargs)
+            return str(output_path), []
+
+    class DubberStub:
+        video_processor = VideoProcessorStub()
+
+    runner._run_combine_video_step(DubberStub(), config)
+
+    assert captured["remove_pauses"] is False
+    assert captured["min_pause_duration"] == 300
+
+
 def test_run_dubbing_job_extracts_file_path_from_combine_video_tuple(tmp_path, monkeypatch):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")

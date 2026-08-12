@@ -1644,7 +1644,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                 with gr.Row():
                     min_pause_duration = gr.Number(
                         label="Min pause duration",
-                        value=defaults.get("min_pause_duration", 3.0),
+                        value=defaults.get("min_pause_duration", 300.0),
                         precision=2,
                     )
                     keyframe_buffer = gr.Number(
