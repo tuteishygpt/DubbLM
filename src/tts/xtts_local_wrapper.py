@@ -73,6 +73,11 @@ class XTTSLocalWrapper(TTSInterface):
         repo_id: str = "archivartaunik/BE_XTTS_V2_10ep250k",
         model_dir: str = "./be_xtts_model",
         default_voice: Optional[str] = None,
+        speaker_embedding_path: Optional[str] = None,
+        speaker_embedding_audio: Optional[str] = None,
+        speaker_library_path: Optional[str] = None,
+        speaker_embedding_key: Optional[str] = None,
+        gpt_cond_base_audio: Optional[str] = None,
         device: str = "auto",
         silence_threshold: float = 0.005,
         margin_start_sec: float = 0.05,
@@ -103,6 +108,11 @@ class XTTSLocalWrapper(TTSInterface):
         self.model_dir = model_dir
 
         self.default_voice_path = default_voice  # калі None — возьмем voice.wav з мадэлі
+        self.speaker_embedding_path = speaker_embedding_path
+        self.speaker_embedding_audio = speaker_embedding_audio
+        self.speaker_library_path = speaker_library_path
+        self.speaker_embedding_key = speaker_embedding_key
+        self.gpt_cond_base_audio = gpt_cond_base_audio
         self.requested_device = device
         self.prompt_prefix = prompt_prefix
 
@@ -123,6 +133,8 @@ class XTTSLocalWrapper(TTSInterface):
         self._config: Optional[XttsConfig] = None
         self._sample_rate: int = 24000
         self._conditioning_cache: Dict[str, _ConditioningLatents] = {}
+        self._speaker_embedding_tensor: Optional[Any] = None
+        self._speaker_embeddings_library: Dict[str, _ConditioningLatents] = {}
 
         self.voice_mapping: Dict[str, str] = {}
         self.voice_prompt_mapping: Dict[str, str] = {}
@@ -166,6 +178,89 @@ class XTTSLocalWrapper(TTSInterface):
         self._checkpoint_file = checkpoint_file
         self._config_file = config_file
         self._vocab_file = vocab_file
+
+    def _load_speaker_embedding_from_file(self) -> None:
+        if not self.speaker_embedding_path or not TORCH_AVAILABLE:
+            return
+
+        if not os.path.exists(self.speaker_embedding_path):
+            logger.warning(
+                "XTTS: speaker embedding file '%s' not found.", self.speaker_embedding_path
+            )
+            return
+
+        try:
+            data = torch.load(self.speaker_embedding_path, map_location="cpu")
+        except Exception as exc:  # pragma: no cover
+            logger.warning("XTTS: failed to load speaker embedding file: %s", exc)
+            return
+
+        if isinstance(data, dict) and data:
+            self._speaker_embedding_tensor = next(iter(data.values()))
+        else:
+            self._speaker_embedding_tensor = data
+
+        logger.info(
+            "✅ XTTS: speaker embedding loaded from '%s'.", self.speaker_embedding_path
+        )
+
+    def _load_speaker_library_from_file(self) -> None:
+        if not TORCH_AVAILABLE:
+            return
+
+        candidate_path = self.speaker_library_path
+        if not candidate_path:
+            candidate_path = os.path.join(self.model_dir, "speakers_xtts.pth")
+
+        if candidate_path and not os.path.exists(candidate_path):
+            if HF_AVAILABLE:
+                try:  # Attempt to download the prepared speakers file if absent
+                    hf_hub_download(self.repo_id, filename="speakers_xtts.pth", local_dir=self.model_dir)
+                except Exception as exc:  # pragma: no cover
+                    logger.warning("XTTS: could not download speakers_xtts.pth: %s", exc)
+            if not os.path.exists(candidate_path):
+                logger.debug("XTTS: speaker library file '%s' not found.", candidate_path)
+                return
+
+        try:
+            raw_data = torch.load(candidate_path, map_location="cpu")
+        except Exception as exc:  # pragma: no cover
+            logger.warning("XTTS: failed to load speaker library file '%s': %s", candidate_path, exc)
+            return
+
+        speakers_dict: Dict[str, Any]
+        if isinstance(raw_data, dict) and "speakers" in raw_data and isinstance(raw_data["speakers"], dict):
+            speakers_dict = raw_data["speakers"]
+        elif isinstance(raw_data, dict):
+            speakers_dict = raw_data
+        else:
+            logger.warning(
+                "XTTS: speaker library at '%s' has unsupported format (expected dict).", candidate_path
+            )
+            return
+
+        parsed: Dict[str, _ConditioningLatents] = {}
+        for name, val in speakers_dict.items():
+            if (
+                isinstance(val, dict)
+                and "gpt_cond_latent" in val
+                and "speaker_embedding" in val
+            ):
+                parsed[str(name)] = _ConditioningLatents(
+                    gpt_cond_latent=val["gpt_cond_latent"],
+                    speaker_embedding=val["speaker_embedding"],
+                )
+
+        if not parsed:
+            logger.warning(
+                "XTTS: speaker library at '%s' contains no entries with both 'gpt_cond_latent' and 'speaker_embedding'.",
+                candidate_path,
+            )
+            return
+
+        self._speaker_embeddings_library = parsed
+        self.speaker_library_path = candidate_path
+        logger.info("✅ XTTS: loaded %d prepared voices from '%s'.", len(parsed), candidate_path)
 
     def initialize(self) -> None:
         """Load the BE_XTTS_V2 model and prepare runtime helpers."""
@@ -217,10 +312,15 @@ class XTTSLocalWrapper(TTSInterface):
             self.model_dir,
         )
 
+        self._load_speaker_embedding_from_file()
+        self._load_speaker_library_from_file()
+
     def cleanup(self) -> None:
         self._conditioning_cache.clear()
         self._xtts_model = None
         self._config = None
+        self._speaker_embedding_tensor = None
+        self._speaker_embeddings_library = {}
 
     # ------------------------------------------------------------------
     # Capability reporting
@@ -248,7 +348,9 @@ class XTTSLocalWrapper(TTSInterface):
     def _resolve_reference_audio(self, segment: TTSSegmentData) -> Optional[str]:
         return segment.reference_audio_path
 
-    def _get_conditioning_latents(self, reference_audio: str) -> Optional[_ConditioningLatents]:
+    def _get_conditioning_latents_for_audio(
+        self, reference_audio: str
+    ) -> Optional[_ConditioningLatents]:
         """Поўны аналаг прыкладу get_conditioning_latents(...)."""
         if not reference_audio or not self._xtts_model or not self._config:
             return None
@@ -281,11 +383,49 @@ class XTTSLocalWrapper(TTSInterface):
         self._conditioning_cache[reference_audio] = cached
         return cached
 
+    def _select_gpt_cond_latent(
+        self, reference_audio: Optional[str], speaker_id: Optional[str]
+    ) -> Optional[Any]:
+        key = self.speaker_embedding_key or speaker_id
+        if key and key in self._speaker_embeddings_library:
+            preset = self._speaker_embeddings_library[key]
+            if preset.gpt_cond_latent is not None:
+                return preset.gpt_cond_latent
+
+        base_audio = self.gpt_cond_base_audio or reference_audio
+        conditioning = (
+            self._get_conditioning_latents_for_audio(base_audio)
+            if base_audio
+            else None
+        )
+        return conditioning.gpt_cond_latent if conditioning else None
+
+    def _select_speaker_embedding(
+        self, reference_audio: Optional[str], speaker_id: Optional[str]
+    ) -> Optional[Any]:
+        if self._speaker_embedding_tensor is not None:
+            return self._speaker_embedding_tensor
+
+        if self._speaker_embeddings_library:
+            key = self.speaker_embedding_key or speaker_id
+            if key and key in self._speaker_embeddings_library:
+                preset = self._speaker_embeddings_library[key]
+                if preset.speaker_embedding is not None:
+                    return preset.speaker_embedding
+
+        speaker_audio = self.speaker_embedding_audio or reference_audio
+        if not speaker_audio:
+            return None
+
+        conditioning = self._get_conditioning_latents_for_audio(speaker_audio)
+        return conditioning.speaker_embedding if conditioning else None
+
     def _run_model_inference(
         self,
         text: str,
         language: str,
         reference_audio: Optional[str],
+        speaker_id: Optional[str],
     ) -> np.ndarray:
         if not self._xtts_model:
             raise RuntimeError("XTTS model not initialised. Call initialize() first.")
@@ -295,9 +435,10 @@ class XTTSLocalWrapper(TTSInterface):
 
         text_to_speak = text or ""
 
-        conditioning = self._get_conditioning_latents(reference_audio) if reference_audio else None
+        gpt_cond_latent = self._select_gpt_cond_latent(reference_audio, speaker_id)
+        speaker_embedding = self._select_speaker_embedding(reference_audio, speaker_id)
 
-        if conditioning is None:
+        if gpt_cond_latent is None and speaker_embedding is None:
             logger.warning(
                 "XTTS: no conditioning latents for '%s', голас можа быць не тым, што чакалася.",
                 reference_audio,
@@ -306,8 +447,8 @@ class XTTSLocalWrapper(TTSInterface):
         inference_kwargs = {
             "text": text_to_speak,
             "language": model_language,
-            "gpt_cond_latent": conditioning.gpt_cond_latent if conditioning else None,
-            "speaker_embedding": conditioning.speaker_embedding if conditioning else None,
+            "gpt_cond_latent": gpt_cond_latent,
+            "speaker_embedding": speaker_embedding,
             "temperature": self.temperature,
             "length_penalty": self.length_penalty,
             "repetition_penalty": self.repetition_penalty,
@@ -389,7 +530,9 @@ class XTTSLocalWrapper(TTSInterface):
             text_to_speak = self._apply_prompt_prefix(segment.text, segment.speaker)
 
             try:
-                waveform = self._run_model_inference(text_to_speak, language, reference_audio)
+                waveform = self._run_model_inference(
+                    text_to_speak, language, reference_audio, segment.speaker
+                )
             except Exception as exc:  # pragma: no cover
                 logger.error(
                     "XTTS: failed to synthesize segment %d for speaker '%s': %s",
