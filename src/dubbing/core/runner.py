@@ -140,6 +140,8 @@ def _run_combine_video_step(dubber: Any, config: DubbingConfig) -> str:
         keep_original_audio_ranges=config.get("keep_original_audio_ranges"),
         source_language=config.get("source_language"),
         target_language=config.get("target_language"),
+        remove_pauses=config.get("remove_pauses", False),
+        min_pause_duration=config.get("min_pause_duration", 300),
         dubbed_volume=config.get("dubbed_volume", 1.0),
         background_volume=config.get("background_volume", 0.562341),
         upscale_factor=config.get("upscale_factor", 1.0),

@@ -1104,7 +1104,7 @@ class SmartDubbing:
         if not (save_original_subtitles or save_translated_subtitles):
             return
 
-        remove_pauses_enabled = self.config.get('remove_pauses', True)
+        remove_pauses_enabled = self.config.get('remove_pauses', False)
         if not remove_pauses_enabled:
             if save_original_subtitles:
                 self.subtitle_manager.save_subtitles(
@@ -1197,8 +1197,8 @@ class SmartDubbing:
             target_language=self.config.get('target_language'),
             normalize_audio=self.config.get('normalize_audio', True),
             use_two_pass_encoding=self.config.get('use_two_pass_encoding', True),
-            remove_pauses=self.config.get('remove_pauses', True),
-            min_pause_duration=self.config.get('min_pause_duration', 3),
+            remove_pauses=self.config.get('remove_pauses', False),
+            min_pause_duration=self.config.get('min_pause_duration', 300),
             preserve_pause_duration=self.config.get('preserve_pause_duration', 1.5),
             keyframe_buffer=self.config.get('keyframe_buffer', 0.2),
             ffmpeg_batch_size=self.config.get('ffmpeg_batch_size', 50),
