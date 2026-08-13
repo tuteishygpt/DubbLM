@@ -112,7 +112,7 @@ Implementation follows test-driven development. Required checks are:
 - FastAPI smoke test serving the built SPA;
 - existing non-Gradio pipeline tests.
 
-Only after parity checks pass, remove the Gradio launcher, `dubbing.ui.gradio_app`, Gradio-only tests, console entry point, and Gradio dependencies. Documentation and launch instructions must point to the FastAPI application.
+Only after parity checks pass, remove the Gradio launcher, `dubbing.ui.gradio_app`, Gradio-only tests, console entry point, and the `gradio` UI dependency. Keep `gradio-client`: OmniVoice, Higgs, and BexTTS use it as a remote-provider protocol client, not as the application UI. Documentation and launch instructions must point to the FastAPI application.
 
 ## Acceptance criteria
 
@@ -120,5 +120,5 @@ Only after parity checks pass, remove the Gradio launcher, `dubbing.ui.gradio_ap
 - A queued job runs through `dubbing.core.runner`, streams logs, and exposes registered results.
 - Existing settings, voice profiles, references, caches, and project artifacts remain compatible.
 - The production server serves both `/api/*` and the SPA.
-- No runtime code, tests, entry points, or direct dependencies reference Gradio.
+- No runtime code, tests, entry points, or direct dependencies reference the Gradio UI; `gradio-client` remains only in remote TTS provider integrations.
 - Queue, current-user, and repository interfaces can later be replaced without changing frontend contracts.
