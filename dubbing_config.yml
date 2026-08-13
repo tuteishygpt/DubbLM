@@ -57,7 +57,7 @@ voices:
   SPEAKER_09:
     tts_system: higgs
     reference_mode: segment
-duration: 90
+duration: 600
 transcription_model: best
 inner_transcription_system: assemblyai
 emotion_provider: gemini
