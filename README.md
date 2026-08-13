@@ -159,55 +159,13 @@ export GOOGLE_CLOUD_LOCATION=global
 
 If you enable OpenAI transcription (`--transcription_system openai` or `pyannote_openai`), you must also set `HF_TOKEN` to allow loading the PyAnnote diarization pipeline.
 
-## Usage Examples
+## Usage
 
-### Basic Dubbing
+Start the Gradio application and select the input, languages, and run step in
+the interface:
+
 ```bash
-python dubblm_cli.py --input video.mp4 --source_language en --target_language es
-```
-
-### With Configuration File
-```bash
-python dubblm_cli.py --config my_config.yml --input video.mp4
-```
-
-### Advanced Options
-```bash
-# High-quality Gemini TTS with specific persona
-python dubblm_cli.py \
-  --input video.mp4 \
-  --source_language en \
-  --target_language fr \
-  --tts_system gemini \
-  --refinement_persona casual_manager \
-  --save_translated_subtitles
-
-# Multiple TTS systems per speaker
-python dubblm_cli.py \
-  --input video.mp4 \
-  --source_language en \
-  --target_language de \
-  --tts_system_mapping '{"SPEAKER_00": "gemini", "SPEAKER_01": "openai"}'
-```
-
-### Speaker Analysis
-```bash
-# Generate speaker report before dubbing
-python dubblm_cli.py \
-  --input video.mp4 \
-  --source_language en \
-  --generate_speaker_report
-```
-
-### Debug Mode
-```bash
-# Create debug video with speaker labels
-python dubblm_cli.py \
-  --input video.mp4 \
-  --source_language en \
-  --target_language de \
-  --debug_info \
-  --debug_diarize_only
+python gradio_app.py
 ```
 
 ## Configuration
@@ -217,22 +175,20 @@ Create `dubbing_config.yml` to set default parameters:
 ```yaml
 source_language: "en"
 target_language: "es"
-tts_system: "gemini"
 refinement_persona: "normal"
 voice_auto_selection: true
 save_translated_subtitles: true
 remove_pauses: true
 use_two_pass_encoding: true
 
-# Per-speaker voice mapping
-voice_name:
-  SPEAKER_A: "alloy"
-  SPEAKER_B: "nova"
-
-# Per-speaker TTS systems
-tts_system_mapping:
-  SPEAKER_00: "gemini"
-  SPEAKER_01: "openai"
+# Per-speaker TTS profiles
+voices:
+  SPEAKER_00:
+    tts_system: gemini
+    voice_name: Kore
+  SPEAKER_01:
+    tts_system: openai
+    voice_name: nova
 ```
 
 ## Output Files
@@ -248,7 +204,7 @@ Coqui XTTS v2 voice-cloning model. The first run downloads the model weights; en
   - Map individual speakers to reference clips with a YAML dictionary.
   - The pipeline automatically falls back to generated samples in `artifacts/speakers_audio/`
     when they exist for a speaker.
-- **Style prompts:** Optional `voice_prompt` entries are prefixed to the synthesized text.
+- **Style prompts:** Set `style_prompt` in the applicable `voices:` profile.
 - **Output:** Each segment is saved to the requested `output_path`; leading and trailing silence
   is trimmed automatically to mirror the reference implementation supplied with the task.
 

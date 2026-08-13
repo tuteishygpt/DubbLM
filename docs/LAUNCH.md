@@ -40,55 +40,6 @@
 
 ---
 
-## 2. Запуск праз CLI (`dubblm_cli.py`)
-
-### Базавы сінтаксіс
-
-```powershell
-# З актываваным .venv:
-python dubblm_cli.py --input "шлях\да\відэа.mp4" --config dubbing_config.yml
-
-# БЕЗ актывацыі (прамы шлях да .venv python):
-.\.venv\Scripts\python.exe dubblm_cli.py --input "шлях\да\відэа.mp4" --config dubbing_config.yml
-```
-
-### Асноўныя параметры CLI
-
-| Параметр | Апісанне | Прыклад |
-|----------|----------|---------|
-| `--input` | Уваходны відэафайл (абавязкова) | `--input ori.mp4` |
-| `--config` | YAML-файл канфігурацыі | `--config dubbing_config.yml` |
-| `--source_language` | Мова арыгінала | `--source_language en` |
-| `--target_language` | Мова перакладу | `--target_language ru` |
-| `--output` | Шлях да выходнага файла | `--output result.mp4` |
-| `--transcription_system` | Сістэма транскрыпцыі | `--transcription_system deepgram` |
-| `--tts_system` | Сістэма TTS | `--tts_system omnivoice` |
-| `--start_time` | Пачатак апрацоўкі (сек / ЧЧ:ММ:СС) | `--start_time 00:01:30` |
-| `--duration` | Доўжыня фрагмента ў секундах | `--duration 60` |
-| `--no_cache` | Адключыць кэш | `--no_cache` |
-| `--debug_info` | Дадатковы лог | `--debug_info` |
-
-### Прыклады запуску
-
-```powershell
-# Поўны дублікат з канфігам (рэкамендуецца)
-python dubblm_cli.py --input ori.mp4 --config dubbing_config.yml
-
-# Толькі першыя 5 хвілін відэа
-python dubblm_cli.py --input ori.mp4 --config dubbing_config.yml --duration 300
-
-# З вызначанага часу
-python dubblm_cli.py --input ori.mp4 --config dubbing_config.yml --start_time 00:02:00 --duration 120
-
-# Без кэша (прымусовая перагенерацыя)
-python dubblm_cli.py --input ori.mp4 --config dubbing_config.yml --no_cache
-
-# Толькі аб'яднаць відэа з ужо гатовым аудыа
-python dubblm_cli.py --input ori.mp4 --config dubbing_config.yml --run_step combine_video
-```
-
----
-
 ## 3. Запуск праз Gradio UI (`gradio_app.py`)
 
 ```powershell
@@ -105,9 +56,7 @@ python gradio_app.py
 
 ## 4. Файл канфігурацыі `dubbing_config.yml`
 
-Файл змяшчае налады па змаўчанні для ўсіх запускаў. Параметры з YAML перазапісваюцца аргументамі CLI.
-
-> **Увага**: Параметр `input` у YAML **ігнаруецца** — відэа заўсёды паказваецца праз `--input` у CLI.
+Файл змяшчае налады па змаўчанні. Значэнні з Gradio могуць перазапісаць YAML-налады.
 
 ### Ключавыя налады
 
@@ -177,14 +126,14 @@ prj/
 **Рашэнне**:
 ```powershell
 # Заўсёды актывуйце .venv або выкарыстоўвайце:
-.\.venv\Scripts\python.exe dubblm_cli.py ...
+.\.venv\Scripts\python.exe gradio_app.py
 ```
 
 ### ❌ `No module named 'dubbing'`
 
 **Прычына**: Пакет не ўсталяваны ў рэжыме editable.
 
-**Рашэнне**: Праект аўтаматычна дадае `src/` у `sys.path` пры запуску праз `dubblm_cli.py` або `gradio_app.py` — заўсёды запускайце **праз гэтыя файлы**, не напрамую праз `python src/dubbing/...`.
+**Рашэнне**: Праект аўтаматычна дадае `src/` у `sys.path` пры запуску праз `gradio_app.py` — запускайце праз гэты файл, не напрамую праз `python src/dubbing/...`.
 
 ### ❌ `Set-ExecutionPolicy` (блакіроўка скрыпту)
 
@@ -203,8 +152,8 @@ cd D:\CodexPRJ\DubbLM
 # 2. Актывуйце .venv
 .\.venv\Scripts\Activate.ps1
 
-# 3. Запусціце дублікацыю
-python dubblm_cli.py --input ori.mp4 --config dubbing_config.yml
+# 3. Запусціце інтэрфейс
+python gradio_app.py
 ```
 
 ---

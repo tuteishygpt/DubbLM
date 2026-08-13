@@ -486,7 +486,7 @@ def load_or_synthesize_candidate(
         legacy_index=segment.get("_timing_original_index", index),
         emotion=segment.get("emotion", "Neutral"),
         tts_prompt_prefix=facade.config.get("tts_prompt_prefix"),
-        voice_prompt=facade.config.get("voice_prompt"),
+        voice_prompt=None,
     )
     cache_path = metadata["segment_cache_dir"] / f"{cache_key}.wav"
 

@@ -603,8 +603,8 @@ def test_source_boundary_truncation_is_explicit(tmp_path):
     assert positions[0]["end"] == 1.0
 
 
-def test_timing_policy_config_normalization_and_cli_flags():
-    from dubbing.core.config import DubbingConfig, create_argument_parser
+def test_timing_policy_config_normalization():
+    from dubbing.core.config import DubbingConfig
 
     config = DubbingConfig()
     config.config.update(
@@ -623,25 +623,6 @@ def test_timing_policy_config_normalization_and_cli_flags():
     assert config.get("timing_max_speed") == 1.15
     assert config.get("timing_max_stretch") == 1.15
     assert config.get("timing_max_overflow") == 0.25
-
-    args = create_argument_parser().parse_args(
-        [
-            "--input", "clip.mp4",
-            "--source_language", "en",
-            "--target_language", "be",
-            "--timing_short_segment_threshold", "1.2",
-            "--timing_short_segment_max_speed", "1.04",
-            "--timing_max_speed", "1.12",
-            "--timing_max_stretch", "1.10",
-            "--timing_max_overflow", "0.15",
-        ]
-    )
-    assert args.timing_short_segment_threshold == 1.2
-    assert args.timing_short_segment_max_speed == 1.04
-    assert args.timing_max_speed == 1.12
-    assert args.timing_max_stretch == 1.10
-    assert args.timing_max_overflow == 0.15
-
 
 def test_final_cache_fingerprint_includes_policy_and_algorithm_version():
     from dubbing.core.timing import TimingPolicy, timing_cache_fingerprint

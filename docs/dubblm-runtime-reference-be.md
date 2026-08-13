@@ -16,7 +16,7 @@
 
 У нармальным рэжыме праект праходзіць наступныя этапы:
 
-1. Загрузка `.env`, YAML-канфігу і CLI/UI overrides.
+1. Загрузка `.env`, YAML-канфігу і UI/programmatic overrides.
 2. Валідацыя ўваходных параметраў і стварэнне project-specific каталогаў.
 3. Вылучэнне аўдыя з відэа.
 4. Апцыянальнае падзяленне аўдыя на background і vocals.
@@ -45,7 +45,7 @@
 
 - defaults у runtime config;
 - YAML-файл, па змаўчанні `dubbing_config.yml`;
-- CLI або UI overrides.
+- UI або programmatic overrides.
 
 Прыярытэт стандартны: overrides перакрываюць YAML, YAML перакрывае defaults.
 
@@ -295,7 +295,7 @@ UI паказвае:
 
 Для кожнага сегмента reference audio выбіраецца ў такім парадку:
 
-1. `reference_audio_mapping` і `reference_text_mapping`, калі зададзены ўручную.
+1. `reference_audio` і `reference_text` з адпаведнага профілю ў `voices:`.
 2. Агульны WAV спікера з `speakers_audio_dir`.
 3. Segment-specific reference clip, выразаны з арыгінальнага аўдыя, калі сегмент дастаткова доўгі.
 
@@ -500,7 +500,7 @@ Duration estimation выкарыстоўваецца толькі для пер�
 
 ## Палі інтэрфейсу і значэнне налад
 
-Ніжэй апісаны перш за ўсё палі Gradio UI. У канцы секцыі ёсць дадатковыя налады, якія прысутнічаюць у YAML/CLI, але не выведзены ў інтэрфейс.
+Ніжэй апісаны перш за ўсё палі Gradio UI. У канцы секцыі ёсць дадатковыя YAML-налады, якія не выведзены ў інтэрфейс.
 
 ### Workflow
 
@@ -567,9 +567,7 @@ Duration estimation выкарыстоўваецца толькі для пер�
 | `Speaker reference library` | Read-only табліца захаваных speaker references, якія можна падцягнуць назад у mapping. |
 | `Enable emotion analysis` | Уключае этап аналізу эмоцый перад synthesis. |
 | `Min segment reference duration` | Мінімальная даўжыня сегмента, каб праект мог выразаць з яго асобны reference clip. |
-| `TTS system mapping JSON` | Per-speaker назначэнне розных TTS systems. |
 | `TTS prompt prefix` | Global prompt prefix для TTS backend-аў, якія падтрымліваюць prompt-driven synthesis. |
-| `Voice prompt JSON` | Per-speaker style prompts. |
 
 ### Settings: Video / Audio
 
@@ -593,7 +591,7 @@ Duration estimation выкарыстоўваецца толькі для пер�
 | `Debug TTS` | Уключае дадатковы TTS-debug flow, залежны ад backend-а. |
 | `Debug diarize only` | Спыняе pipeline пасля дыярызацыі/transcription і генеруе debug artifacts замест поўнага дубляжу. |
 
-### Дадатковыя YAML/CLI-налады, якія не ўсе бачныя ў UI
+### Дадатковыя YAML-налады, якія не ўсе бачныя ў UI
 
 | Налада | Што значыць |
 |---|---|
@@ -607,8 +605,6 @@ Duration estimation выкарыстоўваецца толькі для пер�
 | `omnivoice_duration` | Базавы duration control для OmniVoice. |
 | `omnivoice_preprocess_prompt` | Preprocess prompt у OmniVoice. |
 | `omnivoice_postprocess_output` | Postprocess audio output у OmniVoice. |
-| `reference_audio_mapping` | Per-speaker mapping рэферэнсных аўдыяфайлаў. У UI прадстаўлена праз dataframe. |
-| `reference_text_mapping` | Per-speaker mapping reference texts. |
 | `translator_type` | Формальна падтрымлівае выбар translator-а, фактычна ў кодзе рэалізаваны толькі `llm`. |
 | `run_step` | Частковы запуск pipeline. |
 | `group_overflow_tolerance` | Дапушчальны overflow для group timing. |

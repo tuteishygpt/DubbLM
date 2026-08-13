@@ -3,7 +3,6 @@
 import os
 import sys
 import json
-import argparse
 from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
 import yaml
@@ -103,7 +102,7 @@ class DubbingConfig:
             'inner_transcription_system': 'deepgram',
         }
         
-        # Required parameters that must come from CLI
+        # Required runtime parameters supplied by the active caller.
         self.required_params = ['input', 'source_language', 'target_language']
         
         # Configuration data
@@ -367,133 +366,3 @@ class DubbingConfig:
     def to_dict(self) -> Dict[str, Any]:
         """Return configuration as dictionary."""
         return self.config.copy()
-    
-    def _removed_create_parser(self) -> argparse.ArgumentParser:
-        """Create argument parser with all CLI options."""
-        parser = argparse.ArgumentParser(description='Smart Video Dubbing Tool')
-        
-        parser.add_argument('--config', type=str, help='Path to YAML configuration file', default='dubbing_config.yml')
-        parser.add_argument('--input', type=str, required=True, help='Path to the video file (required)')
-        parser.add_argument('--source_language', type=str, help='Video source language')
-        parser.add_argument('--target_language', type=str, help='Video target language')
-        parser.add_argument('--whisper_model', type=str, help='Whisper model size for transcription')
-        parser.add_argument('--keep_background', action='store_true', default=argparse.SUPPRESS, help='Keep the background audio in the output')
-        parser.add_argument('--start_time', type=float, help='Start time in seconds to begin processing')
-        parser.add_argument('--duration', type=float, help='Duration in seconds to process')
-        parser.add_argument('--no_cache', action='store_true', default=argparse.SUPPRESS, help='Disable caching of pipeline steps')
-        parser.add_argument('--tts_system', type=str, choices=['coqui', 'xtts', 'openai', 'f5_tts', 'gemini', 'bextts', 'omnivoice'], help='Text-to-speech system to use')
-        parser.add_argument('--tts_model', type=str, help='Model name for the selected TTS provider')
-        parser.add_argument('--omnivoice_space_id', type=str, help='Hugging Face Space ID for OmniVoice')
-        parser.add_argument('--omnivoice_api_name', type=str, help='Gradio API endpoint for OmniVoice synthesis')
-        parser.add_argument('--omnivoice_lang', type=str, help='Language setting for OmniVoice (default: Belarusian)')
-        parser.add_argument('--omnivoice_instruct', type=str, default='', help='Instruct text for OmniVoice synthesis (required by k2-fsa/OmniVoice, empty string = no instruction)')
-        parser.add_argument('--omnivoice_num_steps', type=int, help='Number of OmniVoice generation steps')
-        parser.add_argument('--omnivoice_guidance_scale', type=float, help='Guidance scale for OmniVoice synthesis')
-        parser.add_argument('--omnivoice_denoise', type=lambda x: (str(x).lower() == 'true'), help='Enable OmniVoice denoising (True/False)')
-        parser.add_argument('--omnivoice_speed', type=float, help='Default speaking speed for OmniVoice synthesis')
-        parser.add_argument('--omnivoice_duration', type=float, help='Default OmniVoice duration control value')
-        parser.add_argument('--omnivoice_preprocess_prompt', type=lambda x: (str(x).lower() == 'true'), help='Enable OmniVoice prompt preprocessing (True/False)')
-        parser.add_argument('--omnivoice_postprocess_output', type=lambda x: (str(x).lower() == 'true'), help='Enable OmniVoice audio postprocessing (True/False)')
-        parser.add_argument('--transcription_system', type=str, choices=['whisper', 'openai', 'pyannote_openai', 'whisperx', 'assemblyai', 'gemini', 'deepgram'], help='Transcription system to use')
-        parser.add_argument('--transcription_model', type=str, help='Model name for the selected transcription system')
-        parser.add_argument('--gemini_transcription_model', type=str, help='Model name for Gemini transcription backend')
-        parser.add_argument('--deepgram_model', type=str, help='Model name for Deepgram transcription backend (default: nova-3)')
-        parser.add_argument('--translator_type', type=str, choices=['llm'], help='Translator type to use')
-        parser.add_argument('--llm_provider', type=str, choices=['gemini', 'openrouter'], help='LLM provider to use')
-        parser.add_argument('--llm_model_name', type=str, help='Model name for the LLM')
-        parser.add_argument('--llm_temperature', type=float, help='Temperature for LLM generation')
-        parser.add_argument('--refinement_llm_provider', type=str, choices=['gemini', 'openrouter'], help='LLM provider to use for refinement')
-        parser.add_argument('--refinement_model_name', type=str, help='Model name for refinement')
-        parser.add_argument('--refinement_temperature', type=float, help='Temperature for refinement')
-        parser.add_argument('--refinement_max_tokens', type=int, help='Maximum tokens for OpenRouter refinement')
-        parser.add_argument('--refinement_persona', type=str, choices=['normal', 'casual_manager', 'child', 'housewife'], help='Persona for refinement prompt')
-        parser.add_argument('--translation_prompt_prefix', type=str, help='Additional context to prepend to LLM translation prompts')
-        parser.add_argument('--voice_name', type=str, help='Voice to use for TTS')
-        parser.add_argument('--debug_info', action='store_true', default=argparse.SUPPRESS, help='Generate a debug video with speaker labels')
-        parser.add_argument('--debug_tts', action='store_true', default=argparse.SUPPRESS, help='Enable TTS debugging (e.g., save rejected/silent attempts)')
-        parser.add_argument('--save_original_subtitles', action='store_true', default=argparse.SUPPRESS, help='Save original language subtitles')
-        parser.add_argument('--save_translated_subtitles', action='store_true', default=argparse.SUPPRESS, help='Save translated language subtitles')
-        parser.add_argument('--reference_audio', type=str, help='Path to a reference audio file for f5_tts system')
-        parser.add_argument('--reference_text', type=str, help='Text corresponding to the reference audio for f5_tts system')
-        parser.add_argument('--reference_audio_mapping', type=str, help='JSON string mapping speakers to reference audio file paths')
-        parser.add_argument('--reference_text_mapping', type=str, help='JSON string mapping speakers to reference transcript text')
-        parser.add_argument('--watermark_path', type=str, help='Path to the watermark PNG image')
-        parser.add_argument('--watermark_text', type=str, help='Text to display under the watermark')
-        parser.add_argument('--voice_auto_selection', type=lambda x: (str(x).lower() == 'true'), help='Enable automatic voice selection for TTS (True/False)')
-        parser.add_argument('--enable_emotion_analysis', type=lambda x: (str(x).lower() == 'true'), help='Enable emotion analysis for speech synthesis (True/False)')
-        parser.add_argument('--run_step', type=str,
-                            choices=['full_pipeline', 'from_scratch', 'transcribe_only', 'translate_only', 'combine_video', 'tts_to_end'],
-                            help='Run only a specific, advanced pipeline step. This is intended for debugging or resuming a failed run where prior steps have successfully created their expected output files in the default locations. \
-                                  Example: --run_step full_pipeline (Normal end-to-end run). \
-                                  Example: --run_step from_scratch (Clear cached artifacts and rerun the entire pipeline from zero). \
-                                  Example: --run_step transcribe_only (Diarize and transcribe only; save original subtitles if requested and exit). \
-                                  Example: --run_step translate_only (Reuse cached diarization+transcription from a previous transcribe_only or full run, then translate; save subtitles if requested and exit. Fails if no cached transcription exists.). \
-                                  Example: --run_step combine_video (Assumes audio/output.wav and potentially audio/background.wav exist from prior steps). \
-                                  Example: --run_step tts_to_end (Assumes cached translation artifacts from a previous full run in the same project directory, then regenerates TTS and finishes the video). \
-                                  Note: For most users, running the full pipeline or using --generate_speaker_report is recommended.')
-        parser.add_argument('--include_original_audio', action='store_true', default=argparse.SUPPRESS, help='Include the original audio track in the final video')
-        parser.add_argument('--output', type=str, help='Path to the output video file (default: input_name + target_language + extension in current directory)')
-        parser.add_argument('--generate_speaker_report', action='store_true', default=argparse.SUPPRESS, help='Generate a report of identified speakers and their voice samples, then exit.')
-        parser.add_argument('--tts_system_mapping', type=str, help='JSON string mapping speakers to TTS systems')
-        parser.add_argument('--tts_prompt_prefix', type=str, help='Global prompt prefix for TTS generation instructions (mainly for Gemini TTS)')
-        parser.add_argument('--remove_pauses', type=lambda x: (str(x).lower() == 'true'), help='Remove small pauses from video while preserving keyframes (True/False)')
-        parser.add_argument('--min_pause_duration', default=300, type=float, help='Minimum pause duration to consider for removal (seconds)')
-        parser.add_argument('--keyframe_buffer', default=0.2, type=float, help='Buffer around keyframes to preserve during pause removal (seconds)')
-        parser.add_argument('--use_two_pass_encoding', type=lambda x: (str(x).lower() == 'true'), help='Use two-pass encoding for better video quality during re-encoding (True/False)')
-        parser.add_argument('--dubbed_volume', type=float, help='Gain multiplier for translated track (e.g., 1.2 for +1.6 dB)')
-        parser.add_argument('--background_volume', type=float, help='Gain multiplier for background track when keep_background=true (e.g., 0.56 ≈ -5 dB)')
-        parser.add_argument('--group_overflow_tolerance', type=float, help='Deprecated and ignored; use --timing_max_overflow')
-        parser.add_argument('--timing_short_segment_threshold', type=float, help='Recognized duration below which the short-segment speed limit applies (default: 1.5)')
-        parser.add_argument('--timing_short_segment_max_speed', type=float, help='Maximum tempo multiplier for short segments (default: 1.08)')
-        parser.add_argument('--timing_max_speed', type=float, help='Maximum tempo multiplier for other segments (default: 1.15)')
-        parser.add_argument('--timing_max_stretch', type=float, help='Maximum duration multiplier used to slow short audio into its anchor window (default: 1.15)')
-        parser.add_argument('--timing_max_overflow', type=float, help='Allowed speech overflow beyond an anchor window in seconds (default: 0.25)')
-        parser.add_argument('--semantic_split_enabled', type=_semantic_bool_argument, help='Use semantic planning for isolated speaker tracks (default: true)')
-        parser.add_argument('--tts_preferred_segment_duration', type=float, help='Soft target duration for semantic TTS units (default: 15.0)')
-        parser.add_argument('--tts_hard_segment_duration', type=float, help='Hard maximum duration for semantic TTS units (default: 35.0)')
-        parser.add_argument('--semantic_split_search_window', type=float, help='Semantic boundary search radius around the soft target (default: 10.0)')
-        parser.add_argument('--segment_reference_min_duration', type=float, help='Minimum segment length in seconds required to export dedicated reference audio clips')
-        parser.add_argument(
-            '--isolated_track',
-            action='append',
-            dest='_isolated_track_pairs',
-            metavar='LABEL=PATH',
-            help='Provide an isolated per-speaker audio track. May be repeated: '
-                 '--isolated_track SPEAKER_00=path/spk0.wav --isolated_track SPEAKER_01=path/spk1.wav. '
-                 'When any tracks are supplied, diarization/transcription switches to the '
-                 'isolated-tracks path (see --inner_transcription_system). Speaker labels '
-                 'flow through to the standard voices: mapping unchanged.',
-        )
-        parser.add_argument(
-            '--inner_transcription_system',
-            type=str,
-            choices=['deepgram', 'assemblyai', 'gemini'],
-            help='Transcription backend used per isolated track (default: deepgram). Ignored if no --isolated_track is provided.',
-        )
-
-        return parser
-
-
-def _removed_create_config_from_args(args: argparse.Namespace) -> DubbingConfig:
-    """Create and configure DubbingConfig from CLI arguments."""
-    config = DubbingConfig()
-    
-    # Load YAML config first
-    config.load_from_yaml(args.config)
-    
-    # Override with CLI arguments
-    config.load_from_cli(args)
-    
-    # Validate configuration
-    config.validate()
-    
-    # Process special parameters
-    config.process_special_parameters()
-    
-    return config
-
-
-def _removed_create_argument_parser() -> argparse.ArgumentParser:
-    """Create the main argument parser."""
-    config = DubbingConfig()
-    return config._removed_create_parser()

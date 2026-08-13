@@ -18,8 +18,11 @@ def test_cli_only_config_construction_is_not_importable():
 
     assert not hasattr(config.DubbingConfig, "load_from_cli")
     assert not hasattr(config.DubbingConfig, "_create_parser")
+    assert not hasattr(config.DubbingConfig, "_removed_create_parser")
     assert not hasattr(config, "create_argument_parser")
     assert not hasattr(config, "create_config_from_args")
+    assert not hasattr(config, "_removed_create_argument_parser")
+    assert not hasattr(config, "_removed_create_config_from_args")
 
     with pytest.raises(ModuleNotFoundError, match=r"dubbing\.cli"):
         __import__("dubbing.cli.main")

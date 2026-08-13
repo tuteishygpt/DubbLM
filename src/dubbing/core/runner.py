@@ -91,7 +91,7 @@ def build_config_from_overrides(overrides: dict[str, Any]) -> DubbingConfig:
 
 
 def _run_combine_video_step(dubber: Any, config: DubbingConfig) -> str:
-    """Run the advanced combine-video path used by the CLI."""
+    """Run the advanced combine-video path used by programmatic and UI callers."""
     expected_translated_audio = config.get("translated_audio_path")
     expected_background_audio = None
 

@@ -330,7 +330,8 @@ def tts_selection_cache_fingerprint(
     payload = {
         "selection_policy": "sequential_measured_v1",
         "tts_prompt_prefix": facade.config.get("tts_prompt_prefix"),
-        "voice_prompt": facade.config.get("voice_prompt"),
+        # Retain the frozen cache dimension after removing legacy config input.
+        "voice_prompt": None,
         "segments": [
             {
                 "start": segment.get("start"), "end": segment.get("end"),

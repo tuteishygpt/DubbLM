@@ -8,33 +8,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - PowerShell: `.\.venv\Scripts\Activate.ps1` then `python …`
   - Or directly without activating: `.\.venv\Scripts\python.exe …`
 - Python 3.10+ (README claims 3.12+); FFmpeg on `PATH`.
-- Credentials come from `.env` (loaded via `dotenv` at both CLI and Gradio entry points). Google features run through Vertex AI + ADC (`gcloud auth application-default login`). See `docs/LAUNCH.md` for the Windows-specific launch notes.
+- Credentials come from `.env` (loaded by the Gradio entry point). Google features run through Vertex AI + ADC (`gcloud auth application-default login`). See `docs/LAUNCH.md` for the Windows-specific launch notes.
 
 ## Common commands
-
-Run the CLI:
-```powershell
-python dubblm_cli.py --input ori.mp4 --config dubbing_config.yml
-```
 
 Run the Gradio UI (http://localhost:7860):
 ```powershell
 python gradio_app.py
 ```
-
-Useful CLI flags (see `src/dubbing/core/config.py::create_argument_parser` for the full list):
-- `--source_language`, `--target_language`
-- `--transcription_system` = `deepgram | whisper | gemini | assemblyai | openai (pyannote_openai)`
-- `--tts_system` = `omnivoice | gemini | openai | coqui/xtts | bextts | f5`
-- `--start_time` / `--duration` — process only a slice (great for iterating)
-- `--no_cache` — force fresh processing
-- `--run_step full_pipeline` (default) — normal end-to-end run
-- `--run_step from_scratch` — clears cached artifacts for this input via `CacheManager.clear_input_cache`, disables cache reads for the run, then executes the full pipeline (`SmartDubbing.run_from_scratch`)
-- `--run_step transcribe_only` — extract audio + diarize + transcribe, then exit; saves original subtitles when `save_original_subtitles=true`
-- `--run_step translate_only` — transcribe + translate, then exit; saves subtitles per `save_original_subtitles` / `save_translated_subtitles`
-- `--run_step combine_video` — reuse existing artifacts, only re-mux video+audio
-- `--run_step tts_to_end` — resume from TTS step onward
-- `--generate_speaker_report` — stop after diarization, dump speaker samples
 
 Tests (pytest is not declared in `pyproject.toml`; use the venv):
 ```powershell
@@ -47,17 +28,15 @@ There is no lint/format configuration checked in. Do not add one unless asked.
 
 ## Architecture
 
-Entry points are thin launchers that only prepend `src/` to `sys.path` and delegate:
-- `dubblm_cli.py` → `dubbing.cli.main:main`
-- `gradio_app.py` → `dubbing.ui.gradio_app:main`
+`gradio_app.py` is a thin launcher that prepends `src/` to `sys.path` and delegates to `dubbing.ui.gradio_app:main`.
 
 The Python package layout is unusual: `src/` contains four sibling top-level packages — `dubbing`, `transcription`, `translation`, `tts` — and a top-level module `google_vertex.py`. `pyproject.toml` sets `package-dir = {"" = "src"}` and lists them under `packages.find`. Import them as top-level, not as `dubblm.tts`.
 
 ### Pipeline orchestration
 
 `src/dubbing/core/smart_dubbing.py::SmartDubbing` is the orchestrator. Everything else in `src/dubbing/` is a component it composes:
-- `core/config.py::DubbingConfig` — 3-source config merge (defaults → YAML → CLI/UI overrides). `validate()` requires `input`, `source_language`, `target_language`; `process_special_parameters()` creates the per-video working tree.
-- `core/runner.py::run_dubbing_job` — the shared entry used by both CLI and Gradio. Handles override normalization (JSON fields like `glossary`, `tts_system_mapping`, `reference_audio_mapping` are parsed from strings), then dispatches to `SmartDubbing.run_pipeline`, `run_from_tts`, `generate_diarization_report`, or `video_processor.combine_audio_with_video` based on `run_step` / `generate_speaker_report`. Captures logs into an in-memory buffer for the UI.
+- `core/config.py::DubbingConfig` — config merge (defaults → YAML → programmatic/UI overrides). `validate()` requires `input`, `source_language`, `target_language`; `process_special_parameters()` creates the per-video working tree.
+- `core/runner.py::run_dubbing_job` — shared programmatic/Gradio entry point. It normalizes structured overrides, then dispatches by `run_step` / `generate_speaker_report` and captures logs for the UI.
 - `core/cache_manager.py` — caches transcription/translation between runs.
 - `audio/`, `video/`, `debug/`, `utils/subtitle_utils.py` — audio extraction/separation, ffmpeg muxing, debug reporters, SRT helpers.
 
@@ -75,7 +54,7 @@ Do not hard-code paths — everything is derived from `config.get("project_dir")
 Each stage is a factory returning an interface implementation:
 - Transcription: `src/transcription/transcription_factory.py` — `whisperx`, `assemblyai`, `deepgram`, `gemini`, `pyannote_openai`
 - Translation: `src/translation/translator_factory.py` — LLM-only; providers `gemini` (Vertex) or `openrouter`. Prompt scaffolding lives in `src/translation/prompts.py`.
-- TTS: `src/tts/tts_factory.py` — `omnivoice`, `gemini`, `openai`, `coqui`/`xtts`, `bextts`, `f5`. `tts_system_mapping` allows per-speaker backends.
+- TTS: `src/tts/tts_factory.py` — `omnivoice`, `gemini`, `openai`, `coqui`/`xtts`, `bextts`, `f5`. `voices:` selects per-speaker backends.
 
 When adding a new backend, implement its `*_interface.py` contract and register it in the factory; do not branch on system names outside the factory.
 
@@ -85,7 +64,7 @@ When adding a new backend, implement its `*_interface.py` contract and register 
 
 ### Special pipeline modes
 
-Dispatch lives in `core/runner.py::run_dubbing_job` (Gradio + programmatic path) and `dubbing/cli/main.py` (CLI). Each mode maps to a `SmartDubbing` method:
+Dispatch lives in `core/runner.py::run_dubbing_job` (Gradio + programmatic path). Each mode maps to a `SmartDubbing` method:
 
 - `full_pipeline` → `run_pipeline` — normal end-to-end.
 - `from_scratch` → `run_from_scratch` — wipes cache via `SmartDubbing._reset_input_cache` and then runs the full pipeline. Use this instead of `--no_cache` when you want previously cached blobs actually deleted, not just skipped.
@@ -97,7 +76,7 @@ Dispatch lives in `core/runner.py::run_dubbing_job` (Gradio + programmatic path)
 - `tts_to_end` → `run_from_tts` — resumes after translation; requires cached `translation` (and `emotions` when emotion analysis is on) in the same project directory. Clears TTS chunk caches before regenerating audio, and re-runs `speaker_processor.extract_speaker_audio` first so cloning-based TTS backends (OmniVoice/XTTS/F5/BexTTS) find their per-speaker reference wavs — without this the previous behavior silently skipped every segment and produced a translated_audio track full of silence, i.e. video with background only.
 - `generate_speaker_report=true` → `generate_diarization_report` — diarize + dump samples only; used for building the reference-audio library at `speaker_reference_library/`.
 
-When adding a new mode, wire it in **both** `runner.py` and `cli/main.py`, extend the `--run_step` `choices=[...]` in `core/config.py`, and add the option to the Gradio dropdown in `src/dubbing/ui/gradio_app.py`.
+When adding a new mode, wire it in `runner.py` and add the option to the Gradio dropdown in `src/dubbing/ui/gradio_app.py`.
 
 ### Dubbing Texts editor
 
@@ -108,10 +87,9 @@ The Gradio "Dubbing Texts" tab loads/saves the cached translation pickle (`cache
 
 ## Config conventions
 
-- The `input` field in `dubbing_config.yml` is ignored — always pass `--input` on the CLI.
 - **Per-speaker TTS profiles live under `voices:`.** Each entry (`SPEAKER_00`, `"*"`, …) is a `VoiceProfile` — `tts_system`, `model`, `voice_name`, `style_prompt`, `reference_mode`, `reference_audio`, `reference_text`, and provider-specific knobs in `params:`. `SmartDubbing` builds one TTS client per unique `(system, model, params)` combination — see `src/dubbing/core/voice_profiles.py` and `docs/superpowers/specs/per-voice-tts-profiles.md`.
-- Legacy per-speaker dicts (`voice_name` as dict, `reference_audio_mapping`, `reference_text_mapping`, `tts_system_mapping`, `voice_prompt`) still work: `normalize_voices` folds them into `voices` on load and logs a single deprecation warning. `voices:` takes precedence for the same speaker; other speakers fall back to legacy entries.
-- `glossary` is a per-speaker dict too but unrelated to TTS. In CLI/UI overrides these fields may arrive as JSON strings; `voices` also accepts YAML — `runner._normalize_override_value` decodes both.
+- Legacy per-speaker TTS keys fail fast with a migration message; migrate them to `voices:`.
+- `glossary` is a per-speaker dict too but unrelated to TTS. In UI/programmatic overrides structured fields may arrive as strings; `runner._normalize_override_value` decodes them.
 - `keep_background: true` runs source separation; the README and `docs/LAUNCH.md` both warn it's RAM-heavy on videos >30 min.
 
 ## Docs to consult

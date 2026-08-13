@@ -1223,7 +1223,7 @@ def regenerate_dubbing_text_row(
                 dubber.speaker_processor.extract_speaker_audio(str(audio_path), speakers_rolls)
         except Exception as ref_exc:
             # Non-fatal — resynthesize_one_segment may still find another
-            # reference via reference_audio_mapping / segment ref clip.
+            # reference via the active voice profile / segment ref clip.
             _ = ref_exc
 
         dubber.resynthesize_one_segment(
