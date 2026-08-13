@@ -6,9 +6,11 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from .dependencies import AnonymousCurrentUser
 from .dubbing_texts import DubbingTextConflictError, DubbingTextError, DubbingTextNotFoundError, DubbingTextValidationError, DubbingTextWriteError, DubbingTextService
@@ -45,6 +47,7 @@ def create_app(
     current_user=None,
     heartbeat_interval: float = 15.0,
     sse_poll_interval: float = 0.25,
+    static_dir: str | Path | None = None,
 ) -> FastAPI:
     if heartbeat_interval <= 0 or sse_poll_interval <= 0:
         raise ValueError("SSE intervals must be positive.")
@@ -105,4 +108,46 @@ def create_app(
 
     for router in (config.router, uploads.router, jobs.router, voices.router, references.router, dubbing_texts.router):
         app.include_router(router)
+
+    if static_dir is not None:
+        spa_root = Path(static_dir)
+        index_path = spa_root / "index.html"
+        if not index_path.is_file():
+            raise FileNotFoundError(
+                f"DubbLM SPA build not found at {spa_root}. "
+                "Run `npm --prefix frontend run build` before starting the web app."
+            )
+
+        assets_path = spa_root / "assets"
+        if assets_path.is_dir():
+            app.mount("/assets", StaticFiles(directory=assets_path), name="spa-assets")
+
+        @app.api_route(
+            "/api",
+            methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+            include_in_schema=False,
+        )
+        @app.api_route(
+            "/api/{path:path}",
+            methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+            include_in_schema=False,
+        )
+        async def unknown_api(path: str = ""):
+            return _error("not_found", "API endpoint not found.", 404)
+
+        @app.get("/{path:path}", include_in_schema=False)
+        async def spa_fallback(path: str):
+            return FileResponse(index_path)
+
     return app
+
+
+def create_production_app() -> FastAPI:
+    """Create the local production server with the compiled React SPA."""
+    project_root = Path(__file__).resolve().parents[3]
+    return create_app(static_dir=project_root / "frontend" / "dist")
+
+
+def main() -> None:
+    """Launch the local DubbLM web application."""
+    uvicorn.run(create_production_app(), host="127.0.0.1", port=8000)

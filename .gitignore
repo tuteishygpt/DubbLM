@@ -114,3 +114,8 @@ tts/samples/gemini/gemini_voice_stats.json
 app_out.txt
 wav2vec2_checkpoints/
 .worktrees/
+
+# Local web application artifacts
+frontend/dist/
+frontend/node_modules/
+server_data/

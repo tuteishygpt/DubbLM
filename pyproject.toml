@@ -31,6 +31,7 @@ Homepage = "https://github.com/ArteusAI/DubbLM"
 [project.scripts]
 dubblm = "dubbing.cli.main:main"
 dubblm-gradio = "dubbing.ui.gradio_app:main"
+dubblm-web = "dubbing.web.app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
