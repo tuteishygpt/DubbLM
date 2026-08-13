@@ -124,7 +124,9 @@ def shared_audio_transcription_identity(facade: Any, audio_file: str) -> str:
 
 
 def effective_translation_cache_dimensions(
-    facade: Any, default_llm_models: Dict[str, Any]
+    facade: Any,
+    default_llm_models: Dict[str, Any],
+    semantic_plan_fingerprint: Optional[str],
 ) -> Dict[str, Any]:
     primary_provider = facade.config.get("llm_provider") or "gemini"
     primary_model = facade.config.get("llm_model_name") or default_llm_models.get(
@@ -166,9 +168,7 @@ def effective_translation_cache_dimensions(
         "prompt_prefix": facade._build_translation_prompt_prefix(
             facade.config.get("translation_prompt_prefix")
         ),
-        "semantic_plan_fingerprint": getattr(
-            facade, "_semantic_plan_fingerprint", None
-        ),
+        "semantic_plan_fingerprint": semantic_plan_fingerprint,
     }
 
 
@@ -198,6 +198,7 @@ def build_emotions_cache_key(
     *,
     emotion_analysis_prompt: str,
     soft_style_by_emotion: Dict[str, str],
+    semantic_plan_fingerprint: Optional[str],
 ) -> str:
     provider = str(provider or facade.config.get("emotion_provider") or "gemini").lower()
     model = str(model or facade.config.get("emotion_model") or "gemini-3.1-flash-lite")
@@ -229,7 +230,7 @@ def build_emotions_cache_key(
     dimensions = {
         "schema_version": "emotions_v2",
         "segments": segments,
-        "semantic_plan_fingerprint": getattr(facade, "_semantic_plan_fingerprint", None),
+        "semantic_plan_fingerprint": semantic_plan_fingerprint,
         "algorithm": algorithm,
     }
     return f"emotions_v2_{namespace}_{audio_identity}_{facade._cache_fingerprint(dimensions)}"
@@ -261,7 +262,7 @@ def isolated_tracks_cache_key(
         fingerprint.update(b";")
     fingerprint.update(inner_system.encode("utf-8"))
     if facade.config.get("semantic_split_enabled", True):
-        from ..audio.semantic_planner import SEMANTIC_PLANNER_VERSION
+        from ...audio.semantic_planner import SEMANTIC_PLANNER_VERSION
 
         fingerprint.update(facade._isolated_tracks_raw_cache_key(isolated_tracks).encode("utf-8"))
         semantic_payload = {

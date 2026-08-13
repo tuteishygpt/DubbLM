@@ -5,6 +5,7 @@ import pytest
 
 import dubbing.core.config as config_module
 import dubbing.core.smart_dubbing as smart_dubbing_module
+from dubbing.core.pipeline.context import PipelineRunContext
 from dubbing.core.runner import build_config_from_overrides
 from dubbing.core.smart_dubbing import SmartDubbing
 from dubbing.core.voice_profiles import VoiceProfile
@@ -168,6 +169,21 @@ def test_translation_key_uses_current_facade_dependencies(monkeypatch):
         ("settings",),
         ("fingerprint", {"live": True}),
     ]
+
+
+def test_plan_dependent_cache_keys_use_active_context_over_facade_mirror():
+    dubber = _dubber()
+    dubber._semantic_plan_fingerprint = "stale-facade-plan"
+    dubber._pipeline_run_context = PipelineRunContext(
+        semantic_plan_fingerprint="active-plan-a"
+    )
+
+    dimensions = dubber._effective_translation_cache_dimensions()
+    first_emotions_key = dubber._build_emotions_cache_key("source.wav", [])
+    dubber._pipeline_run_context.semantic_plan_fingerprint = "active-plan-b"
+
+    assert dimensions["semantic_plan_fingerprint"] == "active-plan-a"
+    assert dubber._build_emotions_cache_key("source.wav", []) != first_emotions_key
 
 
 def test_cache_fingerprint_is_canonical_and_rejects_unsupported_values():

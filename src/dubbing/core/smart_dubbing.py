@@ -570,7 +570,11 @@ class SmartDubbing:
         return cache_key_helpers.shared_audio_transcription_identity(self, audio_file)
 
     def _effective_translation_cache_dimensions(self) -> Dict[str, Any]:
-        return cache_key_helpers.effective_translation_cache_dimensions(self, DEFAULT_LLM_MODELS)
+        return cache_key_helpers.effective_translation_cache_dimensions(
+            self,
+            DEFAULT_LLM_MODELS,
+            active_context(self).semantic_plan_fingerprint,
+        )
 
     def _build_dubbing_text_snapshot_key(self, audio_file: str) -> str:
         return cache_key_helpers.build_dubbing_text_snapshot_key(self, audio_file)
@@ -586,6 +590,9 @@ class SmartDubbing:
             self, audio_file, segments, provider, model,
             emotion_analysis_prompt=EMOTION_ANALYSIS_PROMPT,
             soft_style_by_emotion=SOFT_STYLE_BY_EMOTION,
+            semantic_plan_fingerprint=active_context(
+                self
+            ).semantic_plan_fingerprint,
         )
 
     def _restore_semantic_plan_fingerprint(self, audio_file: str) -> None:
