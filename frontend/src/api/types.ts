@@ -27,6 +27,7 @@ export interface SchemaFieldDefinition {
   minimum?: number
   maximum?: number
   options?: Array<SelectOption | string>
+  options_key?: string
 }
 
 export interface ApiSchema {
@@ -65,4 +66,3 @@ export interface ApiClient {
     options?: { onState?: (state: ConnectionState) => void; onError?: (error: Error) => void },
   ): () => void
 }
-
