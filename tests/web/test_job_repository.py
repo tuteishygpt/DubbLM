@@ -43,6 +43,9 @@ class _MemoryJobRepository:
     def append_event(self, *args, **kwargs):
         return "event"
 
+    def delete(self, *args, **kwargs):
+        return None
+
 
 def _consumer(repository: JobRepository) -> tuple[object, ...]:
     return (

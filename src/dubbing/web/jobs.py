@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import threading
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
@@ -103,46 +104,70 @@ class JobService:
         self._media_store.get(owner_id, input_upload_id)
         for upload_id in (isolated_tracks or {}).values():
             self._media_store.get(owner_id, str(upload_id))
-        input_media = self._media_store.materialize_for_job(
-            owner_id, input_upload_id, job_id
-        )
-        values["input"] = str(input_media.path)
-
-        resolved_tracks: dict[str, str] = {}
-        for speaker, upload_id in (isolated_tracks or {}).items():
-            label = str(speaker).strip()
-            if not label:
-                raise JobValidationError("Isolated-track speaker labels cannot be empty.")
-            materialized = self._media_store.materialize_for_job(
-                owner_id, str(upload_id), job_id
-            )
-            resolved_tracks[label] = str(materialized.path)
-        if resolved_tracks:
-            values["isolated_tracks"] = resolved_tracks
-
+        media_ids = [
+            input_upload_id,
+            *(str(value) for value in (isolated_tracks or {}).values()),
+        ]
+        created = False
         try:
-            config = build_config_from_overrides(values)
-        except SystemExit as exc:
-            raise JobValidationError("Dubbing configuration is invalid.") from exc
-        except (TypeError, ValueError) as exc:
-            raise JobValidationError(f"Dubbing configuration is invalid: {exc}") from exc
-
-        config_snapshot = json.loads(
-            json.dumps(
-                config.to_dict(),
-                ensure_ascii=False,
-                default=self._config_json_default,
+            input_media = self._media_store.materialize_for_job(
+                owner_id, input_upload_id, job_id
             )
-        )
-        job = self._repository.create(
-            owner_id,
-            config_snapshot,
-            job_id=job_id,
-            state={"status": "queued"},
-        )
-        if self._queue is not None:
-            self._queue.enqueue(job.id)
-        return job
+            values["input"] = str(input_media.path)
+
+            resolved_tracks: dict[str, str] = {}
+            for speaker, upload_id in (isolated_tracks or {}).items():
+                label = str(speaker).strip()
+                if not label:
+                    raise JobValidationError("Isolated-track speaker labels cannot be empty.")
+                materialized = self._media_store.materialize_for_job(
+                    owner_id, str(upload_id), job_id
+                )
+                resolved_tracks[label] = str(materialized.path)
+            if resolved_tracks:
+                values["isolated_tracks"] = resolved_tracks
+
+            try:
+                config = build_config_from_overrides(values)
+            except SystemExit as exc:
+                raise JobValidationError("Dubbing configuration is invalid.") from exc
+            except (TypeError, ValueError) as exc:
+                raise JobValidationError(
+                    f"Dubbing configuration is invalid: {exc}"
+                ) from exc
+            config_snapshot = json.loads(
+                json.dumps(
+                    config.to_dict(),
+                    ensure_ascii=False,
+                    default=self._config_json_default,
+                )
+            )
+            job = self._repository.create(
+                owner_id,
+                config_snapshot,
+                job_id=job_id,
+                state={"status": "queued"},
+            )
+            created = True
+            if self._queue is not None:
+                self._queue.enqueue(job.id)
+            return job
+        except Exception:
+            self._rollback_submission(owner_id, job_id, media_ids, created)
+            raise
+
+    def _rollback_submission(
+        self,
+        owner_id: str,
+        job_id: str,
+        media_ids: list[str],
+        created: bool,
+    ) -> None:
+        try:
+            if created:
+                self._repository.delete(owner_id, job_id)
+        finally:
+            self._media_store.release_job_materialization(owner_id, job_id, media_ids)
 
     @staticmethod
     def _config_json_default(value: object) -> object:
@@ -219,6 +244,20 @@ class FileJobRepository:
         opaque_id = self._validate_uuid(job_id, "job")
         with self._lock:
             return self._read_job(owner, opaque_id)
+
+    def delete(self, owner_id: str, job_id: str) -> None:
+        """Remove a just-created job when submission cannot be enqueued."""
+        owner = self._validate_owner(owner_id)
+        opaque_id = self._validate_uuid(job_id, "job")
+        with self._lock:
+            self._read_job(owner, opaque_id)
+            job_dir = self._job_path(owner, opaque_id).parent
+            tombstone = job_dir.with_name(f".{opaque_id}.{uuid4()}.deleted")
+            try:
+                os.replace(job_dir, tombstone)
+                shutil.rmtree(tombstone)
+            except OSError as exc:
+                raise JobWriteError(f"Could not delete job data: {exc}") from exc
 
     def list(
         self,

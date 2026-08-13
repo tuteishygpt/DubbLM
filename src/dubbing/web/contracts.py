@@ -23,6 +23,8 @@ class MediaStore(Protocol):
 
     def register(self, *args: object, **kwargs: object) -> object: ...
 
+    def release_job_materialization(self, *args: object, **kwargs: object) -> object: ...
+
 
 class JobRepository(Protocol):
     """Persisted jobs boundary."""
@@ -36,6 +38,8 @@ class JobRepository(Protocol):
     def update(self, *args: object, **kwargs: object) -> object: ...
 
     def append_event(self, *args: object, **kwargs: object) -> object: ...
+
+    def delete(self, *args: object, **kwargs: object) -> object: ...
 
 
 class JobQueue(Protocol):

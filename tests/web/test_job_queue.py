@@ -10,7 +10,12 @@ import pytest
 
 import dubbing.core.config as config_module
 from dubbing.core.runner import DubbingJobResult
-from dubbing.web.jobs import FileJobRepository, JobService, JobValidationError
+from dubbing.web.jobs import (
+    FileJobRepository,
+    JobService,
+    JobValidationError,
+    JobWriteError,
+)
 from dubbing.web.queue import InProcessJobQueue
 from dubbing.web.storage import FileMediaStore, MediaNotFoundError
 
@@ -88,6 +93,87 @@ def test_submission_masks_cross_owner_upload_and_invalid_jobs_are_not_created(
             overrides={"config": "", "source_language": "en"},
         )
     assert repository.list("alice").items == []
+    store.delete("alice", alice_video.id)
+
+
+def test_submission_rolls_back_all_partial_materializations(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_module, "DEFAULT_PROJECTS_ROOT", tmp_path / "prj")
+    store = _store(tmp_path / "data")
+    repository = FileJobRepository(tmp_path / "data")
+    uploads = [
+        _upload(store, "alice", name)
+        for name in ("clip.mp4", "one.wav", "two.wav")
+    ]
+    original = store.materialize_for_job
+    calls = 0
+
+    def fail_third(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise JobWriteError("copy failed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "materialize_for_job", fail_third)
+
+    with pytest.raises(JobWriteError, match="copy failed"):
+        JobService(repository, store).submit(
+            owner_id="alice",
+            input_upload_id=uploads[0].id,
+            isolated_tracks={"ONE": uploads[1].id, "TWO": uploads[2].id},
+            overrides={"config": "", "source_language": "en", "target_language": "es"},
+        )
+
+    assert repository.list("alice").items == []
+    for upload in uploads:
+        store.delete("alice", upload.id)
+
+
+def test_submission_rolls_back_materialization_when_repository_create_fails(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(config_module, "DEFAULT_PROJECTS_ROOT", tmp_path / "prj")
+    store = _store(tmp_path / "data")
+    repository = FileJobRepository(tmp_path / "data")
+    video = _upload(store, "alice", "clip.mp4")
+    monkeypatch.setattr(
+        repository,
+        "create",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(JobWriteError("disk full")),
+    )
+
+    with pytest.raises(JobWriteError, match="disk full"):
+        JobService(repository, store).submit(
+            owner_id="alice",
+            input_upload_id=video.id,
+            overrides={"config": "", "source_language": "en", "target_language": "es"},
+        )
+
+    assert repository.list("alice").items == []
+    store.delete("alice", video.id)
+
+
+def test_submission_removes_job_and_materialization_when_enqueue_fails(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(config_module, "DEFAULT_PROJECTS_ROOT", tmp_path / "prj")
+    store = _store(tmp_path / "data")
+    repository = FileJobRepository(tmp_path / "data")
+    video = _upload(store, "alice", "clip.mp4")
+
+    class BrokenQueue:
+        def enqueue(self, _job_id):
+            raise RuntimeError("queue stopped")
+
+    with pytest.raises(RuntimeError, match="queue stopped"):
+        JobService(repository, store, BrokenQueue()).submit(
+            owner_id="alice",
+            input_upload_id=video.id,
+            overrides={"config": "", "source_language": "en", "target_language": "es"},
+        )
+
+    assert repository.list("alice").items == []
+    store.delete("alice", video.id)
 
 
 def test_queue_runs_fifo_with_one_worker_and_streams_ordered_logs(tmp_path):

@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import BinaryIO, Callable
+from typing import BinaryIO, Callable, Iterable
 from uuid import UUID, uuid4
 
 
@@ -264,6 +264,34 @@ class FileMediaStore:
             stem=Path(record.name).stem,
             path=destination,
         )
+
+    def release_job_materialization(
+        self,
+        owner_id: str,
+        job_id: str,
+        media_ids: Iterable[str],
+    ) -> None:
+        """Remove job-local copies and release their upload references."""
+        owner = self._validate_owner(owner_id)
+        opaque_job_id = self._validate_uuid(job_id, "job")
+        records = [self.get(owner, media_id) for media_id in media_ids]
+        try:
+            for record in records:
+                metadata_path = record.path.parent / "metadata.json"
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                references = [
+                    reference
+                    for reference in metadata.get("references") or []
+                    if reference != opaque_job_id
+                ]
+                if references != list(metadata.get("references") or []):
+                    metadata["references"] = references
+                    self._atomic_json(metadata_path, metadata)
+            self._remove_tree(self._root / "jobs" / owner / opaque_job_id / "media")
+        except MediaStoreError:
+            raise
+        except (OSError, json.JSONDecodeError) as exc:
+            raise MediaWriteError(f"Could not release job media: {exc}") from exc
 
     @staticmethod
     def _metadata(

@@ -31,6 +31,9 @@ class _MemoryMediaStore:
     def register(self, *args, **kwargs):
         return "registered"
 
+    def release_job_materialization(self, *args, **kwargs):
+        return None
+
 
 def _consumer(store: MediaStore) -> tuple[object, object, object, object]:
     return (
@@ -236,3 +239,33 @@ def test_failed_materialization_rolls_back_copy_and_retry_records_reference(tmp_
     assert materialized.path.read_bytes() == b"video"
     with pytest.raises(MediaConflictError):
         store.delete("alice", saved.id)
+
+
+def test_release_job_materialization_removes_copy_and_upload_reference(tmp_path):
+    store = FileMediaStore(tmp_path, probe=lambda *_: True)
+    first = store.save("alice", "clip.mp4", BytesIO(b"video"))
+    second = store.save("alice", "voice.wav", BytesIO(b"audio"))
+    job_id = "f5c1481f-47b1-440a-a08d-c67ce33f31d8"
+    materialized = [
+        store.materialize_for_job("alice", media.id, job_id)
+        for media in (first, second)
+    ]
+
+    store.release_job_materialization("alice", job_id, [first.id, second.id])
+
+    assert not any(item.path.exists() for item in materialized)
+    store.delete("alice", first.id)
+    store.delete("alice", second.id)
+
+
+def test_release_job_materialization_is_safe_for_partially_materialized_set(tmp_path):
+    store = FileMediaStore(tmp_path, probe=lambda *_: True)
+    first = store.save("alice", "clip.mp4", BytesIO(b"video"))
+    second = store.save("alice", "voice.wav", BytesIO(b"audio"))
+    job_id = "f5c1481f-47b1-440a-a08d-c67ce33f31d8"
+    store.materialize_for_job("alice", first.id, job_id)
+
+    store.release_job_materialization("alice", job_id, [first.id, second.id])
+
+    store.delete("alice", first.id)
+    store.delete("alice", second.id)
