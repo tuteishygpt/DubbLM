@@ -5,6 +5,8 @@ import subprocess
 import shutil
 import json
 import re
+from functools import partial
+from importlib import import_module
 from pathlib import Path
 from typing import Optional
 from pydub import AudioSegment
@@ -38,6 +40,24 @@ from ..debug.performance_tracker import PerformanceTracker
 from ..core.log_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def _disable_vr_separator_progress_bars() -> None:
+    """Keep VR separation usable when the worker has no writable stderr."""
+    try:
+        vr_separator = import_module(
+            "audio_separator.separator.architectures.vr_separator"
+        )
+    except ModuleNotFoundError:
+        return
+
+    progress_factory = getattr(vr_separator, "tqdm", None)
+    if progress_factory is not None and not getattr(
+        progress_factory, "_dubblm_progress_disabled", False
+    ):
+        quiet_progress_factory = partial(progress_factory, disable=True)
+        quiet_progress_factory._dubblm_progress_disabled = True
+        vr_separator.tqdm = quiet_progress_factory
 
 
 class AudioProcessor:
@@ -263,6 +283,7 @@ class AudioProcessor:
             self.performance_tracker.end_timing("background_audio")
             return None, None
 
+        _disable_vr_separator_progress_bars()
         separator = Separator()
         separator.load_model(model_filename="2_HP-UVR.pth")
         separated_paths = self._flatten_separated_output(separator.separate(audio_file))

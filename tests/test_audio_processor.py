@@ -79,6 +79,61 @@ def test_separate_background_and_vocals_returns_both_tracks(tmp_path):
     assert Path(vocals_audio).name == "vocals.wav"
 
 
+def test_separate_background_and_vocals_disables_vr_progress_bars(tmp_path, monkeypatch):
+    audio_file = tmp_path / "source.wav"
+    audio_file.write_bytes(b"fake wav bytes")
+    separated_background = tmp_path / "source_(Instrumental)_2_HP-UVR.wav"
+    separated_background.write_bytes(b"background")
+    progress = {"disabled": False}
+
+    def tqdm_stub(iterable, *args, **kwargs):
+        progress["disabled"] = kwargs.get("disable", False)
+        return iterable
+
+    vr_separator_module = types.ModuleType(
+        "audio_separator.separator.architectures.vr_separator"
+    )
+    vr_separator_module.tqdm = tqdm_stub
+    architectures_module = types.ModuleType("audio_separator.separator.architectures")
+    architectures_module.vr_separator = vr_separator_module
+
+    class SeparatorStub:
+        def load_model(self, model_filename):
+            assert model_filename == "2_HP-UVR.pth"
+
+        def separate(self, source_path):
+            assert source_path == str(audio_file)
+            list(vr_separator_module.tqdm(range(1)))
+            return [str(separated_background)]
+
+    separator_module = types.ModuleType("audio_separator.separator")
+    separator_module.Separator = SeparatorStub
+    package_module = types.ModuleType("audio_separator")
+    package_module.separator = separator_module
+    monkeypatch.setitem(sys.modules, "audio_separator", package_module)
+    monkeypatch.setitem(sys.modules, "audio_separator.separator", separator_module)
+    monkeypatch.setitem(
+        sys.modules, "audio_separator.separator.architectures", architectures_module
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "audio_separator.separator.architectures.vr_separator",
+        vr_separator_module,
+    )
+
+    from dubbing.audio.audio_processor import AudioProcessor
+
+    processor = AudioProcessor(
+        CacheManager(use_cache=False, input_file=str(audio_file)),
+        PerformanceTracker(),
+        artifacts_root=str(tmp_path / "artifacts"),
+    )
+
+    processor.separate_background_and_vocals(str(audio_file))
+
+    assert progress["disabled"] is True
+
+
 def test_audio_processor_creates_directories_inside_custom_artifacts_root(tmp_path):
     artifacts_root = tmp_path / "Are" / "artifacts"
 
