@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from dubbing.core.smart_dubbing import SmartDubbing
+from dubbing.core.pipeline.context import PipelineRunContext
 
 
 SYNTHESIS_METHODS = {
@@ -121,13 +122,14 @@ def test_audio_assembly_direct_contract_reorders_in_place_and_keeps_diagnostics_
     dubber.audio_chunks_dir.mkdir()
     dubber.debug_data = {}
     dubber._timing_source_duration = 3.0
+    dubber._pipeline_run_context = PipelineRunContext(timing_source_duration=4.0)
 
     combined, positions = assembly.adjust_and_combine_audio_grouped(dubber, segments)
 
     assert segments == [earlier, later]
     assert [row["segment_index"] for row in dubber.debug_data["timing_alignment"]] == [1, 0]
     assert [row["original_index"] for row in positions] == [1, 0]
-    assert len(combined) == 3000
+    assert len(combined) == 4000
 
 
 def test_raw_cache_service_preserves_audio_and_metadata_contract(tmp_path):

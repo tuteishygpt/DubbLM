@@ -850,6 +850,77 @@ def test_raw_candidate_cache_reuse_skips_provider_call(tmp_path):
     assert result["duration"] == pytest.approx(0.4, abs=0.02)
 
 
+def test_raw_candidate_cache_uses_active_context_not_stale_facade_mirror(tmp_path):
+    from dubbing.core.pipeline.context import PipelineRunContext
+    from dubbing.core.smart_dubbing import SmartDubbing
+
+    class CacheStub:
+        use_cache = True
+
+    class TTSStub:
+        calls = 0
+
+        def synthesize(self, segments_data, **_kwargs):
+            self.calls += 1
+            Sine(440).to_audio_segment(duration=200).export(
+                segments_data[0].output_path, format="wav"
+            )
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.cache_manager = CacheStub()
+    dubber._plan_dependent_cache_allowed = True
+    dubber._pipeline_run_context = PipelineRunContext(
+        plan_dependent_cache_allowed=False
+    )
+    dubber.config = {"target_language": "be"}
+    dubber.audio_chunks_dir = tmp_path / "chunks"
+    dubber.su_audio_chunks_dir = tmp_path / "timed"
+    dubber.audio_chunks_dir.mkdir()
+    dubber.su_audio_chunks_dir.mkdir()
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    segment = _segment(0.0, 0.5)
+    segment["_timing_original_index"] = 0
+    segment["_timing_available_window"] = 0.5
+    tts = TTSStub()
+    metadata = {
+        "index": 0,
+        "segment": segment,
+        "tts_instance": tts,
+        "tts_system": "fake",
+        "base_args": {
+            "speaker": "SPEAKER_00",
+            "text": "target",
+            "segment_index": 0,
+            "target_duration": 0.5,
+        },
+        "base_cache_prefix": "base",
+        "segment_cache_dir": cache_dir,
+        "pool_key": ("fake",),
+        "style_prompt": "",
+    }
+    key = dubber._raw_tts_segment_cache_key(
+        base_cache_prefix="base",
+        tts_system="fake",
+        segment=segment,
+        speaker="SPEAKER_00",
+        translation="target",
+        style_prompt="",
+        reference_audio_path=None,
+        client_pool_settings=("fake",),
+    )
+    cached_path = cache_dir / f"{key}.wav"
+    Sine(440).to_audio_segment(duration=400).export(cached_path, format="wav")
+
+    result = dubber._load_or_synthesize_candidate(
+        metadata, variant="translation", text="target", attempts=1
+    )
+
+    assert tts.calls == 1
+    assert result["duration"] == pytest.approx(0.2, abs=0.02)
+    assert len(AudioSegment.from_file(cached_path)) == 400
+
+
 def test_raw_candidate_key_includes_prompts_emotion_and_reference_contents(tmp_path):
     from dubbing.core.smart_dubbing import SmartDubbing
 

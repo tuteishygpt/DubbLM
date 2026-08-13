@@ -169,7 +169,9 @@ def synthesize_speech(facade, segments: List[Dict], speakers_rolls: Dict, audio_
         raise ValueError(f"Cannot measure processed source audio for timing: {audio_file}") from exc
     _update_pipeline_context(facade, "timing_source_audio_file", audio_file)
 
-    planned = plan_anchor_windows(segments, facade._timing_source_duration)
+    planned = plan_anchor_windows(
+        segments, active_context(facade).timing_source_duration
+    )
     for item in planned:
         item.segment["_timing_original_index"] = item.original_index
         item.segment["_timing_available_window"] = item.available_window
@@ -233,7 +235,7 @@ def synthesize_speech(facade, segments: List[Dict], speakers_rolls: Dict, audio_
     output_path = facade.config.get("translated_audio_path")
     if (
         facade.cache_manager.use_cache
-        and facade._plan_dependent_cache_allowed
+        and active_context(facade).plan_dependent_cache_allowed
         and not facade.config.get("debug_info", False)
         and not has_segment_references
         and cached_audio_path.exists()
@@ -376,7 +378,10 @@ def synthesize_speech(facade, segments: List[Dict], speakers_rolls: Dict, audio_
     combined_audio.export(output_path, format="wav")
     facade.real_segment_positions = real_segment_positions
 
-    if facade.cache_manager.use_cache and facade._plan_dependent_cache_allowed:
+    if (
+        facade.cache_manager.use_cache
+        and active_context(facade).plan_dependent_cache_allowed
+    ):
         shutil.copy(output_path, cached_audio_path)
 
     track_usage: Dict[str, int] = {}
@@ -492,7 +497,7 @@ def load_or_synthesize_candidate(
 
     if (
         facade.cache_manager.use_cache
-        and facade._plan_dependent_cache_allowed
+        and active_context(facade).plan_dependent_cache_allowed
         and cache_path.exists()
     ):
         try:
@@ -536,7 +541,10 @@ def load_or_synthesize_candidate(
             duration = facade._measure_raw_tts_for_timing(candidate_path, index)
             if duration <= 0:
                 continue
-            if facade.cache_manager.use_cache and facade._plan_dependent_cache_allowed:
+            if (
+                facade.cache_manager.use_cache
+                and active_context(facade).plan_dependent_cache_allowed
+            ):
                 facade._cache_raw_tts_segment(
                     candidate_path,
                     cache_path,

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydub import AudioSegment
 
 from ..log_config import get_logger
+from .context import active_context
 from .context import update_context as _update_pipeline_context
 
 logger = get_logger(__name__)
@@ -94,9 +95,10 @@ def adjust_and_combine_audio_grouped(facade, segments: List[Dict]) -> Tuple[Audi
 
     from ..timing import TimingPolicy, calculate_segment_timing, plan_anchor_windows, trim_audio_edges
 
-    source_duration = getattr(facade, "_timing_source_duration", None)
+    context = active_context(facade)
+    source_duration = context.timing_source_duration
     if source_duration is None:
-        source_path = getattr(facade, "_timing_source_audio_file", None)
+        source_path = context.timing_source_audio_file
         if source_path and os.path.exists(str(source_path)):
             source_duration = len(AudioSegment.from_file(source_path)) / 1000.0
         else:
