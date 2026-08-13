@@ -1,3 +1,6 @@
+import importlib
+from pathlib import Path
+
 import pytest
 
 import dubbing.core.config as config_module
@@ -39,6 +42,132 @@ def _dubber(**overrides):
     }
     dubber.config.update(overrides)
     return dubber
+
+
+def _cache_keys_module():
+    return importlib.import_module("dubbing.core.pipeline.cache_keys")
+
+
+@pytest.mark.parametrize(
+    ("facade_name", "module_name", "args", "kwargs"),
+    [
+        ("_cache_fingerprint", "cache_fingerprint", ({"value": 1},), {}),
+        ("_effective_tts_cache_fingerprint", "effective_tts_cache_fingerprint", (["SPEAKER_00"],), {}),
+        ("_file_content_identity", "file_content_identity", (None,), {}),
+        ("_shared_audio_transcription_identity", "shared_audio_transcription_identity", ("source.wav",), {}),
+        ("_effective_translation_cache_dimensions", "effective_translation_cache_dimensions", (), {}),
+        ("_build_dubbing_text_snapshot_key", "build_dubbing_text_snapshot_key", ("source.wav",), {}),
+        ("_build_translation_cache_key", "build_translation_cache_key", ("source.wav",), {}),
+        ("_build_emotions_cache_key", "build_emotions_cache_key", ("source.wav", []), {}),
+        ("_isolated_tracks_cache_key", "isolated_tracks_cache_key", ("source.wav", {}), {}),
+        ("_isolated_tracks_raw_cache_key", "isolated_tracks_raw_cache_key", ({},), {}),
+        ("_semantic_classifier_identity", "semantic_classifier_identity", (), {}),
+        ("_tts_selection_cache_fingerprint", "tts_selection_cache_fingerprint", ([],), {}),
+        ("_segment_cache_metadata_path", "segment_cache_metadata_path", (Path("segment.wav"),), {}),
+        (
+            "_raw_tts_segment_cache_key",
+            "raw_tts_segment_cache_key",
+            (),
+            {
+                "base_cache_prefix": "base",
+                "tts_system": "fake",
+                "segment": {},
+                "speaker": "SPEAKER_00",
+                "translation": "hello",
+                "style_prompt": "",
+                "reference_audio_path": None,
+            },
+        ),
+    ],
+)
+def test_cache_key_facade_methods_delegate_to_module_at_call_time(
+    monkeypatch, facade_name, module_name, args, kwargs
+):
+    module = _cache_keys_module()
+    sentinel = object()
+    calls = []
+
+    def implementation(*implementation_args, **implementation_kwargs):
+        calls.append((implementation_args, implementation_kwargs))
+        return sentinel
+
+    monkeypatch.setattr(module, module_name, implementation)
+    dubber = _dubber()
+    dubber.speakers_audio_dir = Path("speakers")
+
+    assert getattr(dubber, facade_name)(*args, **kwargs) is sentinel
+    assert len(calls) == 1
+
+
+def test_cache_key_module_matches_exact_facade_results(tmp_path):
+    module = _cache_keys_module()
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"stable cache content")
+    raw_key_args = {
+        "base_cache_prefix": "base",
+        "tts_system": "fake",
+        "segment": {
+            "start": 1.0,
+            "end": 2.0,
+            "_timing_available_window": 1.25,
+            "semantic_unit_id": "unit-1",
+            "semantic_plan_fingerprint": "plan-1",
+        },
+        "speaker": "SPEAKER_00",
+        "translation": "hello",
+        "style_prompt": "softly",
+        "reference_audio_path": str(source),
+        "reference_mode": "configured",
+        "reference_text": "sample",
+        "client_pool_settings": ("fake",),
+    }
+
+    assert module.cache_fingerprint({"b": 2, "a": 1}) == (
+        SmartDubbing._cache_fingerprint({"b": 2, "a": 1})
+    )
+    assert module.file_content_identity(str(source)) == (
+        SmartDubbing._file_content_identity(str(source))
+    )
+    assert module.segment_cache_metadata_path(Path("segment.wav")) == (
+        SmartDubbing._segment_cache_metadata_path(Path("segment.wav"))
+    )
+    assert module.raw_tts_segment_cache_key(
+        **raw_key_args,
+        cache_fingerprint=SmartDubbing._cache_fingerprint,
+        file_content_identity=SmartDubbing._file_content_identity,
+    ) == SmartDubbing._raw_tts_segment_cache_key(**raw_key_args)
+
+
+def test_translation_key_uses_current_facade_dependencies(monkeypatch):
+    dubber = _dubber()
+    calls = []
+    monkeypatch.setattr(
+        dubber,
+        "_build_dubbing_text_snapshot_key",
+        lambda audio_file: calls.append(("snapshot", audio_file)) or "snapshot-live",
+    )
+    monkeypatch.setattr(
+        dubber,
+        "_effective_translation_cache_dimensions",
+        lambda: calls.append(("settings",)) or {"live": True},
+    )
+    monkeypatch.setattr(
+        SmartDubbing,
+        "_cache_fingerprint",
+        staticmethod(
+            lambda dimensions: calls.append(("fingerprint", dimensions))
+            or "fingerprint-live"
+        ),
+    )
+
+    assert dubber._build_translation_cache_key("source.wav") == (
+        "translation_v2_snapshot-live_fingerprint-live"
+    )
+    assert calls == [
+        ("snapshot", "source.wav"),
+        ("settings",),
+        ("fingerprint", {"live": True}),
+    ]
 
 
 def test_cache_fingerprint_is_canonical_and_rejects_unsupported_values():
