@@ -24,7 +24,7 @@ Define the palette, spacing, radii, and shadow values as CSS custom properties i
 
 ## Application shell and navigation
 
-`App` renders a stable shell with a branded top bar, the current view title, and a compact local status indicator. The primary navigation becomes a vertical sidebar on wide layouts; each item remains a native button with a text label and the existing `aria-current="page"` state. On narrow viewports it becomes a horizontally scrollable top navigation so controls stay reachable without a hidden menu.
+`App` renders a stable shell with a branded top bar and no global health or update indicator: the current API has no global health endpoint and the SSE connection state remains owned by Jobs. Each view retains its existing sole `<h1>`; the shell does not add a second page heading. The primary navigation becomes a vertical sidebar on wide layouts; each item remains a native button with a text label and the existing `aria-current="page"` state. On narrow viewports it becomes a horizontally scrollable top navigation so controls stay reachable without a hidden menu.
 
 The main content area is centered but no longer artificially narrow for data-heavy screens. Its maximum width is appropriate for tables and uses responsive padding. Loading, error, and status messages use visibly distinct but quiet inline surfaces and retain their current ARIA roles.
 
@@ -42,7 +42,7 @@ Use native inputs, selects, buttons, fieldsets, and tables. Add presentational c
 
 ### Workflow
 
-Present upload and job setup as the primary panel. Put media selection and speaker mapping first, then workflow options in a responsive grid, and finish with the single `Queue job` action. Less frequent workflow settings remain visible and functional but sit in a clearly labelled secondary settings group.
+Present upload and job setup as the primary panel. Put media selection and speaker mapping first, then `source_language`, `target_language`, `run_step`, and `generate_speaker_report` in the primary responsive grid, and finish with the single `Queue job` action. All other public workflow fields (`save_original_subtitles`, `save_translated_subtitles`, `keep_background`, `include_original_audio`, `remove_pauses`, and `inner_transcription_system`) remain visible and functional in a clearly labelled secondary options group, preserving schema order.
 
 ### Jobs
 
@@ -50,7 +50,7 @@ Use state chips in the job list and compact file links. Keep live connection sta
 
 ### Settings
 
-Group schema fields by their existing sections or scope when available; otherwise preserve schema order in a responsive form grid. The save action stays easy to find at the end of the form and on long screens may also be repeated in the section header without changing its request behavior.
+Group schema fields by their existing sections or scope when available; otherwise preserve schema order in a responsive form grid. The existing save action stays easy to find at the end of the form; this design does not add a duplicate save control.
 
 ### Voice Profiles
 
