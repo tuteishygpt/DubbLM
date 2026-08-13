@@ -54,6 +54,9 @@ TRANSCRIPTION_SYSTEM_CHOICES = [
 ]
 LLM_PROVIDER_CHOICES = ["gemini", "openrouter"]
 EMOTION_PROVIDER_CHOICES = ["gemini", "speechbrain"]
+TTS_PROVIDER_CHOICES = [
+    "coqui", "xtts", "f5", "openai", "gemini", "bextts", "omnivoice", "higgs",
+]
 REFINEMENT_PERSONA_CHOICES = [
     "normal", "casual_manager", "child", "housewife", "science_popularizer", "it_buddy", "ai_buddy",
 ]

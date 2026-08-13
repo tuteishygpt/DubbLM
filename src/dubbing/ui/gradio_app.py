@@ -21,7 +21,6 @@ from ..core.runner import build_config_from_overrides, run_dubbing_job, run_dubb
 from ..core.smart_dubbing import SmartDubbing
 from ..core.config import DubbingConfig
 from ..core.voice_profiles import VoiceProfile, normalize_voices, resolve_profile
-from tts.tts_factory import TTSFactory
 from ..web import schema as web_schema
 
 
@@ -30,87 +29,6 @@ DEFAULT_SPEAKER_REFERENCE_LIBRARY_PATH = str(Path(__file__).resolve().parents[3]
 LOGGER = logging.getLogger(__name__)
 
 
-WORKFLOW_FIELDS = [
-    "input",
-    "source_language",
-    "target_language",
-    "output",
-    "config",
-    "run_step",
-    "generate_speaker_report",
-    "save_original_subtitles",
-    "save_translated_subtitles",
-    "keep_background",
-    "include_original_audio",
-    "remove_pauses",
-    # Isolated per-speaker tracks — UI-only intermediate fields. Combined
-    # into ``isolated_tracks`` (dict) inside ``_collect_overrides``. Not
-    # persisted; the file list changes per run.
-    "isolated_tracks_files",
-    "isolated_tracks_labels",
-    "inner_transcription_system",
-]
-
-SETTINGS_FIELDS = [
-    "transcription_model",
-    "transcription_system",
-    "start_time",
-    "duration",
-    "no_cache",
-    "translator_type",
-    "llm_provider",
-    "llm_model_name",
-    "llm_temperature",
-    "translation_prompt_prefix",
-    "glossary",
-    "refinement_llm_provider",
-    "refinement_model_name",
-    "refinement_temperature",
-    "refinement_max_tokens",
-    "refinement_persona",
-    "voice_auto_selection",
-    "voices",
-    "tts_prompt_prefix",
-    "enable_emotion_analysis",
-    "emotion_provider",
-    "emotion_model",
-    "segment_reference_min_duration",
-    "watermark_path",
-    "watermark_text",
-    "keep_original_audio_ranges",
-    "min_pause_duration",
-    "keyframe_buffer",
-    "use_two_pass_encoding",
-    "dubbed_volume",
-    "background_volume",
-    "timing_short_segment_threshold",
-    "timing_short_segment_max_speed",
-    "timing_max_speed",
-    "timing_max_stretch",
-    "timing_max_overflow",
-    "semantic_split_enabled",
-    "tts_preferred_segment_duration",
-    "tts_hard_segment_duration",
-    "semantic_split_search_window",
-    "debug_info",
-    "debug_tts",
-    "debug_diarize_only",
-]
-
-ALL_FIELDS = WORKFLOW_FIELDS + SETTINGS_FIELDS
-NON_PERSISTED_FIELDS = {
-    "input",
-    "output",
-    "config",
-    "run_step",
-    "generate_speaker_report",
-    "isolated_tracks_files",
-    "isolated_tracks_labels",
-}
-PERSISTED_FIELDS = [field for field in ALL_FIELDS if field not in NON_PERSISTED_FIELDS]
-JSON_TEXT_FIELDS = {"glossary"}
-YAML_TEXT_FIELDS: set[str] = set()
-LIST_TEXT_FIELDS = {"keep_original_audio_ranges"}
 SPEAKER_REFERENCE_LIBRARY_HEADERS = ["Speaker ID", "Saved audio path", "Reference text"]
 VOICE_PROFILE_HEADERS = ["Speaker ID", "TTS system", "Model", "Voice name", "Reference mode"]
 VOICE_PROFILE_FIELDS = (
@@ -159,6 +77,7 @@ _TTS_REFERENCE_CAPABILITIES = web_schema.TTS_REFERENCE_CAPABILITIES
 _TRANSCRIPTION_MODEL_CHOICES = web_schema.TRANSCRIPTION_MODEL_CHOICES
 _EMOTION_MODEL_CHOICES = web_schema.EMOTION_MODEL_CHOICES
 _TRANSCRIPTION_MODEL_DEFAULTS = web_schema.TRANSCRIPTION_MODEL_DEFAULTS
+get_tts_profile_choices = web_schema.get_tts_profile_choices
 
 
 def _get_model_choices(system: str) -> list[str]:
@@ -241,26 +160,6 @@ def voice_profile_table_rows(state: object) -> list[list[str]]:
     ]
 
 
-def get_tts_profile_choices(
-    tts_system: str | None,
-    current_model: str | None = None,
-    current_voice: str | None = None,
-) -> tuple[list[str], list[str], list[str]]:
-    provider = str(tts_system or "").lower()
-    models = list(_TTS_MODEL_CHOICES.get(provider, []))
-    voices = list(_TTS_VOICE_CHOICES.get(provider, []))
-    if current_model and current_model not in models:
-        models.append(str(current_model))
-    if current_voice and current_voice not in voices:
-        voices.append(str(current_voice))
-    capability = _TTS_REFERENCE_CAPABILITIES.get(provider, "unsupported")
-    modes = {
-        "required": ["configured", "segment", "speaker"],
-        "optional": ["none", "configured", "segment", "speaker"],
-    }.get(capability, [])
-    return models, voices, modes
-
-
 def _profile_objects(state: object) -> dict[str, VoiceProfile]:
     return {
         speaker: VoiceProfile(
@@ -286,7 +185,7 @@ def _validate_voice_profile_state(
     provider = str(effective.tts_system or "").lower()
     if not provider:
         raise ValueError("The effective profile must define tts_system.")
-    if provider not in TTSFactory.get_available_providers() and provider != "f5_tts":
+    if provider not in web_schema.TTS_PROVIDER_CHOICES and provider != "f5_tts":
         raise ValueError(f"Unknown TTS system: {provider}.")
     if provider in {"gemini", "openai"} and not effective.model:
         raise ValueError(f"A model is required for {provider}.")
@@ -1376,15 +1275,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     config = gr.Textbox(label="Config path", value=defaults.get("config", DEFAULT_CONFIG_PATH))
                     run_step = gr.Dropdown(
                         label="Run step",
-                        choices=[
-                            "full_pipeline",
-                            "from_scratch",
-                            "transcribe_only",
-                            "translate_only",
-                            "analyze_emotions_only",
-                            "combine_video",
-                            "tts_to_end",
-                        ],
+                        choices=web_schema.RUN_MODES,
                         value=defaults.get("run_step") or "full_pipeline",
                         allow_custom_value=False,
                         info="`full_pipeline` — normal end-to-end run. `from_scratch` — clear cached artifacts for this input and rerun everything from zero. `transcribe_only` — stop after diarization + transcription (saves original subtitles when requested). `translate_only` — diarization + transcription + translation only (saves subtitles when requested). `analyze_emotions_only` — re-run emotion analysis over the cached translation and write emotion/style_prompt back into it (requires a prior translate_only or full run). Resume options require existing artifacts from a previous full run: `combine_video` rebuilds the final video from existing dubbed audio; `tts_to_end` restarts at cached translation data, regenerates TTS, and finishes the video.",
@@ -1436,7 +1327,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     )
                     inner_transcription_system = gr.Dropdown(
                         label="Inner transcription (per track)",
-                        choices=["deepgram", "assemblyai", "gemini"],
+                        choices=web_schema.INNER_TRANSCRIPTION_SYSTEM_CHOICES,
                         value=defaults.get("inner_transcription_system", "deepgram"),
                         info="Backend applied to each isolated track. Only used when files are uploaded above.",
                     )
@@ -1468,7 +1359,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                 with gr.Row():
                     transcription_system = gr.Dropdown(
                         label="Transcription system",
-                        choices=["whisper", "openai", "pyannote_openai", "whisperx", "assemblyai", "gemini", "deepgram"],
+                        choices=web_schema.TRANSCRIPTION_SYSTEM_CHOICES,
                         value=defaults.get("transcription_system", "whisper"),
                     )
                     _init_system, _init_model, _init_choices = _get_initial_transcription_model(defaults)
@@ -1488,7 +1379,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     translator_type = gr.Textbox(label="Translator type", value=defaults.get("translator_type", "llm"))
                     llm_provider = gr.Dropdown(
                         label="LLM provider",
-                        choices=["gemini", "openrouter"],
+                        choices=web_schema.LLM_PROVIDER_CHOICES,
                         value=defaults.get("llm_provider", "gemini"),
                     )
                     llm_model_name = gr.Textbox(label="LLM model", value=defaults.get("llm_model_name"))
@@ -1509,7 +1400,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                 with gr.Row():
                     refinement_llm_provider = gr.Dropdown(
                         label="Refinement LLM provider",
-                        choices=["gemini", "openrouter"],
+                        choices=web_schema.LLM_PROVIDER_CHOICES,
                         value=defaults.get("refinement_llm_provider"),
                     )
                     refinement_model_name = gr.Textbox(label="Refinement model", value=defaults.get("refinement_model_name"))
@@ -1525,15 +1416,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     )
                 refinement_persona = gr.Dropdown(
                     label="Refinement persona",
-                    choices=[
-                        "normal",
-                        "casual_manager",
-                        "child",
-                        "housewife",
-                        "science_popularizer",
-                        "it_buddy",
-                        "ai_buddy",
-                    ],
+                    choices=web_schema.REFINEMENT_PERSONA_CHOICES,
                     value=defaults.get("refinement_persona", "normal"),
                     allow_custom_value=True,
                 )
@@ -1556,7 +1439,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     )
                     profile_tts_system = gr.Dropdown(
                         label="Profile TTS system",
-                        choices=TTSFactory.get_available_providers(),
+                        choices=web_schema.TTS_PROVIDER_CHOICES,
                     )
                     profile_model = gr.Dropdown(
                         label="Profile model",
@@ -1616,7 +1499,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     )
                     emotion_provider = gr.Dropdown(
                         label="Emotion provider",
-                        choices=["gemini", "speechbrain"],
+                        choices=web_schema.EMOTION_PROVIDER_CHOICES,
                         value=str(defaults.get("emotion_provider") or "gemini"),
                     )
                     emotion_model = gr.Dropdown(

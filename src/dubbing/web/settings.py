@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -18,6 +19,8 @@ from typing import Any, Mapping
 import yaml
 
 from .schema import JSON_TEXT_FIELDS, LIST_TEXT_FIELDS
+from .schema import TTS_PROVIDER_CHOICES, TTS_REFERENCE_CAPABILITIES
+from ..core.voice_profiles import VoiceProfile, resolve_profile
 
 
 class SettingsError(Exception):
@@ -55,30 +58,37 @@ class VoiceProfilesSnapshot:
 class SettingsService:
     """Load and atomically update one compatible DubbLM YAML document."""
 
+    _path_locks: dict[str, threading.RLock] = {}
+    _path_locks_guard = threading.Lock()
+
     def __init__(self, config_path: str | Path) -> None:
         self._config_path = Path(config_path)
+        key = str(self._config_path.resolve())
+        with self._path_locks_guard:
+            self._write_lock = self._path_locks.setdefault(key, threading.RLock())
 
     def load(self) -> SettingsSnapshot:
         raw = self._read_bytes()
         return SettingsSnapshot(revision=self._revision(raw), values=self._decode(raw))
 
     def save(self, values: Mapping[str, Any], *, revision: str) -> SettingsSnapshot:
-        raw = self._read_bytes()
-        actual_revision = self._revision(raw)
-        if revision != actual_revision:
-            raise SettingsConflictError("Settings were changed by another writer.")
+        with self._write_lock:
+            raw = self._read_bytes()
+            actual_revision = self._revision(raw)
+            if revision != actual_revision:
+                raise SettingsConflictError("Settings were changed by another writer.")
 
-        updated = self._decode(raw)
-        for field, value in values.items():
-            normalized = self._normalize_value(str(field), value)
-            if normalized is None:
-                updated.pop(str(field), None)
-            else:
-                updated[str(field)] = normalized
+            updated = self._decode(raw)
+            for field, value in values.items():
+                normalized = self._normalize_value(str(field), value)
+                if normalized is None:
+                    updated.pop(str(field), None)
+                else:
+                    updated[str(field)] = normalized
 
-        written = self._encode(updated)
-        self._atomic_replace(written)
-        return SettingsSnapshot(revision=self._revision(written), values=updated)
+            written = self._encode(updated)
+            self._atomic_replace(written)
+            return SettingsSnapshot(revision=self._revision(written), values=updated)
 
     def list_profiles(self) -> VoiceProfilesSnapshot:
         """Return only explicit ``voices`` entries without legacy expansion."""
@@ -97,11 +107,11 @@ class SettingsService:
     ) -> VoiceProfilesSnapshot:
         speaker = self._validate_speaker_id(speaker_id)
         candidate = self._clean_profile(profile)
-        self._validate_profile(speaker, candidate)
         snapshot = self.load()
         self._ensure_revision(revision, snapshot.revision)
         profiles = self._profiles_from_values(snapshot.values)
         profiles[speaker] = candidate
+        self._validate_profiles(profiles)
         updated = self.save({"voices": profiles}, revision=revision)
         return VoiceProfilesSnapshot(revision=updated.revision, profiles=profiles)
 
@@ -111,6 +121,7 @@ class SettingsService:
         self._ensure_revision(revision, snapshot.revision)
         profiles = self._profiles_from_values(snapshot.values)
         profiles.pop(speaker, None)
+        self._validate_profiles(profiles)
         updated = self.save({"voices": profiles}, revision=revision)
         return VoiceProfilesSnapshot(revision=updated.revision, profiles=profiles)
 
@@ -138,7 +149,7 @@ class SettingsService:
             reference_mode="configured",
         )
         profiles[speaker] = self._clean_profile(profile)
-        self._validate_profile(speaker, profiles[speaker])
+        self._validate_profiles(profiles)
         updated = self.save({"voices": profiles}, revision=revision)
         return VoiceProfilesSnapshot(revision=updated.revision, profiles=profiles)
 
@@ -227,27 +238,48 @@ class SettingsService:
             cleaned[str(key)] = value
         return cleaned
 
+    @classmethod
+    def _validate_profiles(cls, profiles: Mapping[str, Mapping[str, Any]]) -> None:
+        profile_objects = {
+            speaker: VoiceProfile(
+                tts_system=profile.get("tts_system"),
+                model=profile.get("model"),
+                voice_name=profile.get("voice_name"),
+                style_prompt=profile.get("style_prompt"),
+                reference_audio=profile.get("reference_audio"),
+                reference_text=profile.get("reference_text"),
+                reference_mode=profile.get("reference_mode"),
+                params=dict(profile.get("params") or {}),
+            )
+            for speaker, profile in profiles.items()
+        }
+        for speaker in profile_objects:
+            cls._validate_profile(speaker, resolve_profile(profile_objects, speaker))
+
     @staticmethod
-    def _validate_profile(speaker: str, profile: Mapping[str, Any]) -> None:
-        provider = str(profile.get("tts_system") or "").lower()
+    def _validate_profile(speaker: str, profile: VoiceProfile) -> None:
+        provider = str(profile.tts_system or "").lower()
         if not provider:
             raise SettingsValidationError("A voice profile must define tts_system.")
-        supported = {"coqui", "xtts", "f5", "f5_tts", "openai", "gemini", "bextts", "omnivoice", "higgs"}
+        supported = set(TTS_PROVIDER_CHOICES) | {"f5_tts"}
         if provider not in supported:
             raise SettingsValidationError(f"Unknown TTS system: {provider}.")
-        if provider in {"gemini", "openai"} and not profile.get("model"):
+        if provider in {"gemini", "openai"} and not profile.model:
             raise SettingsValidationError(f"A model is required for {provider}.")
-        capability = {
-            "coqui": "required", "xtts": "required", "f5": "required", "f5_tts": "required",
-            "omnivoice": "required", "higgs": "required", "bextts": "optional",
-        }.get(provider, "unsupported")
-        mode = profile.get("reference_mode")
+        capability = TTS_REFERENCE_CAPABILITIES.get(provider, "unsupported")
+        mode = profile.reference_mode
         if capability == "unsupported" and mode:
             raise SettingsValidationError(f"{provider} does not support reference_mode.")
         if capability in {"required", "optional"} and not mode:
             raise SettingsValidationError(f"An explicit reference_mode is required for {provider}.")
         if capability == "required" and mode == "none":
             raise SettingsValidationError(f"reference_mode 'none' is not allowed for {provider}.")
+        if mode == "configured":
+            configured_path = str(profile.reference_audio or "").strip()
+            if not configured_path or not Path(configured_path).expanduser().is_file():
+                raise SettingsValidationError(
+                    f"Reference file does not exist: {configured_path or '<missing>'}."
+                )
 
     def _atomic_replace(self, content: bytes) -> None:
         self._config_path.parent.mkdir(parents=True, exist_ok=True)

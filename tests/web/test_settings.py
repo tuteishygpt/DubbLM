@@ -1,6 +1,8 @@
 """Framework-independent settings and voice-profile behavior."""
 
 from hashlib import sha256
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 import yaml
@@ -52,6 +54,9 @@ def test_schema_exposes_legacy_run_and_provider_options():
     ]
     assert schema.LLM_PROVIDER_CHOICES == ["gemini", "openrouter"]
     assert schema.EMOTION_PROVIDER_CHOICES == ["gemini", "speechbrain"]
+    assert schema.TTS_PROVIDER_CHOICES == [
+        "coqui", "xtts", "f5", "openai", "gemini", "bextts", "omnivoice", "higgs",
+    ]
     assert schema.REFINEMENT_PERSONA_CHOICES == [
         "normal", "casual_manager", "child", "housewife", "science_popularizer", "it_buddy", "ai_buddy",
     ]
@@ -134,6 +139,26 @@ def test_settings_save_rejects_stale_content_revision(tmp_path):
     assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"llm_temperature": 0.7}
 
 
+def test_settings_save_serializes_same_revision_writers(tmp_path):
+    config_path = tmp_path / "dubbing_config.yml"
+    _write_config(config_path, {"llm_temperature": 0.5})
+    revision = SettingsService(config_path).load().revision
+    barrier = Barrier(2)
+
+    def save(value):
+        barrier.wait()
+        try:
+            SettingsService(config_path).save({"llm_temperature": value}, revision=revision)
+            return "saved"
+        except SettingsConflictError:
+            return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(save, [0.7, 0.9]))
+
+    assert sorted(outcomes) == ["conflict", "saved"]
+
+
 def test_settings_atomic_save_preserves_prior_file_when_replace_fails(tmp_path, monkeypatch):
     config_path = tmp_path / "dubbing_config.yml"
     _write_config(config_path, {"llm_temperature": 0.5})
@@ -206,10 +231,12 @@ def test_profile_delete_and_reference_assignment_share_settings_revision(tmp_pat
             "SPEAKER_01": {"tts_system": "gemini", "model": "keep"},
         }},
     )
+    reference_audio = tmp_path / "SPEAKER_00.wav"
+    reference_audio.write_bytes(b"reference")
     service = SettingsService(config_path)
     assigned = service.assign_reference(
         "SPEAKER_00",
-        reference_audio="reference-library/SPEAKER_00.wav",
+        reference_audio=str(reference_audio),
         reference_text="Reference transcript",
         revision=service.list_profiles().revision,
     )
@@ -219,9 +246,61 @@ def test_profile_delete_and_reference_assignment_share_settings_revision(tmp_pat
         "SPEAKER_00": {
             "tts_system": "higgs",
             "reference_mode": "configured",
-            "reference_audio": "reference-library/SPEAKER_00.wav",
+            "reference_audio": str(reference_audio),
             "reference_text": "Reference transcript",
         }
     }
     with pytest.raises(SettingsConflictError):
         service.delete_profile("SPEAKER_00", revision=assigned.revision)
+
+
+def test_partial_named_profile_inherits_star_fallback_for_validation(tmp_path):
+    config_path = tmp_path / "dubbing_config.yml"
+    _write_config(
+        config_path,
+        {"voices": {"*": {"tts_system": "gemini", "model": "fallback-model"}}},
+    )
+    service = SettingsService(config_path)
+
+    saved = service.put_profile(
+        "SPEAKER_00",
+        {"voice_name": "Kore"},
+        revision=service.list_profiles().revision,
+    )
+
+    assert saved.profiles["SPEAKER_00"] == {"voice_name": "Kore"}
+
+
+def test_star_update_or_delete_cannot_invalidate_partial_named_profiles(tmp_path):
+    config_path = tmp_path / "dubbing_config.yml"
+    _write_config(
+        config_path,
+        {"voices": {
+            "*": {"tts_system": "gemini", "model": "fallback-model"},
+            "SPEAKER_00": {"voice_name": "Kore"},
+        }},
+    )
+    service = SettingsService(config_path)
+    revision = service.list_profiles().revision
+
+    with pytest.raises(SettingsValidationError, match="tts_system"):
+        service.put_profile("*", {"voice_name": "other"}, revision=revision)
+    with pytest.raises(SettingsValidationError, match="tts_system"):
+        service.delete_profile("*", revision=revision)
+
+
+def test_configured_reference_profile_requires_existing_audio_path(tmp_path):
+    config_path = tmp_path / "dubbing_config.yml"
+    _write_config(config_path, {"voices": {}})
+    service = SettingsService(config_path)
+
+    with pytest.raises(SettingsValidationError, match="Reference file does not exist"):
+        service.put_profile(
+            "SPEAKER_00",
+            {
+                "tts_system": "higgs",
+                "reference_mode": "configured",
+                "reference_audio": str(tmp_path / "missing.wav"),
+            },
+            revision=service.list_profiles().revision,
+        )
