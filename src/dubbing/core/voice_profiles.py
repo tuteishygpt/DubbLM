@@ -1,9 +1,6 @@
 """Per-speaker voice profile model.
 
-A :class:`VoiceProfile` groups together every TTS-related knob that used to live
-in a handful of parallel per-speaker mappings (``tts_system_mapping``,
-``voice_name`` as dict, ``voice_prompt``, ``reference_audio_mapping``,
-``reference_text_mapping``). Configs can now express all of that under a single
+A :class:`VoiceProfile` groups every per-speaker TTS setting under one
 ``voices:`` block:
 
 .. code-block:: yaml
@@ -24,18 +21,15 @@ in a handful of parallel per-speaker mappings (``tts_system_mapping``,
       "*":
         tts_system: omnivoice
 
-:func:`normalize_voices` accepts either the new-style ``voices`` block or the
-legacy mappings (still supported, with a one-time :class:`DeprecationWarning`)
-and always returns ``dict[str, VoiceProfile]``. Downstream code can then look
-up ``profiles[speaker]`` (falling back to ``profiles.get("*")``) without caring
-which format the user wrote.
+:func:`normalize_voices` returns ``dict[str, VoiceProfile]``. Downstream code
+can look up ``profiles[speaker]`` (falling back to ``profiles.get("*")``).
 """
 
 from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from .log_config import get_logger
 
@@ -44,13 +38,36 @@ logger = get_logger(__name__)
 
 FALLBACK_SPEAKER = "*"
 
-_LEGACY_FIELDS = (
+_LEGACY_MAPPING_FIELDS = (
     "tts_system_mapping",
-    "voice_name",
     "voice_prompt",
     "reference_audio_mapping",
     "reference_text_mapping",
 )
+
+
+class LegacyVoiceConfigError(ValueError):
+    """Raised when removed per-speaker TTS configuration is supplied."""
+
+
+def reject_legacy_voice_config(config: Mapping[str, Any], *, source: str) -> None:
+    """Reject removed per-speaker TTS settings with an actionable error."""
+    legacy_key = next((key for key in _LEGACY_MAPPING_FIELDS if key in config), None)
+    voice_name = config.get("voice_name")
+    if legacy_key is None and (
+        isinstance(voice_name, Mapping)
+        or (
+            isinstance(voice_name, str)
+            and "," in voice_name
+            and ":" in voice_name
+        )
+    ):
+        legacy_key = "voice_name"
+    if legacy_key is not None:
+        raise LegacyVoiceConfigError(
+            f"Legacy per-speaker TTS setting '{legacy_key}' is no longer supported in {source}; "
+            "migrate speaker configuration to 'voices:'."
+        )
 
 
 @dataclass
@@ -121,68 +138,12 @@ def _profile_from_dict(data: Mapping[str, Any]) -> VoiceProfile:
     return VoiceProfile(params=params, **kwargs)
 
 
-def _emit_legacy_warning(used_fields: Iterable[str]) -> None:
-    fields_str = ", ".join(sorted(used_fields))
-    message = (
-        f"Legacy per-speaker fields ({fields_str}) are deprecated; migrate to "
-        f"the unified 'voices:' block. See docs/superpowers/specs/"
-        f"per-voice-tts-profiles.md."
-    )
-    warnings.warn(message, DeprecationWarning, stacklevel=3)
-    logger.warning(message)
-
-
-def _extract_legacy(config: Mapping[str, Any]) -> Dict[str, VoiceProfile]:
-    """Fold legacy per-speaker fields into VoiceProfile objects."""
-    tts_mapping = config.get("tts_system_mapping") or {}
-    voice_prompt = config.get("voice_prompt") or {}
-    reference_audio_mapping = config.get("reference_audio_mapping") or {}
-    reference_text_mapping = config.get("reference_text_mapping") or {}
-
-    voice_name_field = config.get("voice_name")
-    voice_name_mapping: Dict[str, str] = {}
-    global_voice_name: Optional[str] = None
-    if isinstance(voice_name_field, dict):
-        voice_name_mapping = {str(k): str(v) for k, v in voice_name_field.items()}
-    elif isinstance(voice_name_field, str) and voice_name_field.strip():
-        global_voice_name = voice_name_field.strip()
-
-    used: set[str] = set()
-    if tts_mapping:
-        used.add("tts_system_mapping")
-    if voice_name_mapping:
-        used.add("voice_name")
-    if voice_prompt:
-        used.add("voice_prompt")
-    if reference_audio_mapping:
-        used.add("reference_audio_mapping")
-    if reference_text_mapping:
-        used.add("reference_text_mapping")
-
-    if used:
-        _emit_legacy_warning(used)
-
-    speakers: set[str] = set()
-    for source in (tts_mapping, voice_name_mapping, voice_prompt,
-                   reference_audio_mapping, reference_text_mapping):
-        speakers.update(str(k) for k in source.keys())
-
-    profiles: Dict[str, VoiceProfile] = {}
-    for speaker in sorted(speakers):
-        profiles[speaker] = VoiceProfile(
-            tts_system=tts_mapping.get(speaker) if isinstance(tts_mapping, dict) else None,
-            voice_name=voice_name_mapping.get(speaker) or global_voice_name,
-            style_prompt=voice_prompt.get(speaker) if isinstance(voice_prompt, dict) else None,
-            reference_audio=(
-                reference_audio_mapping.get(speaker)
-                if isinstance(reference_audio_mapping, dict) else None
-            ),
-            reference_text=(
-                reference_text_mapping.get(speaker)
-                if isinstance(reference_text_mapping, dict) else None
-            ),
-        )
-
+def _top_level_profile(config: Mapping[str, Any]) -> Optional[VoiceProfile]:
+    global_voice_name = config.get("voice_name")
+    if isinstance(global_voice_name, str):
+        global_voice_name = global_voice_name.strip() or None
+    else:
+        global_voice_name = None
     top_level = VoiceProfile(
         tts_system=(str(config.get("tts_system")).strip() if config.get("tts_system") else None),
         model=(str(config.get("tts_model")).strip() if config.get("tts_model") else None),
@@ -208,9 +169,8 @@ def _extract_legacy(config: Mapping[str, Any]) -> Dict[str, VoiceProfile]:
             top_level.reference_text,
         )
     ):
-        profiles.setdefault(FALLBACK_SPEAKER, top_level)
-
-    return profiles
+        return top_level
+    return None
 
 
 def _warn_removed_fallback_models(config: Mapping[str, Any]) -> None:
@@ -230,25 +190,21 @@ def _warn_removed_fallback_models(config: Mapping[str, Any]) -> None:
 
 
 def normalize_voices(config: Mapping[str, Any]) -> Dict[str, VoiceProfile]:
-    """Return the effective per-speaker profiles for *config*.
-
-    New-style ``voices`` takes precedence over legacy fields, but any speaker
-    missing from ``voices`` is still filled from the legacy mappings so partial
-    migrations work.
-    """
+    """Return the effective per-speaker profiles for *config*."""
+    reject_legacy_voice_config(config, source="normalize_voices")
     _warn_removed_fallback_models(config)
-    legacy_profiles = _extract_legacy(config)
 
     raw_voices = config.get("voices")
+    top_level = _top_level_profile(config)
     if raw_voices is None:
-        return legacy_profiles
+        return {FALLBACK_SPEAKER: top_level} if top_level is not None else {}
 
     if not isinstance(raw_voices, Mapping):
         logger.warning(
             "Ignoring 'voices' config value; expected a mapping, got %s",
             type(raw_voices).__name__,
         )
-        return legacy_profiles
+        return {FALLBACK_SPEAKER: top_level} if top_level is not None else {}
 
     voices: Dict[str, VoiceProfile] = {}
     for speaker, entry in raw_voices.items():
@@ -264,8 +220,8 @@ def normalize_voices(config: Mapping[str, Any]) -> Dict[str, VoiceProfile]:
             continue
         voices[speaker_key] = _profile_from_dict(entry)
 
-    for speaker, profile in legacy_profiles.items():
-        voices.setdefault(speaker, profile)
+    if top_level is not None:
+        voices.setdefault(FALLBACK_SPEAKER, top_level)
 
     return voices
 

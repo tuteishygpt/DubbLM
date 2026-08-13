@@ -242,18 +242,20 @@ def test_build_app_formats_structured_yaml_values_for_text_inputs(tmp_path):
     config_path = tmp_path / "structured_defaults.yml"
     config_path.write_text(
         yaml.safe_dump(
-            {
-                "glossary": {"AI": "ШІ"},
-                "voice_prompt": {"SPEAKER_00": "warm"},
-                "tts_system_mapping": {"SPEAKER_00": "gemini"},
-                "reference_audio_mapping": {
-                    "SPEAKER_00": "D:/voices/speaker_00.wav",
-                    "SPEAKER_01": "D:/voices/speaker_01.wav",
-                },
-                "reference_text_mapping": {
-                    "SPEAKER_00": "First speaker reference",
-                    "SPEAKER_01": "Second speaker reference",
-                },
+                {
+                    "glossary": {"AI": "ШІ"},
+                    "voices": {
+                        "SPEAKER_00": {
+                            "tts_system": "gemini",
+                            "style_prompt": "warm",
+                            "reference_audio": "D:/voices/speaker_00.wav",
+                            "reference_text": "First speaker reference",
+                        },
+                        "SPEAKER_01": {
+                            "reference_audio": "D:/voices/speaker_01.wav",
+                            "reference_text": "Second speaker reference",
+                        },
+                    },
                 "keep_original_audio_ranges": ["00:10-00:15", "01:02-01:08"],
             },
             sort_keys=False,

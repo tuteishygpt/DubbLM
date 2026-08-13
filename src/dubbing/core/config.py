@@ -12,15 +12,6 @@ from .log_config import get_logger
 logger = get_logger(__name__)
 
 
-def _semantic_bool_argument(value: Any) -> Any:
-    """Parse supported bool spellings while preserving invalid values for normalization."""
-    normalized = str(value).strip().lower()
-    if normalized in {"true", "1"}:
-        return True
-    if normalized in {"false", "0"}:
-        return False
-    return value
-
 DEFAULT_PROJECTS_ROOT = Path(__file__).resolve().parents[3] / "prj"
 
 def _parse_time_to_seconds(time_str: str) -> float:
@@ -81,18 +72,14 @@ class DubbingConfig:
             'save_translated_subtitles': False,
             'reference_audio': None,
             'reference_text': None,
-            'reference_audio_mapping': None,
-            'reference_text_mapping': None,
             'watermark_path': None,
             'watermark_text': None,
             'glossary': None,
-            'voice_prompt': None,
             'voice_auto_selection': True,
             'enable_emotion_analysis': False,
             'include_original_audio': False,
             'output': None, 
             'keep_original_audio_ranges': None,
-            'tts_system_mapping': None,
             'voices': None,
             'tts_prompt_prefix': None,
             'remove_pauses': False,
@@ -128,65 +115,37 @@ class DubbingConfig:
             with open(config_path, 'r', encoding='utf-8') as config_file:
                 yaml_config = yaml.safe_load(config_file)
                 if yaml_config:
-                    # Remove input from YAML config if present - it must come from CLI
+                    from .voice_profiles import reject_legacy_voice_config
+                    reject_legacy_voice_config(yaml_config, source="YAML config")
+                    # Runtime input is supplied by the caller rather than persisted.
                     if 'input' in yaml_config:
-                        logger.warning("Warning: 'input' parameter found in YAML config will be ignored. Input must be provided via CLI argument --input")
+                        logger.warning("Warning: 'input' parameter found in YAML config will be ignored. Input must be provided at runtime.")
                         del yaml_config['input']
                     self.config.update(yaml_config)
             logger.info(f"Loaded configuration from {config_path}")
         elif config_path:
-            logger.warning(f"Config file {config_path} not found, using defaults and CLI arguments")
+            logger.warning(f"Config file {config_path} not found, using defaults and runtime overrides")
     
-    def load_from_cli(self, args: argparse.Namespace) -> None:
-        """Load configuration from CLI arguments."""
-        # Override config with CLI arguments that are not None and actually present
-        arg_dict = vars(args)
-        for key, value in arg_dict.items():
+    def load_overrides(self, overrides: Dict[str, Any]) -> None:
+        """Apply non-null runtime overrides."""
+        for key, value in overrides.items():
             if key == 'config':
                 continue
-            if key == '_isolated_track_pairs':
-                # Parsed separately below
-                continue
-            if hasattr(args, key) and value is not None:
+            if value is not None:
                 self.config[key] = value
-
-        # Fold --isolated_track LABEL=PATH pairs into a dict. Overrides YAML
-        # only when at least one pair is provided on the CLI.
-        pairs = arg_dict.get('_isolated_track_pairs')
-        if pairs:
-            tracks: Dict[str, str] = {}
-            for pair in pairs:
-                if '=' not in pair:
-                    logger.warning(
-                        "Warning: --isolated_track expects LABEL=PATH, got '%s'. Skipping.",
-                        pair,
-                    )
-                    continue
-                label, path = pair.split('=', 1)
-                label = label.strip()
-                path = path.strip()
-                if not label or not path:
-                    logger.warning(
-                        "Warning: --isolated_track has empty label or path in '%s'. Skipping.",
-                        pair,
-                    )
-                    continue
-                tracks[label] = path
-            if tracks:
-                self.config['isolated_tracks'] = tracks
     
     def validate(self) -> None:
         """Validate required configuration parameters."""
-        # Check that input is provided via CLI
+        # Check that runtime input is provided.
         if not self.config.get('input'):
-            logger.error("Error: Input video file must be specified via --input argument")
+            logger.error("Error: Input video file must be specified")
             sys.exit(1)
         
         # Check other required parameters  
         for param in ['source_language', 'target_language']:
             if not self.config.get(param):
                 logger.error(f"Error: {param.replace('_', ' ').title()} not specified")
-                logger.error(f"Please provide it in the config file or with --{param}")
+                logger.error(f"Please provide '{param}' in the config file or runtime overrides")
                 sys.exit(1)
         
         # Check if video file exists
@@ -250,6 +209,9 @@ class DubbingConfig:
     
     def process_special_parameters(self) -> None:
         """Process special parameters that need parsing."""
+        from .voice_profiles import reject_legacy_voice_config
+        reject_legacy_voice_config(self.config, source="merged config")
+
         def _parse_mapping_parameter(name: str) -> None:
             value = self.config.get(name)
             if isinstance(value, str):
@@ -282,16 +244,8 @@ class DubbingConfig:
                 logger.warning("Warning: Invalid duration value. Ignoring it.")
                 self.config['duration'] = None
 
-        # Process voice_name parameter
-        voice_name = self.config['voice_name']
-        if isinstance(voice_name, str) and ',' in voice_name and ':' in voice_name:
-            # Parse as a mapping of speakers to voices
-            voice_mapping = {pair.split(':')[0]: pair.split(':')[1] for pair in voice_name.split(',') if ':' in pair}
-            self.config['voice_name'] = voice_mapping
-            logger.info(f"Using multiple voices: {voice_mapping}")
-        elif isinstance(voice_name, dict):
-            logger.info(f"Using multiple voices from config: {voice_name}")
-        elif voice_name:
+        voice_name = self.config.get('voice_name')
+        if voice_name:
             # Single voice for all speakers
             logger.info(f"Using single voice: {voice_name}")
         
@@ -312,24 +266,6 @@ class DubbingConfig:
             
             self.config['keep_original_audio_ranges'] = parsed_ranges if parsed_ranges else None
         
-        # Process tts_system_mapping parameter
-        tts_system_mapping = self.config.get('tts_system_mapping')
-        if isinstance(tts_system_mapping, str):
-            # Parse JSON string from command line
-            try:
-                tts_system_mapping = json.loads(tts_system_mapping)
-                logger.info(f"Parsed TTS system mapping from JSON: {tts_system_mapping}")
-                self.config['tts_system_mapping'] = tts_system_mapping
-            except json.JSONDecodeError as e:
-                logger.warning(f"Warning: Could not parse tts_system_mapping JSON '{tts_system_mapping}': {e}. Ignoring.")
-                self.config['tts_system_mapping'] = None
-        elif isinstance(tts_system_mapping, dict):
-            logger.info(f"Using TTS system mapping from config: {tts_system_mapping}")
-        else:
-            self.config['tts_system_mapping'] = None
-
-        _parse_mapping_parameter('reference_audio_mapping')
-        _parse_mapping_parameter('reference_text_mapping')
         _parse_mapping_parameter('isolated_tracks')
 
         # Validate isolated_tracks: strip empties, verify files exist
@@ -370,8 +306,7 @@ class DubbingConfig:
             )
             self.config['inner_transcription_system'] = 'deepgram'
 
-        # Consolidate per-speaker fields (legacy mappings + new `voices` block)
-        # into a single dict[str, VoiceProfile].
+        # Normalize the modern `voices` block into VoiceProfile objects.
         raw_voices = self.config.get('voices')
         if isinstance(raw_voices, str):
             try:
@@ -433,7 +368,7 @@ class DubbingConfig:
         """Return configuration as dictionary."""
         return self.config.copy()
     
-    def _create_parser(self) -> argparse.ArgumentParser:
+    def _removed_create_parser(self) -> argparse.ArgumentParser:
         """Create argument parser with all CLI options."""
         parser = argparse.ArgumentParser(description='Smart Video Dubbing Tool')
         
@@ -539,7 +474,7 @@ class DubbingConfig:
         return parser
 
 
-def create_config_from_args(args: argparse.Namespace) -> DubbingConfig:
+def _removed_create_config_from_args(args: argparse.Namespace) -> DubbingConfig:
     """Create and configure DubbingConfig from CLI arguments."""
     config = DubbingConfig()
     
@@ -558,7 +493,7 @@ def create_config_from_args(args: argparse.Namespace) -> DubbingConfig:
     return config
 
 
-def create_argument_parser() -> argparse.ArgumentParser:
+def _removed_create_argument_parser() -> argparse.ArgumentParser:
     """Create the main argument parser."""
     config = DubbingConfig()
-    return config._create_parser() 
+    return config._removed_create_parser()

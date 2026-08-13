@@ -21,15 +21,15 @@ def _profile(**overrides):
     return profile
 
 
-def test_profile_state_loads_new_and_legacy_shapes_with_new_style_precedence():
+def test_profile_state_loads_modern_profiles():
     state = gradio_app.voice_profiles_to_state(
         {
-            "voices": {"SPEAKER_00": _profile(tts_system="gemini")},
-            "tts_system_mapping": {
-                "SPEAKER_00": "openai",
-                "SPEAKER_01": "omnivoice",
+            "voices": {
+                "SPEAKER_00": _profile(tts_system="gemini"),
+                "SPEAKER_01": _profile(
+                    tts_system="omnivoice", model=None, voice_name=None, style_prompt="warm"
+                ),
             },
-            "voice_prompt": {"SPEAKER_01": "warm"},
         }
     )
 

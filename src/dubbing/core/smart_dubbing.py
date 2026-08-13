@@ -36,6 +36,7 @@ from .voice_profiles import (
     FALLBACK_SPEAKER,
     VoiceProfile,
     normalize_voices,
+    reject_legacy_voice_config,
     resolve_profile,
 )
 from ..audio.audio_processor import AudioProcessor
@@ -65,9 +66,6 @@ from .pipeline.context import (
 from tts.tts_factory import TTSFactory
 from translation.llm_translator import DEFAULT_LLM_MODELS
 from translation.translator_factory import TranslatorFactory
-
-# Disable warnings
-warnings.filterwarnings("ignore")
 
 # Get logger
 logger = get_logger(__name__)
@@ -158,6 +156,8 @@ class SmartDubbing:
         Args:
             config: Configuration object containing all settings
         """
+        raw_config = config.to_dict() if hasattr(config, "to_dict") else dict(config)
+        reject_legacy_voice_config(raw_config, source="SmartDubbing config")
         self.config = config
         self.project_dir = Path(self.config.get("project_dir"))
         self.artifacts_root = Path(self.config.get("artifacts_dir"))
@@ -165,20 +165,12 @@ class SmartDubbing:
         self.speakers_audio_dir = Path(self.config.get("speakers_audio_dir"))
         self.audio_chunks_dir = Path(self.config.get("audio_chunks_dir"))
         self.su_audio_chunks_dir = Path(self.config.get("su_audio_chunks_dir"))
-        # Legacy per-speaker mirrors (kept for backward-compat with a few call sites and tests).
-        self.tts_system_mapping = self.config.get('tts_system_mapping') or {}
-        self.voice_prompt = self.config.get('voice_prompt') or {}
-        self.reference_audio_mapping = self.config.get('reference_audio_mapping') or {}
-        self.reference_text_mapping = self.config.get('reference_text_mapping') or {}
-
-        # Unified per-speaker profiles. DubbingConfig.process_special_parameters folds legacy
-        # fields into this dict; when a plain dict-config is used (mostly in tests) we
-        # normalize on the fly so downstream code always sees VoiceProfile objects.
+        # Normalize plain mapping configs so downstream code always sees VoiceProfile objects.
         voices_cfg = self.config.get('voices')
         if not isinstance(voices_cfg, dict) or not all(
             isinstance(v, VoiceProfile) for v in voices_cfg.values()
         ):
-            voices_cfg = normalize_voices(self.config.to_dict() if hasattr(self.config, "to_dict") else dict(self.config))
+            voices_cfg = normalize_voices(raw_config)
             if hasattr(self.config, "set"):
                 self.config.set('voices', voices_cfg)
             else:
