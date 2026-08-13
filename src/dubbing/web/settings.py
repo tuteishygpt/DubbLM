@@ -1,0 +1,275 @@
+"""Revisioned YAML settings and voice-profile operations.
+
+This module deliberately depends on neither Gradio nor FastAPI so it can be
+used by the legacy UI now and HTTP routes later.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Any, Mapping
+
+import yaml
+
+from .schema import JSON_TEXT_FIELDS, LIST_TEXT_FIELDS
+
+
+class SettingsError(Exception):
+    """Base class for settings-domain failures."""
+
+
+class SettingsConflictError(SettingsError):
+    """The caller attempted to write an obsolete document revision."""
+
+
+class SettingsValidationError(SettingsError):
+    """A supplied setting cannot be represented by the compatible YAML form."""
+
+
+class SettingsWriteError(SettingsError):
+    """An atomic replacement could not be completed."""
+
+
+@dataclass(frozen=True)
+class SettingsSnapshot:
+    """A configuration document together with its content-hash revision."""
+
+    revision: str
+    values: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class VoiceProfilesSnapshot:
+    """The persisted voice-profile mapping and its document revision."""
+
+    revision: str
+    profiles: dict[str, dict[str, Any]]
+
+
+class SettingsService:
+    """Load and atomically update one compatible DubbLM YAML document."""
+
+    def __init__(self, config_path: str | Path) -> None:
+        self._config_path = Path(config_path)
+
+    def load(self) -> SettingsSnapshot:
+        raw = self._read_bytes()
+        return SettingsSnapshot(revision=self._revision(raw), values=self._decode(raw))
+
+    def save(self, values: Mapping[str, Any], *, revision: str) -> SettingsSnapshot:
+        raw = self._read_bytes()
+        actual_revision = self._revision(raw)
+        if revision != actual_revision:
+            raise SettingsConflictError("Settings were changed by another writer.")
+
+        updated = self._decode(raw)
+        for field, value in values.items():
+            normalized = self._normalize_value(str(field), value)
+            if normalized is None:
+                updated.pop(str(field), None)
+            else:
+                updated[str(field)] = normalized
+
+        written = self._encode(updated)
+        self._atomic_replace(written)
+        return SettingsSnapshot(revision=self._revision(written), values=updated)
+
+    def list_profiles(self) -> VoiceProfilesSnapshot:
+        """Return only explicit ``voices`` entries without legacy expansion."""
+        snapshot = self.load()
+        return VoiceProfilesSnapshot(
+            revision=snapshot.revision,
+            profiles=self._profiles_from_values(snapshot.values),
+        )
+
+    def put_profile(
+        self,
+        speaker_id: str,
+        profile: Mapping[str, Any],
+        *,
+        revision: str,
+    ) -> VoiceProfilesSnapshot:
+        speaker = self._validate_speaker_id(speaker_id)
+        candidate = self._clean_profile(profile)
+        self._validate_profile(speaker, candidate)
+        snapshot = self.load()
+        self._ensure_revision(revision, snapshot.revision)
+        profiles = self._profiles_from_values(snapshot.values)
+        profiles[speaker] = candidate
+        updated = self.save({"voices": profiles}, revision=revision)
+        return VoiceProfilesSnapshot(revision=updated.revision, profiles=profiles)
+
+    def delete_profile(self, speaker_id: str, *, revision: str) -> VoiceProfilesSnapshot:
+        speaker = self._validate_speaker_id(speaker_id)
+        snapshot = self.load()
+        self._ensure_revision(revision, snapshot.revision)
+        profiles = self._profiles_from_values(snapshot.values)
+        profiles.pop(speaker, None)
+        updated = self.save({"voices": profiles}, revision=revision)
+        return VoiceProfilesSnapshot(revision=updated.revision, profiles=profiles)
+
+    def assign_reference(
+        self,
+        speaker_id: str,
+        *,
+        reference_audio: str,
+        reference_text: str | None,
+        revision: str,
+    ) -> VoiceProfilesSnapshot:
+        speaker = self._validate_speaker_id(speaker_id)
+        snapshot = self.load()
+        self._ensure_revision(revision, snapshot.revision)
+        profiles = self._profiles_from_values(snapshot.values)
+        if speaker not in profiles:
+            raise SettingsValidationError(f"Voice profile not found: {speaker}.")
+        audio = str(reference_audio or "").strip()
+        if not audio:
+            raise SettingsValidationError("Reference audio is required.")
+        profile = dict(profiles[speaker])
+        profile.update(
+            reference_audio=audio,
+            reference_text=str(reference_text).strip() if reference_text else None,
+            reference_mode="configured",
+        )
+        profiles[speaker] = self._clean_profile(profile)
+        self._validate_profile(speaker, profiles[speaker])
+        updated = self.save({"voices": profiles}, revision=revision)
+        return VoiceProfilesSnapshot(revision=updated.revision, profiles=profiles)
+
+    def _read_bytes(self) -> bytes:
+        try:
+            return self._config_path.read_bytes()
+        except FileNotFoundError:
+            return b""
+
+    def _decode(self, raw: bytes) -> dict[str, Any]:
+        if not raw.strip():
+            return {}
+        try:
+            decoded = yaml.safe_load(raw.decode("utf-8"))
+        except (UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise SettingsValidationError(f"Invalid settings YAML: {exc}") from exc
+        if decoded is None:
+            return {}
+        if not isinstance(decoded, dict):
+            raise SettingsValidationError("Settings YAML must contain a mapping.")
+        return dict(decoded)
+
+    @staticmethod
+    def _encode(values: Mapping[str, Any]) -> bytes:
+        return yaml.safe_dump(dict(values), sort_keys=False, allow_unicode=True).encode("utf-8")
+
+    @staticmethod
+    def _revision(raw: bytes) -> str:
+        return hashlib.sha256(raw).hexdigest()
+
+    @staticmethod
+    def _normalize_value(field: str, value: Any) -> Any:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+        if field == "duration":
+            try:
+                if float(value) <= 0:
+                    return None
+            except (TypeError, ValueError):
+                return None
+        if field in JSON_TEXT_FIELDS and isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise SettingsValidationError(f"Invalid JSON for {field}: {exc}") from exc
+        if field in LIST_TEXT_FIELDS and isinstance(value, str):
+            return [line.strip() for line in value.splitlines() if line.strip()]
+        return value
+
+    @staticmethod
+    def _ensure_revision(expected: str, actual: str) -> None:
+        if expected != actual:
+            raise SettingsConflictError("Settings were changed by another writer.")
+
+    @staticmethod
+    def _profiles_from_values(values: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+        raw_profiles = values.get("voices") or {}
+        if not isinstance(raw_profiles, Mapping):
+            raise SettingsValidationError("voices must be a mapping.")
+        profiles: dict[str, dict[str, Any]] = {}
+        for speaker, profile in raw_profiles.items():
+            if not isinstance(profile, Mapping):
+                raise SettingsValidationError(f"Voice profile {speaker} must be a mapping.")
+            profiles[str(speaker)] = dict(profile)
+        return profiles
+
+    @staticmethod
+    def _validate_speaker_id(speaker_id: str) -> str:
+        speaker = str(speaker_id or "").strip()
+        if speaker != "*" and not re.fullmatch(r"SPEAKER_\d+", speaker):
+            raise SettingsValidationError("Speaker ID must be '*' or match SPEAKER_XX.")
+        return speaker
+
+    @staticmethod
+    def _clean_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
+        cleaned: dict[str, Any] = {}
+        for key, value in profile.items():
+            if value is None:
+                continue
+            if isinstance(value, str):
+                value = value.strip()
+                if not value:
+                    continue
+            cleaned[str(key)] = value
+        return cleaned
+
+    @staticmethod
+    def _validate_profile(speaker: str, profile: Mapping[str, Any]) -> None:
+        provider = str(profile.get("tts_system") or "").lower()
+        if not provider:
+            raise SettingsValidationError("A voice profile must define tts_system.")
+        supported = {"coqui", "xtts", "f5", "f5_tts", "openai", "gemini", "bextts", "omnivoice", "higgs"}
+        if provider not in supported:
+            raise SettingsValidationError(f"Unknown TTS system: {provider}.")
+        if provider in {"gemini", "openai"} and not profile.get("model"):
+            raise SettingsValidationError(f"A model is required for {provider}.")
+        capability = {
+            "coqui": "required", "xtts": "required", "f5": "required", "f5_tts": "required",
+            "omnivoice": "required", "higgs": "required", "bextts": "optional",
+        }.get(provider, "unsupported")
+        mode = profile.get("reference_mode")
+        if capability == "unsupported" and mode:
+            raise SettingsValidationError(f"{provider} does not support reference_mode.")
+        if capability in {"required", "optional"} and not mode:
+            raise SettingsValidationError(f"An explicit reference_mode is required for {provider}.")
+        if capability == "required" and mode == "none":
+            raise SettingsValidationError(f"reference_mode 'none' is not allowed for {provider}.")
+
+    def _atomic_replace(self, content: bytes) -> None:
+        self._config_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_name: str | None = None
+        try:
+            with NamedTemporaryFile(
+                mode="wb",
+                dir=self._config_path.parent,
+                prefix=f".{self._config_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temp_name = temporary.name
+                temporary.write(content)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temp_name, self._config_path)
+        except OSError as exc:
+            raise SettingsWriteError(f"Could not write settings: {exc}") from exc
+        finally:
+            if temp_name:
+                try:
+                    Path(temp_name).unlink(missing_ok=True)
+                except OSError:
+                    pass

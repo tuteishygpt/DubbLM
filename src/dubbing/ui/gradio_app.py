@@ -21,9 +21,8 @@ from ..core.runner import build_config_from_overrides, run_dubbing_job, run_dubb
 from ..core.smart_dubbing import SmartDubbing
 from ..core.config import DubbingConfig
 from ..core.voice_profiles import VoiceProfile, normalize_voices, resolve_profile
-from tts.gemini_tts_wrapper import ALL_GEMINI_VOICES, GeminiTTSConfig
-from tts.openai_tts_wrapper import ALL_OPENAI_VOICES
 from tts.tts_factory import TTSFactory
+from ..web import schema as web_schema
 
 
 DEFAULT_CONFIG_PATH = "dubbing_config.yml"
@@ -124,37 +123,6 @@ VOICE_PROFILE_FIELDS = (
     "reference_mode",
 )
 
-_TTS_MODEL_CHOICES = {
-    "gemini": [GeminiTTSConfig.model_fields["model"].default],
-    "openai": ["tts-1", "tts-1-hd"],
-}
-_TTS_VOICE_CHOICES = {
-    "gemini": list(ALL_GEMINI_VOICES),
-    "openai": list(ALL_OPENAI_VOICES),
-}
-_TTS_REFERENCE_CAPABILITIES = {
-    "coqui": "required",
-    "xtts": "required",
-    "f5": "required",
-    "f5_tts": "required",
-    "omnivoice": "required",
-    "higgs": "required",
-    "bextts": "optional",
-    "gemini": "unsupported",
-    "openai": "unsupported",
-}
-OBSOLETE_TTS_KEYS = {
-    "tts_system_mapping",
-    "voice_prompt",
-    "reference_audio_mapping",
-    "reference_text_mapping",
-    "tts_fallback_model",
-    "tts_system",
-    "tts_model",
-    "voice_name",
-    "reference_audio",
-    "reference_text",
-}
 DUBBING_TEXT_HEADERS = [
     "Speaker",
     "Start",
@@ -175,34 +143,22 @@ TRANSLATION_TRACK_FIELDS = (
     "long_translation",
 )
 
-_TRANSCRIPTION_MODEL_CHOICES: dict[str, list[str]] = {
-    "whisper": ["large-v3", "large-v2", "large", "medium", "small", "base", "tiny"],
-    "openai": ["whisper-1"],
-    "pyannote_openai": ["large-v3", "large-v2", "large", "medium", "small", "base", "tiny"],
-    "whisperx": ["large-v3", "large-v2", "large", "medium", "small", "base", "tiny"],
-    "assemblyai": ["best", "nano"],
-    "gemini": ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
-    "deepgram": ["nova-3", "nova-2", "nova", "enhanced", "base", "whisper"],
-}
-
-_EMOTION_MODEL_CHOICES: list[str] = [
-    "gemini-3.1-flash-lite",
-    "gemini-3-flash-preview",
-    "gemini-2.5-flash",
-    "gemma-3-27b-it",
-    "gemma-3-12b-it",
-    "gemma-3-4b-it",
-]
-
-_TRANSCRIPTION_MODEL_DEFAULTS: dict[str, str] = {
-    "whisper": "large-v3",
-    "openai": "whisper-1",
-    "pyannote_openai": "large-v3",
-    "whisperx": "large-v3",
-    "assemblyai": "best",
-    "gemini": "gemini-3-flash-preview",
-    "deepgram": "nova-3",
-}
+# Transitional imports preserve the Gradio UI while the web layer becomes the
+# single source of truth for its public field inventory and option lists.
+WORKFLOW_FIELDS = web_schema.WORKFLOW_FIELDS
+SETTINGS_FIELDS = web_schema.SETTINGS_FIELDS
+ALL_FIELDS = web_schema.ALL_FIELDS
+PERSISTED_FIELDS = web_schema.PERSISTED_FIELDS
+JSON_TEXT_FIELDS = web_schema.JSON_TEXT_FIELDS
+YAML_TEXT_FIELDS = web_schema.YAML_TEXT_FIELDS
+LIST_TEXT_FIELDS = web_schema.LIST_TEXT_FIELDS
+OBSOLETE_TTS_KEYS = web_schema.OBSOLETE_TTS_KEYS
+_TTS_MODEL_CHOICES = web_schema.TTS_MODEL_CHOICES
+_TTS_VOICE_CHOICES = web_schema.TTS_VOICE_CHOICES
+_TTS_REFERENCE_CAPABILITIES = web_schema.TTS_REFERENCE_CAPABILITIES
+_TRANSCRIPTION_MODEL_CHOICES = web_schema.TRANSCRIPTION_MODEL_CHOICES
+_EMOTION_MODEL_CHOICES = web_schema.EMOTION_MODEL_CHOICES
+_TRANSCRIPTION_MODEL_DEFAULTS = web_schema.TRANSCRIPTION_MODEL_DEFAULTS
 
 
 def _get_model_choices(system: str) -> list[str]:
