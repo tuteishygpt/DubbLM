@@ -6,6 +6,7 @@ typed and expose synthesized audio only through registered media references.
 
 from __future__ import annotations
 
+import copy
 import csv
 import hashlib
 import io
@@ -14,6 +15,7 @@ import pickle
 import re
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -21,6 +23,16 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import quote
 
 from .contracts import MediaStore
+
+try:  # Windows locking backend
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - exercised on POSIX
+    _msvcrt = None
+
+try:  # POSIX locking backend
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    _fcntl = None
 
 
 TRANSLATION_FIELDS = (
@@ -115,10 +127,12 @@ class DubbingTextService:
         self,
         media_store: MediaStore,
         *,
+        job_repository: object | None = None,
         context_builder: Callable[[object], DubbingTextContext] | None = None,
         dubber_factory: Callable[[object], object] | None = None,
     ) -> None:
         self._media_store = media_store
+        self._job_repository = job_repository
         self._context_builder = context_builder or self._build_context
         self._dubber_factory = dubber_factory or self._build_dubber
 
@@ -129,8 +143,10 @@ class DubbingTextService:
         job = self._validate_identity(job_id, "Job ID")
         context = self._context_builder(config)
         with self._lock_for(context.snapshot_path):
-            state = self._load_state(context, persist_ids=True)
-            return self._public_snapshot(owner, job, state)
+            with self._interprocess_lock(context.snapshot_path):
+                state = self._load_state(context, persist_ids=True)
+                self._ensure_audio_refs(owner, job, state)
+                return self._public_snapshot(owner, job, state)
 
     def save(
         self,
@@ -145,12 +161,14 @@ class DubbingTextService:
         job = self._validate_identity(job_id, "Job ID")
         context = self._context_builder(config)
         with self._lock_for(context.snapshot_path):
-            state = self._load_state(context, persist_ids=True)
-            self._ensure_revision(revision, state.revision)
-            self._apply_edits(state.segments, segments)
-            state.revision = self._persist_state(state)
-            state.source = "snapshot"
-            return self._public_snapshot(owner, job, state)
+            with self._interprocess_lock(context.snapshot_path):
+                state = self._load_state(context, persist_ids=True)
+                self._ensure_audio_refs(owner, job, state)
+                self._ensure_revision(revision, state.revision)
+                self._apply_edits(state.segments, segments)
+                state.revision = self._persist_state(state)
+                state.source = "snapshot"
+                return self._public_snapshot(owner, job, state)
 
     def regenerate(
         self,
@@ -167,35 +185,53 @@ class DubbingTextService:
         requested_id = self._validate_identity(segment_id, "Segment ID")
         context = self._context_builder(config)
         with self._lock_for(context.snapshot_path):
-            state = self._load_state(context, persist_ids=True)
-            self._ensure_revision(revision, state.revision)
-            row_index = next(
-                (
-                    index
-                    for index, segment in enumerate(state.segments)
-                    if str(segment.get("segment_id") or "") == requested_id
-                ),
-                -1,
-            )
-            if row_index < 0:
-                raise DubbingTextNotFoundError(f"Dubbing segment not found: {requested_id}.")
-            segment = state.segments[row_index]
-            override = (
-                str(synthesized_text).strip()
-                if synthesized_text is not None
-                else str(segment.get("synthesized_text") or segment.get("translation") or "").strip()
-            )
-            if not override:
-                raise DubbingTextValidationError("Cannot regenerate a segment with empty text.")
-            dubber = self._dubber_factory(context.config)
-            dubber.resynthesize_one_segment(
-                segments=state.segments,
-                segment_index=row_index,
-                override_text=override,
-            )
-            state.revision = self._persist_state(state)
-            public = self._public_segment(owner, job, state.segments[row_index])
-            return DubbingTextRegeneration(revision=state.revision, segment=public)
+            with self._interprocess_lock(context.snapshot_path):
+                state = self._load_state(context, persist_ids=True)
+                self._ensure_audio_refs(owner, job, state)
+                self._ensure_revision(revision, state.revision)
+                row_index = next(
+                    (
+                        index
+                        for index, segment in enumerate(state.segments)
+                        if str(segment.get("segment_id") or "") == requested_id
+                    ),
+                    -1,
+                )
+                if row_index < 0:
+                    raise DubbingTextNotFoundError(f"Dubbing segment not found: {requested_id}.")
+                segment = state.segments[row_index]
+                override = (
+                    str(synthesized_text).strip()
+                    if synthesized_text is not None
+                    else str(segment.get("synthesized_text") or segment.get("translation") or "").strip()
+                )
+                if not override:
+                    raise DubbingTextValidationError("Cannot regenerate a segment with empty text.")
+                previous_segment = copy.deepcopy(segment)
+                previous_path = Path(str(segment.get("synthesized_speech_file") or ""))
+                previous_audio = previous_path.read_bytes() if previous_path.is_file() else None
+                dubber = self._dubber_factory(context.config)
+                try:
+                    dubber.resynthesize_one_segment(
+                        segments=state.segments,
+                        segment_index=row_index,
+                        override_text=override,
+                    )
+                    state.segments[row_index].pop("synthesized_audio_ref", None)
+                    state.revision = self._persist_state(state)
+                    self._ensure_audio_refs(owner, job, state)
+                except Exception as exc:
+                    rollback_error = self._restore_regenerated_audio(
+                        state.segments[row_index], previous_path, previous_audio
+                    )
+                    state.segments[row_index] = previous_segment
+                    if rollback_error is not None:
+                        raise DubbingTextWriteError(
+                            f"Regeneration failed ({exc}); audio rollback failed: {rollback_error}"
+                        ) from exc
+                    raise
+                public = self._public_segment(owner, job, state.segments[row_index])
+                return DubbingTextRegeneration(revision=state.revision, segment=public)
 
     def _load_state(
         self, context: DubbingTextContext, *, persist_ids: bool
@@ -274,28 +310,24 @@ class DubbingTextService:
         self, owner: str, job_id: str, segment: Mapping[str, Any]
     ) -> DubbingTextSegment:
         audio: SegmentAudio | None = None
-        audio_path = str(segment.get("synthesized_speech_file") or "").strip()
-        if audio_path and Path(audio_path).is_file():
-            registration = {
-                "owner_id": owner,
-                "path": audio_path,
-                "name": Path(audio_path).name,
-                "kind": "dubbing_segment",
-            }
-            try:
-                record = self._media_store.register(**registration, job_id=job_id)
-            except TypeError as exc:
-                if "job_id" not in str(exc):
-                    raise
-                record = self._media_store.register(**registration)
+        media_id = str(segment.get("synthesized_audio_ref") or "").strip()
+        if media_id:
+            record = self._media_store.get(owner_id=owner, media_id=media_id)
             media_id = self._record_value(record, "id", "media_id")
+            url = self._record_value(record, "url")
+            if not url:
+                if self._job_repository is None:
+                    raise DubbingTextValidationError(
+                        "A job repository is required to authorize synthesized audio."
+                    )
+                url = (
+                    f"/api/jobs/{quote(job_id, safe='')}/files/"
+                    f"{quote(media_id, safe='')}"
+                )
             audio = SegmentAudio(
                 id=media_id,
-                name=self._record_value(record, "name") or Path(audio_path).name,
-                url=(
-                    self._record_value(record, "url")
-                    or f"/api/jobs/{quote(job_id, safe='')}/files/{quote(media_id, safe='')}"
-                ),
+                name=self._record_value(record, "name") or "segment audio",
+                url=url,
             )
         return DubbingTextSegment(
             segment_id=str(segment.get("segment_id") or ""),
@@ -308,6 +340,60 @@ class DubbingTextService:
             style_prompt=str(segment.get("style_prompt") or ""),
             audio=audio,
         )
+
+    def _ensure_audio_refs(
+        self, owner: str, job_id: str, state: _LoadedState
+    ) -> None:
+        changed = False
+        records: list[object] = []
+        for segment in state.segments:
+            audio_path = str(segment.get("synthesized_speech_file") or "").strip()
+            if not audio_path or not Path(audio_path).is_file():
+                continue
+            media_id = str(segment.get("synthesized_audio_ref") or "").strip()
+            if media_id:
+                record = self._media_store.get(owner_id=owner, media_id=media_id)
+            else:
+                record = self._media_store.register(
+                    owner_id=owner,
+                    path=audio_path,
+                    name=Path(audio_path).name,
+                    kind="dubbing_segment",
+                )
+                media_id = self._record_value(record, "id", "media_id")
+                if not media_id:
+                    raise DubbingTextValidationError(
+                        "MediaStore returned no synthesized-audio identifier."
+                    )
+                segment["synthesized_audio_ref"] = media_id
+                changed = True
+            records.append(record)
+        if changed:
+            state.revision = self._persist_snapshot(state)
+        for record in records:
+            self._authorize_job_audio(owner, job_id, record)
+
+    def _authorize_job_audio(self, owner: str, job_id: str, record: object) -> None:
+        if self._job_repository is None:
+            if not self._record_value(record, "url"):
+                raise DubbingTextValidationError(
+                    "A job repository is required to authorize synthesized audio."
+                )
+            return
+        job = self._job_repository.get(owner, job_id)
+        media_id = self._record_value(record, "id", "media_id")
+        files = [dict(item) for item in job.files]
+        if any(str(item.get("id") or "") == media_id for item in files):
+            return
+        files.append(
+            {
+                "id": media_id,
+                "name": self._record_value(record, "name") or "segment audio",
+                "kind": self._record_value(record, "kind") or "dubbing_segment",
+                "size": int(self._record_value(record, "size") or 0),
+            }
+        )
+        self._job_repository.update(owner, job_id, files=files)
 
     @staticmethod
     def _apply_edits(
@@ -398,43 +484,95 @@ class DubbingTextService:
     @staticmethod
     def _atomic_group_replace(contents: Mapping[Path, bytes]) -> None:
         temporary_paths: dict[Path, Path] = {}
-        previous: dict[Path, bytes | None] = {}
+        rollback_paths: dict[Path, Path | None] = {}
         replaced: list[Path] = []
+        failed_rollback_paths: set[Path] = set()
         try:
             for path, content in contents.items():
                 path.parent.mkdir(parents=True, exist_ok=True)
-                previous[path] = path.read_bytes() if path.is_file() else None
                 with NamedTemporaryFile(
                     mode="wb",
                     dir=path.parent,
                     prefix=f".{path.name}.",
-                    suffix=".tmp",
+                    suffix=".new.tmp",
                     delete=False,
                 ) as temporary:
                     temporary.write(content)
                     temporary.flush()
                     os.fsync(temporary.fileno())
                     temporary_paths[path] = Path(temporary.name)
+                if path.is_file():
+                    with NamedTemporaryFile(
+                        mode="wb",
+                        dir=path.parent,
+                        prefix=f".{path.name}.",
+                        suffix=".rollback.tmp",
+                        delete=False,
+                    ) as rollback:
+                        rollback.write(path.read_bytes())
+                        rollback.flush()
+                        os.fsync(rollback.fileno())
+                        rollback_paths[path] = Path(rollback.name)
+                else:
+                    rollback_paths[path] = None
             for path, temporary in temporary_paths.items():
                 os.replace(temporary, path)
                 replaced.append(path)
         except OSError as exc:
+            rollback_errors: list[str] = []
             for path in reversed(replaced):
-                original = previous[path]
                 try:
-                    if original is None:
+                    rollback = rollback_paths[path]
+                    if rollback is None:
                         path.unlink(missing_ok=True)
                     else:
-                        path.write_bytes(original)
-                except OSError:
-                    pass
+                        os.replace(rollback, path)
+                except OSError as rollback_exc:
+                    failed_rollback_paths.add(path)
+                    rollback_errors.append(f"{path}: {rollback_exc}")
+            if rollback_errors:
+                raise DubbingTextWriteError(
+                    f"Could not write dubbing text artifacts: {exc}; rollback failed: "
+                    + "; ".join(rollback_errors)
+                ) from exc
             raise DubbingTextWriteError(f"Could not write dubbing text artifacts: {exc}") from exc
         finally:
-            for temporary in temporary_paths.values():
+            cleanup_paths = [*temporary_paths.values()]
+            cleanup_paths.extend(
+                rollback
+                for path, rollback in rollback_paths.items()
+                if path not in failed_rollback_paths
+            )
+            for temporary in cleanup_paths:
+                if temporary is None:
+                    continue
                 try:
                     temporary.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    @staticmethod
+    def _restore_regenerated_audio(
+        current_segment: Mapping[str, Any],
+        previous_path: Path,
+        previous_audio: bytes | None,
+    ) -> OSError | None:
+        current_path = Path(str(current_segment.get("synthesized_speech_file") or ""))
+        try:
+            if current_path and current_path != previous_path:
+                current_path.unlink(missing_ok=True)
+            if previous_audio is None:
+                if previous_path:
+                    previous_path.unlink(missing_ok=True)
+            else:
+                previous_path.parent.mkdir(parents=True, exist_ok=True)
+                with previous_path.open("wb") as restored:
+                    restored.write(previous_audio)
+                    restored.flush()
+                    os.fsync(restored.fileno())
+        except OSError as exc:
+            return exc
+        return None
 
     @staticmethod
     def _seed_from_transcription(config: object) -> list[dict[str, Any]]:
@@ -552,6 +690,34 @@ class DubbingTextService:
         key = str(path.resolve())
         with cls._locks_guard:
             return cls._locks.setdefault(key, threading.RLock())
+
+    @staticmethod
+    @contextmanager
+    def _interprocess_lock(path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name(f".{path.name}.lock")
+        lock_path.touch(exist_ok=True)
+        with lock_path.open("r+b") as lock_file:
+            try:
+                if _msvcrt is not None:
+                    lock_file.seek(0)
+                    _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_LOCK, 1)
+                elif _fcntl is not None:
+                    _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+                else:  # pragma: no cover
+                    raise OSError("No supported file-locking backend is available.")
+            except OSError as exc:
+                raise DubbingTextWriteError(
+                    f"Could not lock dubbing texts for writing: {exc}"
+                ) from exc
+            try:
+                yield
+            finally:
+                if _msvcrt is not None:
+                    lock_file.seek(0)
+                    _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)
+                else:
+                    _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
 
     @staticmethod
     def _record_value(record: object, *names: str) -> str:

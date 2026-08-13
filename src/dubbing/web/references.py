@@ -7,11 +7,13 @@ opaque media identifiers and URLs.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import re
-import shutil
 import threading
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -19,6 +21,16 @@ from typing import Any
 from urllib.parse import quote
 
 import yaml
+
+try:  # Windows locking backend
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - exercised on POSIX
+    _msvcrt = None
+
+try:  # POSIX locking backend
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    _fcntl = None
 
 from .contracts import MediaStore
 
@@ -115,36 +127,41 @@ class ReferenceLibraryService:
         name = audio_name or Path(str(source_audio)).name or "reference.wav"
 
         with self._lock:
-            actual, metadata = self._read_library(owner)
-            self._ensure_revision(revision, actual)
-            old = next(
-                (item for item in metadata if item[1].get("speaker_id") == speaker),
-                None,
-            )
-            saved = self._media_store.save(
-                owner_id=owner,
-                source=source_audio,
-                name=name,
-                kind="reference",
-            )
-            media_id = self._record_id(saved)
-            target = self._owner_dir(owner) / self._safe_component(speaker) / "meta.yml"
-            payload = {
-                "speaker_id": speaker,
-                "reference_audio_ref": media_id,
-                "reference_text": str(reference_text or "").strip(),
-            }
-            try:
-                self._atomic_metadata_replace(target, payload)
-            except ReferenceWriteError:
-                self._delete_media(owner, media_id)
-                raise
+            with self._interprocess_lock():
+                actual, metadata = self._read_library(owner)
+                self._ensure_revision(revision, actual)
+                old = next(
+                    (item for item in metadata if item[1].get("speaker_id") == speaker),
+                    None,
+                )
+                saved = self._media_store.save(
+                    owner_id=owner,
+                    source=source_audio,
+                    name=name,
+                    kind="reference",
+                )
+                media_id = self._record_id(saved)
+                target = (
+                    old[0]
+                    if old is not None
+                    else self._owner_dir(owner) / self._encoded_component(speaker) / "meta.yml"
+                )
+                payload = {
+                    "speaker_id": speaker,
+                    "reference_audio_ref": media_id,
+                    "reference_text": str(reference_text or "").strip(),
+                }
+                try:
+                    self._atomic_metadata_replace(target, payload)
+                except ReferenceWriteError:
+                    self._delete_media(owner, media_id)
+                    raise
 
-            if old is not None:
-                old_id = str(old[1].get("reference_audio_ref") or "").strip()
-                if old_id and old_id != media_id:
-                    self._delete_media(owner, old_id)
-            return self.list(owner_id=owner)
+                if old is not None:
+                    old_id = str(old[1].get("reference_audio_ref") or "").strip()
+                    if old_id and old_id != media_id:
+                        self._delete_media(owner, old_id)
+                return self.list(owner_id=owner)
 
     def delete(
         self, *, owner_id: str, speaker_id: str, revision: str
@@ -152,15 +169,40 @@ class ReferenceLibraryService:
         owner = self._validate_owner(owner_id)
         speaker = self._validate_speaker(speaker_id)
         with self._lock:
-            actual, metadata = self._read_library(owner)
-            self._ensure_revision(revision, actual)
-            matches = [item for item in metadata if item[1].get("speaker_id") == speaker]
-            for metadata_path, item in matches:
-                media_id = str(item.get("reference_audio_ref") or "").strip()
-                shutil.rmtree(metadata_path.parent)
-                if media_id:
-                    self._delete_media(owner, media_id)
-            return self.list(owner_id=owner)
+            with self._interprocess_lock():
+                actual, metadata = self._read_library(owner)
+                self._ensure_revision(revision, actual)
+                matches = [item for item in metadata if item[1].get("speaker_id") == speaker]
+                tombstones: list[tuple[Path, Path, dict[str, Any]]] = []
+                try:
+                    for metadata_path, item in matches:
+                        tombstone = metadata_path.with_name(
+                            f".{metadata_path.name}.deleted.{uuid.uuid4().hex}"
+                        )
+                        os.replace(metadata_path, tombstone)
+                        tombstones.append((metadata_path, tombstone, item))
+                    for _metadata_path, _tombstone, item in tombstones:
+                        media_id = str(item.get("reference_audio_ref") or "").strip()
+                        if media_id:
+                            self._delete_media(owner, media_id)
+                except Exception as exc:
+                    rollback_error = self._restore_tombstones(tombstones)
+                    if rollback_error is not None:
+                        raise ReferenceWriteError(
+                            f"Could not delete reference ({exc}); metadata rollback failed: "
+                            f"{rollback_error}"
+                        ) from exc
+                    if isinstance(exc, ReferenceWriteError):
+                        raise
+                    raise ReferenceWriteError(f"Could not delete reference: {exc}") from exc
+                try:
+                    for _metadata_path, tombstone, _item in tombstones:
+                        tombstone.unlink()
+                except OSError as exc:
+                    raise ReferenceWriteError(
+                        f"Reference was deleted but metadata cleanup failed: {exc}"
+                    ) from exc
+                return self.list(owner_id=owner)
 
     def assign(
         self,
@@ -261,17 +303,21 @@ class ReferenceLibraryService:
         return self._legacy_media[cache_key]
 
     def _owner_dir(self, owner: str) -> Path:
-        return self._root / self._safe_component(owner)
+        return self._root / owner
 
     @staticmethod
-    def _safe_component(value: str) -> str:
-        return "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in value)
+    def _encoded_component(value: str) -> str:
+        encoded = base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+        return f"id-{encoded}"
 
     @classmethod
     def _validate_owner(cls, owner_id: str) -> str:
-        owner = str(owner_id or "").strip()
-        if not owner:
-            raise ReferenceValidationError("Owner ID is required.")
+        owner = str(owner_id or "")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", owner)
+            or ".." in owner
+        ):
+            raise ReferenceValidationError("Invalid owner identity.")
         return owner
 
     @staticmethod
@@ -320,8 +366,48 @@ class ReferenceLibraryService:
     def _delete_media(self, owner: str, media_id: str) -> None:
         try:
             self._media_store.delete(owner_id=owner, media_id=media_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            raise ReferenceWriteError(f"Could not delete reference media: {exc}") from exc
+
+    @staticmethod
+    def _restore_tombstones(
+        tombstones: list[tuple[Path, Path, dict[str, Any]]]
+    ) -> OSError | None:
+        first_error: OSError | None = None
+        for metadata_path, tombstone, _item in reversed(tombstones):
+            try:
+                if tombstone.exists():
+                    os.replace(tombstone, metadata_path)
+            except OSError as exc:
+                first_error = first_error or exc
+        return first_error
+
+    @contextmanager
+    def _interprocess_lock(self):
+        self._root.mkdir(parents=True, exist_ok=True)
+        lock_path = self._root / ".reference-library.lock"
+        lock_path.touch(exist_ok=True)
+        with lock_path.open("r+b") as lock_file:
+            try:
+                if _msvcrt is not None:
+                    lock_file.seek(0)
+                    _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_LOCK, 1)
+                elif _fcntl is not None:
+                    _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+                else:  # pragma: no cover
+                    raise OSError("No supported file-locking backend is available.")
+            except OSError as exc:
+                raise ReferenceWriteError(
+                    f"Could not lock reference library for writing: {exc}"
+                ) from exc
+            try:
+                yield
+            finally:
+                if _msvcrt is not None:
+                    lock_file.seek(0)
+                    _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)
+                else:
+                    _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
 
     @staticmethod
     def _atomic_metadata_replace(path: Path, payload: dict[str, Any]) -> None:

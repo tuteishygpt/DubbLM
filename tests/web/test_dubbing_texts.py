@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import multiprocessing
+import os
 import pickle
+import time
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -14,6 +17,8 @@ from dubbing.web.dubbing_texts import (
     DubbingTextValidationError,
     DubbingTextWriteError,
 )
+from dubbing.web.jobs import FileJobRepository
+from dubbing.web.storage import FileMediaStore
 
 
 @dataclass
@@ -38,10 +43,23 @@ class FakeMediaStore:
         media_id = f"audio-{len(self.records) + 1}"
         record = self.records.setdefault(
             key,
-            StoredMedia(media_id, name, f"/jobs/{job_id}/files/{media_id}", Path(path)),
+            StoredMedia(media_id, name, f"/media/{media_id}", Path(path)),
         )
         self.registered.append((owner_id, str(Path(path)), job_id))
         return record
+
+    def get(self, *, owner_id: str, media_id: str) -> StoredMedia:
+        return next(
+            record for (record_owner, _path), record in self.records.items()
+            if record_owner == owner_id and record.id == media_id
+        )
+
+    def delete(self, *, owner_id: str, media_id: str) -> None:
+        matching = next(
+            key for key, record in self.records.items()
+            if key[0] == owner_id and record.id == media_id
+        )
+        self.records.pop(matching)
 
 
 class ConcreteShapeMediaStore(FakeMediaStore):
@@ -77,6 +95,41 @@ class FakeDubber:
         segment["synthesized_speech_file"] = str(output)
         segment["synthesized_text"] = override_text
         return segment
+
+
+class ProcessTextMediaStore:
+    def register(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError("No audio registration expected")
+
+
+def _concurrent_dubbing_save(
+    cache: str, snapshot: str, artifact: str, audio: str,
+    segment: DubbingTextSegment, revision: str, translation: str,
+    start: object, results: object,
+) -> None:
+    context = DubbingTextContext(
+        {}, Path(cache), Path(snapshot), Path(artifact), Path(audio)
+    )
+    service = DubbingTextService(
+        ProcessTextMediaStore(), context_builder=lambda _config: context,
+    )
+    original = service._apply_edits
+
+    def delayed_apply(raw_segments: object, edits: object) -> None:
+        time.sleep(0.4)
+        original(raw_segments, edits)
+
+    service._apply_edits = delayed_apply
+    start.wait()
+    try:
+        service.save(
+            owner_id="alice", job_id="job-1", config={},
+            segments=[replace(segment, translation=translation)], revision=revision,
+        )
+    except Exception as exc:
+        results.put(type(exc).__name__)
+    else:
+        results.put("success")
 
 
 @dataclass
@@ -224,7 +277,7 @@ def test_load_registers_synthesized_audio_without_returning_a_path(text_fixture:
     audio = loaded.segments[0].audio
     assert audio is not None
     assert audio.id == "audio-1"
-    assert audio.url == "/jobs/job-1/files/audio-1"
+    assert audio.url == "/media/audio-1"
     assert "path" not in vars(audio)
     assert str(generated) not in repr(loaded)
 
@@ -244,10 +297,45 @@ def test_load_supports_concrete_store_record_without_job_or_url(tmp_path: Path) 
         dubber_factory=lambda config: FakeDubber(config),
     )
 
-    loaded = service.load(owner_id="alice", job_id="job-1", config={})
+    with pytest.raises(DubbingTextValidationError, match="job repository"):
+        service.load(owner_id="alice", job_id="job-1", config={})
+
+
+def test_load_registers_audio_once_and_authorizes_it_in_real_job(tmp_path: Path) -> None:
+    cache = tmp_path / "translation.pkl"
+    snapshot = tmp_path / "snapshot.pkl"
+    artifact = tmp_path / "dubbing_texts.tsv"
+    source = tmp_path / "source.wav"
+    generated = tmp_path / "0.wav"
+    source.write_bytes(b"source")
+    generated.write_bytes(b"audio")
+    _write_pickle(cache, [_segment(synthesized_speech_file=str(generated))])
+    context = DubbingTextContext({}, cache, snapshot, artifact, source)
+    media_store = FileMediaStore(tmp_path / "server", probe=lambda *_args: True)
+    repository = FileJobRepository(tmp_path / "server")
+    job = repository.create("alice", {})
+    service = DubbingTextService(
+        media_store, job_repository=repository,
+        context_builder=lambda _config: context,
+    )
+
+    loaded = service.load(owner_id="alice", job_id=job.id, config={})
+    reloaded = service.load(owner_id="alice", job_id=job.id, config={})
 
     assert loaded.segments[0].audio is not None
-    assert loaded.segments[0].audio.url == "/api/jobs/job-1/files/audio-1"
+    assert reloaded.segments[0].audio == loaded.segments[0].audio
+    assert repository.get("alice", job.id).files == [
+        {
+            "id": loaded.segments[0].audio.id,
+            "name": "0.wav",
+            "kind": "dubbing_segment",
+            "size": 5,
+        }
+    ]
+    registered = list((tmp_path / "server" / "registered" / "alice").iterdir())
+    assert len(registered) == 1
+    persisted = pickle.loads(snapshot.read_bytes())["segments"][0]
+    assert persisted["synthesized_audio_ref"] == loaded.segments[0].audio.id
 
 
 def test_save_rejects_row_count_mismatch(text_fixture: Fixture) -> None:
@@ -319,6 +407,76 @@ def test_save_replace_failure_preserves_cache_snapshot_and_tsv(
     assert {path: path.read_bytes() for path in previous} == previous
 
 
+def test_save_rolls_back_all_replaced_files_when_later_replace_fails(
+    text_fixture: Fixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = text_fixture
+    _write_pickle(fixture.context.cache_path, [_segment()])
+    loaded = fixture.service.load(owner_id="alice", job_id="job-1", config=fixture.config)
+    fixture.context.artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    fixture.context.artifact_path.write_text("old tsv", encoding="utf-8")
+    previous = {
+        fixture.context.cache_path: fixture.context.cache_path.read_bytes(),
+        fixture.context.snapshot_path: fixture.context.snapshot_path.read_bytes(),
+        fixture.context.artifact_path: fixture.context.artifact_path.read_bytes(),
+    }
+    real_replace = os.replace
+    forward_replacements = 0
+
+    def fail_second_new(source: object, target: object) -> None:
+        nonlocal forward_replacements
+        if str(source).endswith(".new.tmp"):
+            forward_replacements += 1
+            if forward_replacements == 2:
+                raise OSError("second replace failed")
+        real_replace(source, target)
+
+    monkeypatch.setattr("dubbing.web.dubbing_texts.os.replace", fail_second_new)
+
+    with pytest.raises(DubbingTextWriteError, match="second replace failed"):
+        fixture.service.save(
+            owner_id="alice", job_id="job-1", config=fixture.config,
+            segments=[replace(loaded.segments[0], translation="new")],
+            revision=loaded.revision,
+        )
+
+    assert {path: path.read_bytes() for path in previous} == previous
+
+
+def test_save_reports_rollback_failure_instead_of_suppressing_it(
+    text_fixture: Fixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = text_fixture
+    _write_pickle(fixture.context.cache_path, [_segment()])
+    loaded = fixture.service.load(owner_id="alice", job_id="job-1", config=fixture.config)
+    fixture.context.artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    fixture.context.artifact_path.write_text("old tsv", encoding="utf-8")
+    real_replace = os.replace
+    forward_replacements = 0
+
+    def fail_forward_and_rollback(source: object, target: object) -> None:
+        nonlocal forward_replacements
+        source_name = str(source)
+        if source_name.endswith(".new.tmp"):
+            forward_replacements += 1
+            if forward_replacements == 2:
+                raise OSError("forward failed")
+        if source_name.endswith(".rollback.tmp"):
+            raise OSError("rollback failed")
+        real_replace(source, target)
+
+    monkeypatch.setattr("dubbing.web.dubbing_texts.os.replace", fail_forward_and_rollback)
+
+    with pytest.raises(DubbingTextWriteError, match="rollback failed"):
+        fixture.service.save(
+            owner_id="alice", job_id="job-1", config=fixture.config,
+            segments=[replace(loaded.segments[0], translation="new")],
+            revision=loaded.revision,
+        )
+
+    assert list(fixture.context.snapshot_path.parent.glob("*.rollback.tmp"))
+
+
 def test_regenerate_targets_segment_id_registers_audio_and_returns_new_revision(
     text_fixture: Fixture,
 ) -> None:
@@ -340,5 +498,88 @@ def test_regenerate_targets_segment_id_registers_audio_and_returns_new_revision(
     assert result.segment.segment_id == loaded.segments[0].segment_id
     assert result.segment.synthesized_text == "Fresh words"
     assert result.segment.audio is not None
-    assert result.segment.audio.url.startswith("/jobs/job-1/files/")
+    assert result.segment.audio.url.startswith("/media/")
     assert str(fixture.config["generated_audio"]) not in repr(result)
+
+
+def test_regenerate_restores_previous_audio_when_persistence_fails(
+    text_fixture: Fixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = text_fixture
+    generated = Path(str(fixture.config["generated_audio"]))
+    generated.write_bytes(b"old audio")
+    _write_pickle(
+        fixture.context.cache_path,
+        [_segment(synthesized_speech_file=str(generated))],
+    )
+    loaded = fixture.service.load(owner_id="alice", job_id="job-1", config=fixture.config)
+    monkeypatch.setattr(
+        fixture.service,
+        "_persist_state",
+        lambda _state: (_ for _ in ()).throw(DubbingTextWriteError("metadata failed")),
+    )
+
+    with pytest.raises(DubbingTextWriteError, match="metadata failed"):
+        fixture.service.regenerate(
+            owner_id="alice", job_id="job-1", config=fixture.config,
+            segment_id=loaded.segments[0].segment_id,
+            revision=loaded.revision, synthesized_text="new words",
+        )
+
+    assert generated.read_bytes() == b"old audio"
+
+
+def test_regenerate_removes_new_audio_when_no_previous_chunk_existed(
+    text_fixture: Fixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = text_fixture
+    generated = Path(str(fixture.config["generated_audio"]))
+    _write_pickle(fixture.context.cache_path, [_segment()])
+    loaded = fixture.service.load(owner_id="alice", job_id="job-1", config=fixture.config)
+    monkeypatch.setattr(
+        fixture.service,
+        "_persist_state",
+        lambda _state: (_ for _ in ()).throw(DubbingTextWriteError("metadata failed")),
+    )
+
+    with pytest.raises(DubbingTextWriteError, match="metadata failed"):
+        fixture.service.regenerate(
+            owner_id="alice", job_id="job-1", config=fixture.config,
+            segment_id=loaded.segments[0].segment_id,
+            revision=loaded.revision, synthesized_text="new words",
+        )
+
+    assert not generated.exists()
+
+
+def test_same_dubbing_revision_cannot_succeed_in_two_processes(
+    text_fixture: Fixture,
+) -> None:
+    fixture = text_fixture
+    _write_pickle(fixture.context.cache_path, [_segment()])
+    loaded = fixture.service.load(owner_id="alice", job_id="job-1", config=fixture.config)
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    args = (
+        str(fixture.context.cache_path), str(fixture.context.snapshot_path),
+        str(fixture.context.artifact_path), str(fixture.context.audio_path),
+        loaded.segments[0], loaded.revision,
+    )
+    processes = [
+        context.Process(
+            target=_concurrent_dubbing_save,
+            args=(*args, translation, start, results),
+        )
+        for translation in ("first", "second")
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    outcomes = [results.get(timeout=10) for _process in processes]
+    for process in processes:
+        process.join(timeout=10)
+        assert process.exitcode == 0
+
+    assert outcomes.count("success") == 1
+    assert outcomes.count("DubbingTextConflictError") == 1
