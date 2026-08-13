@@ -12,8 +12,9 @@ export function JobsView({ client }: { client: ApiClient }) {
   useEffect(() => {
     let subscriptions: Array<() => void> = []
     client.get<{ jobs: Job[] }>('/api/jobs').then(({ jobs: loaded }) => {
-      setJobs(loaded)
-      subscriptions = loaded.filter((job) => job.status === 'queued' || job.status === 'running').map((job) => client.subscribeJobEvents(job.id, (event) => {
+      const loadedJobs = Array.isArray(loaded) ? loaded : []
+      setJobs(loadedJobs)
+      subscriptions = loadedJobs.filter((job) => job.status === 'queued' || job.status === 'running').map((job) => client.subscribeJobEvents(job.id, (event) => {
         const status = event.data.status
         if (event.type === 'status' && typeof status === 'string') setJobs((current) => current.map((item) => item.id === event.job_id ? { ...item, status } : item))
         const message = event.data.message

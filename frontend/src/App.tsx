@@ -5,6 +5,7 @@ import { JobsView } from './views/JobsView'
 import { WorkflowView } from './views/WorkflowView'
 import { SettingsView } from './views/SettingsView'
 import { VoicesView } from './views/VoicesView'
+import { DubbingTextsView } from './views/DubbingTextsView'
 
 const views = ['Workflow', 'Jobs', 'Settings', 'Voice Profiles', 'Dubbing Texts'] as const
 type View = (typeof views)[number]
@@ -37,7 +38,7 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
         {config && view === 'Jobs' && <JobsView client={client} />}
         {config && view === 'Settings' && <SettingsView client={client} config={config} />}
         {config && view === 'Voice Profiles' && <VoicesView client={client} />}
-        {config && view === 'Dubbing Texts' && <h1>{view}</h1>}
+        {config && view === 'Dubbing Texts' && <DubbingTextsView client={client} />}
       </main>
     </div>
   )

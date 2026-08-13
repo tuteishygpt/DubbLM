@@ -10,7 +10,8 @@ export function VoicesView({ client }: { client: ApiClient }) {
   const [profile, setProfile] = useState<Profile>({ id: '', name: '', model: '', voice: '' }); const [referenceFile, setReferenceFile] = useState<File>()
   const [speaker, setSpeaker] = useState(''); const [error, setError] = useState('')
   useEffect(() => { Promise.all([client.get<{ profiles: Profile[] }>('/api/voice-profiles'), client.get<{ references: Reference[] }>('/api/references'), client.get<{ voice_models: SelectOption[]; voices: SelectOption[] }>('/api/options')]).then(([profileData, referenceData, optionData]) => {
-    setProfiles(profileData.profiles); setReferences(referenceData.references); setModels(optionData.voice_models); setVoices(optionData.voices); if (profileData.profiles[0]) setProfile(profileData.profiles[0])
+    const loadedProfiles = Array.isArray(profileData.profiles) ? profileData.profiles : []
+    setProfiles(loadedProfiles); setReferences(Array.isArray(referenceData.references) ? referenceData.references : []); setModels(Array.isArray(optionData.voice_models) ? optionData.voice_models : []); setVoices(Array.isArray(optionData.voices) ? optionData.voices : []); if (loadedProfiles[0]) setProfile(loadedProfiles[0])
   }).catch((reason) => setError(String(reason))) }, [client])
   const compatibleVoices = voices.filter((voice) => !voice.depends_on?.model || voice.depends_on.model === profile.model)
 
