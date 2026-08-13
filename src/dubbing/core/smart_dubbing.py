@@ -47,8 +47,10 @@ from ..debug.reporter import SpeakerReporter
 from ..utils.subtitle_utils import SubtitleManager
 from .log_config import get_logger
 from .pipeline import cache_keys as cache_key_helpers
+from .pipeline import emotions as emotion_helpers
 from .pipeline import references as reference_helpers
 from .pipeline import transcription as transcription_helpers
+from .pipeline import translation as translation_helpers
 from .pipeline.context import (
     active_context,
     commit_context,
@@ -276,32 +278,7 @@ class SmartDubbing:
         return filtered
     
     def _initialize_translator(self) -> None:
-        """Initialize translator based on configuration."""
-        self.translator = None
-        self.translator_init_error = None
-        try:
-            settings = self._effective_translation_cache_dimensions()
-            primary = settings["primary"]
-            refinement = settings["refinement"]
-            self.translator = TranslatorFactory.create_translator(
-                translator_type=settings["translator_type"],
-                llm_provider=primary["provider"],
-                model_name=primary["model"],
-                temperature=primary["temperature"],
-                max_tokens=primary["max_tokens"],
-                refinement_llm_provider=refinement["provider"],
-                refinement_model_name=refinement["model"],
-                refinement_temperature=refinement["temperature"],
-                refinement_max_tokens=refinement["max_tokens"],
-                refinement_persona=refinement["persona"],
-                translation_prompt_prefix=self.config.get('translation_prompt_prefix'),
-                glossary=self.config.get('glossary'),
-                cache_manager=self.cache_manager
-            )
-            logger.debug(f"Using {self.config.get('translator_type', 'llm')} translator")
-        except Exception as e:
-            self.translator_init_error = e
-            logger.warning(f"Failed to initialize translator: {e}")
+        return translation_helpers.initialize_translator(self)
     
     def _default_tts_system(self) -> str:
         """The TTS backend used as fallback when a profile does not name one."""
@@ -461,17 +438,7 @@ class SmartDubbing:
         return transcription_helpers.require_transcriber(self)
 
     def _require_translator(self):
-        """Return the initialized translator or raise an actionable error."""
-        if self.translator is not None:
-            return self.translator
-
-        raise RuntimeError(
-            self._format_component_init_error(
-                "Translator",
-                self.config.get('translator_type', 'llm'),
-                getattr(self, "translator_init_error", None),
-            )
-        )
+        return translation_helpers.require_translator(self)
 
     def _attach_segment_reference(
         self, *, tts_segment_data_args: Dict[str, Any], segment_dict: Dict[str, Any],
@@ -727,44 +694,16 @@ class SmartDubbing:
     def _persist_dubbing_text_snapshot(
         self, segments: List[Dict], audio_file: str
     ) -> None:
-        """Persist the latest real segment state for the Dubbing Texts editor."""
-        translation_cache_reusable = getattr(
-            self, "_semantic_plan_cache_persistable", True
+        return translation_helpers.persist_dubbing_text_snapshot(
+            self, segments, audio_file
         )
-        try:
-            snapshot_key = self._build_dubbing_text_snapshot_key(audio_file)
-            snapshot_payload = {
-                "version": 1,
-                "segments": segments,
-                "translation_cache_reusable": translation_cache_reusable,
-                "translation_cache_key": (
-                    self._build_translation_cache_key(audio_file)
-                    if translation_cache_reusable
-                    else None
-                ),
-            }
-            self.cache_manager.save_to_cache(
-                "dubbing_texts", snapshot_key, snapshot_payload
-            )
-        except Exception as e:
-            logger.warning(f"Could not persist Dubbing Texts snapshot: {e}")
 
     def _persist_synthesis_results(
         self, segments: List[Dict], audio_file: str
     ) -> None:
-        """Persist post-synthesis editor state and reusable pipeline state."""
-        self._persist_dubbing_text_snapshot(segments, audio_file)
-
-        translation_cache_reusable = getattr(
-            self, "_semantic_plan_cache_persistable", True
+        return translation_helpers.persist_synthesis_results(
+            self, segments, audio_file
         )
-        if not translation_cache_reusable:
-            return
-        try:
-            cache_key = self._build_translation_cache_key(audio_file)
-            self.cache_manager.save_to_cache("translation", cache_key, segments)
-        except Exception as e:
-            logger.warning(f"Could not persist synthesis results to translation cache: {e}")
 
     def _reset_input_cache(self, reason: str) -> None:
         """Delete every cached artifact tied to the current input file.
@@ -1352,273 +1291,27 @@ class SmartDubbing:
         return transcription_helpers.isolated_inner_kwargs(self, inner_system)
     
     def translate_segments(self, transcription: List[Dict], audio_file: str) -> List[Dict]:
-        """Translate segments using the translator."""
-        semantic_fingerprints = {
-            segment.get("semantic_plan_fingerprint")
-            for segment in transcription
-            if segment.get("semantic_plan_fingerprint")
-        }
-        semantic_segments = [
-            segment for segment in transcription if segment.get("semantic_unit_id")
-        ]
-        if semantic_segments and (
-            len(semantic_fingerprints) != 1
-            or any(
-                segment.get("semantic_plan_fingerprint") not in semantic_fingerprints
-                for segment in semantic_segments
-            )
-        ):
-            raise ValueError(
-                "Semantic transcription has a missing or inconsistent semantic_plan_fingerprint"
-            )
-        if len(semantic_fingerprints) > 1:
-            raise ValueError("Transcription contains multiple semantic plan fingerprints")
-        if semantic_fingerprints:
-            _update_pipeline_context(
-                self,
-                "semantic_plan_fingerprint",
-                next(iter(semantic_fingerprints)),
-            )
-        cache_key = self._build_translation_cache_key(audio_file)
-        step_name = "translation"
-        
-        translated_segments = None
-        # Check if results are cached
-        if self.cache_manager.cache_exists(step_name, cache_key):
-            logger.debug("Loading translations from cache...")
-            translated_segments = self.cache_manager.load_from_cache(step_name, cache_key)
-            if translated_segments is not None:
-                self._validate_plan_dependent_segments(translated_segments)
-                self.performance_tracker.record_metric("translation", 0.0)
-            else:
-                logger.warning("Found corrupted translation cache, re-translating.")
-
-        if translated_segments is None:
-            # Start timing
-            self.performance_tracker.start_timing("translation")
-            translator = self._require_translator()
-            
-            if not translator.is_available():
-                raise ValueError("No translator available")
-
-            original_prompt_prefix = getattr(translator, "prompt_prefix", None)
-            if hasattr(translator, "prompt_prefix"):
-                translator.prompt_prefix = self._build_translation_prompt_prefix(
-                    original_prompt_prefix
-                )
-
-            try:
-                translated_segments = translator.translate(
-                    segments=transcription,
-                    source_language=self.config.get('source_language'),
-                    target_language=self.config.get('target_language'),
-                    refinement_persona=self.config.get('refinement_persona', 'normal'),
-                    debug=self.debug_data,
-                    debug_dir=self.config.get("translation_debug_dir"),
-                    refinement_debug_dir=self.config.get("translation_refinement_debug_dir"),
-                    timecodes_report_path=self.config.get("timecodes_report_path"),
-                )
-            finally:
-                if hasattr(translator, "prompt_prefix"):
-                    translator.prompt_prefix = original_prompt_prefix
-            
-            # Save results to cache
-            if getattr(self, "_semantic_plan_cache_persistable", True):
-                self.cache_manager.save_to_cache(step_name, cache_key, translated_segments)
-            
-            # End timing
-            elapsed_time = self.performance_tracker.end_timing("translation")
-            logger.info(f"Finished translation in {elapsed_time:.2f} seconds (≈ {elapsed_time/60:.2f} minutes)")
-        
-        # Store for debug
-        self.debug_data["translation"] = translated_segments
-        self._persist_dubbing_text_snapshot(translated_segments, audio_file)
-        
-        return translated_segments
+        return translation_helpers.translate_segments(
+            self, transcription, audio_file
+        )
 
     def _build_translation_prompt_prefix(self, base_prompt_prefix: Optional[str]) -> str:
-        """Combine any user-provided translation prompt prefix with SmartDubbing TTS stress rules."""
-        base_prompt = (base_prompt_prefix or "").strip()
-        if "U+0301" in base_prompt or "каса́" in base_prompt:
-            return base_prompt
-        if base_prompt:
-            return f"{base_prompt}\n\n{SMART_DUBBING_STRESS_MARKS_REQUIREMENT}"
-        return SMART_DUBBING_STRESS_MARKS_REQUIREMENT
+        return translation_helpers.build_translation_prompt_prefix(
+            self, base_prompt_prefix, SMART_DUBBING_STRESS_MARKS_REQUIREMENT
+        )
     
     def analyze_emotions(self, segments: List[Dict], audio_file: str) -> List[Dict]:
-        """Analyze emotions in the audio for each segment."""
-        if not segments:
-            return []
-
-        provider = str(self.config.get("emotion_provider") or "gemini").lower()
-        model = str(self.config.get("emotion_model") or "gemini-3.1-flash-lite")
-
-        cache_key = self._build_emotions_cache_key(
-            audio_file, segments, provider, model
-        )
-        step_name = "emotions"
-
-        if self.cache_manager.cache_exists(step_name, cache_key):
-            logger.debug("Loading emotion analysis from cache...")
-            cached_segments = self.cache_manager.load_from_cache(step_name, cache_key)
-            if cached_segments is not None:
-                try:
-                    self._validate_plan_dependent_segments(cached_segments)
-                except ValueError:
-                    logger.warning(
-                        "Emotion cache does not match the active semantic plan; "
-                        "re-analyzing."
-                    )
-                else:
-                    return cached_segments
-            logger.warning("Found corrupted emotion cache, re-analyzing.")
-
-        logger.info("Analyzing speech emotions (provider=%s, model=%s)...", provider, model)
-        self.performance_tracker.start_timing("emotion_analysis")
-
-        try:
-            if provider == "gemini":
-                self._analyze_emotions_gemini(segments, audio_file, model)
-            elif provider == "speechbrain":
-                self._analyze_emotions_speechbrain(segments, audio_file)
-            else:
-                logger.warning("Unknown emotion_provider '%s'; defaulting all segments to Neutral.", provider)
-                for segment in segments:
-                    segment["emotion"] = "Neutral"
-        finally:
-            self.performance_tracker.end_timing("emotion_analysis")
-
-        self.cache_manager.save_to_cache(step_name, cache_key, segments)
-        return segments
+        return emotion_helpers.analyze_emotions(self, segments, audio_file)
 
     def _analyze_emotions_gemini(self, segments: List[Dict], audio_file: str, model: str) -> None:
-        """Classify each segment's emotion via a Gemini multimodal model on Vertex AI."""
-        try:
-            from google import genai
-            from google.genai import types as genai_types
-        except ImportError:
-            logger.warning(
-                "google-genai package unavailable; falling back to Neutral for all segments. "
-                "Install google-genai or switch emotion_provider to 'speechbrain'."
-            )
-            for segment in segments:
-                segment["emotion"] = "Neutral"
-            return
-
-        try:
-            from google_vertex import get_vertex_ai_settings
-            vertex_settings = get_vertex_ai_settings()
-            client = genai.Client(**vertex_settings.genai_client_kwargs)
-        except Exception as exc:
-            logger.warning("Vertex AI unavailable for emotion analysis (%s); defaulting to Neutral.", exc)
-            for segment in segments:
-                segment["emotion"] = "Neutral"
-            return
-
-        import io
-        import mimetypes
-        from pydub import AudioSegment
-
-        prompt = EMOTION_ANALYSIS_PROMPT
-        config_obj = genai_types.GenerateContentConfig(temperature=0.2)
-        allowed = {"Neutral", "Angry", "Happy", "Sad"}
-
-        audio = AudioSegment.from_file(audio_file)
-        for segment in segments:
-            try:
-                start = max(int(segment["start"] * 1000), 0)
-                end = min(int(segment["end"] * 1000), len(audio))
-                if end <= start:
-                    segment["emotion"] = "Neutral"
-                    segment.setdefault("style_prompt", "")
-                    continue
-
-                segment_audio = audio[start:end]
-                buffer = io.BytesIO()
-                segment_audio.export(buffer, format="wav")
-                audio_part = genai_types.Part.from_bytes(
-                    data=buffer.getvalue(),
-                    mime_type="audio/wav",
-                )
-
-                response = client.models.generate_content(
-                    model=model,
-                    contents=[audio_part, prompt],
-                    config=config_obj,
-                )
-                raw = (getattr(response, "text", None) or "").strip()
-                style_text = ""
-                emotion_label = "Neutral"
-                for line in raw.splitlines():
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    lower = stripped.lower()
-                    if lower.startswith("style:"):
-                        style_text = stripped.split(":", 1)[1].strip().strip('"\'')
-                    elif lower.startswith("emotion:"):
-                        tag = stripped.split(":", 1)[1].strip().split()[0]
-                        tag = tag.strip(".,!?\"'").capitalize()
-                        if tag in allowed:
-                            emotion_label = tag
-                if not style_text and raw:
-                    # Fallback: model ignored the format — take the first non-empty line.
-                    first_line = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
-                    style_text = first_line.strip('"\'')
-                segment["emotion"] = emotion_label
-                segment["style_prompt"] = style_text
-            except Exception as exc:
-                logger.warning("Gemini emotion classification failed for segment: %s", exc)
-                segment["emotion"] = "Neutral"
-                segment.setdefault("style_prompt", "")
+        return emotion_helpers.analyze_emotions_gemini(
+            self, segments, audio_file, model, EMOTION_ANALYSIS_PROMPT
+        )
 
     def _analyze_emotions_speechbrain(self, segments: List[Dict], audio_file: str) -> None:
-        """Legacy speechbrain-based classifier (IEMOCAP wav2vec2)."""
-        try:
-            from speechbrain.inference.interfaces import foreign_class
-        except ModuleNotFoundError as exc:
-            if exc.name != "speechbrain":
-                raise
-            logger.warning(
-                "Skipping emotion analysis because optional dependency "
-                "'speechbrain' is unavailable. Install it or switch emotion_provider to 'gemini'."
-            )
-            for segment in segments:
-                segment["emotion"] = "Neutral"
-            return
-
-        classifier = foreign_class(
-            source="speechbrain/emotion-recognition-wav2vec2-IEMOCAP",
-            pymodule_file="custom_interface.py",
-            classname="CustomEncoderWav2vec2Classifier",
-            run_opts={"device": self.torch_device},
+        return emotion_helpers.analyze_emotions_speechbrain(
+            self, segments, audio_file, SOFT_STYLE_BY_EMOTION
         )
-        emotion_dict = {
-            'neu': 'Neutral',
-            'ang': 'Angry',
-            'hap': 'Happy',
-            'sad': 'Sad',
-            'None': None,
-        }
-
-        from pydub import AudioSegment
-        audio = AudioSegment.from_file(audio_file)
-        for segment in segments:
-            try:
-                start = int(segment["start"] * 1000)
-                end = int(segment["end"] * 1000)
-                segment_audio = audio[start:end]
-                temp_segment_path = self.config.get("temp_segment_audio_path")
-                segment_audio.export(temp_segment_path, format="wav")
-                out_prob, score, index, text_lab = classifier.classify_file(temp_segment_path)
-                emotion = emotion_dict[text_lab[0]] or "Neutral"
-                segment["emotion"] = emotion
-                segment["style_prompt"] = SOFT_STYLE_BY_EMOTION.get(emotion, "")
-                os.remove(temp_segment_path)
-            except Exception as e:
-                logger.warning(f"Error analyzing emotion: {e}")
-                segment["emotion"] = "Neutral"
-                segment.setdefault("style_prompt", "")
     
     def synthesize_speech(self, segments: List[Dict], speakers_rolls: Dict, audio_file: str) -> str:
         """Synthesize measured text candidates within each recognized segment."""
