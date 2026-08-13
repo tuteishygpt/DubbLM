@@ -63,6 +63,12 @@ def active_context(facade: Any) -> PipelineRunContext:
     return snapshot_context(facade)
 
 
+def update_context(facade: Any, field_name: str, value: Any) -> None:
+    """Keep the active run context and its compatibility mirror synchronized."""
+    setattr(active_context(facade), field_name, value)
+    setattr(facade, f"_{field_name}", value)
+
+
 def validate_plan_dependent_segments(
     context: PipelineRunContext, segments: List[Dict[str, Any]]
 ) -> None:
