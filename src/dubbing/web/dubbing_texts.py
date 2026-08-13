@@ -208,8 +208,15 @@ class DubbingTextService:
                 if not override:
                     raise DubbingTextValidationError("Cannot regenerate a segment with empty text.")
                 previous_segment = copy.deepcopy(segment)
-                previous_path = Path(str(segment.get("synthesized_speech_file") or ""))
-                previous_audio = previous_path.read_bytes() if previous_path.is_file() else None
+                previous_path_value = str(
+                    segment.get("synthesized_speech_file") or ""
+                ).strip()
+                previous_path = Path(previous_path_value) if previous_path_value else None
+                previous_audio = (
+                    previous_path.read_bytes()
+                    if previous_path is not None and previous_path.is_file()
+                    else None
+                )
                 dubber = self._dubber_factory(context.config)
                 try:
                     dubber.resynthesize_one_segment(
@@ -554,17 +561,22 @@ class DubbingTextService:
     @staticmethod
     def _restore_regenerated_audio(
         current_segment: Mapping[str, Any],
-        previous_path: Path,
+        previous_path: Path | None,
         previous_audio: bytes | None,
     ) -> OSError | None:
-        current_path = Path(str(current_segment.get("synthesized_speech_file") or ""))
+        current_path_value = str(
+            current_segment.get("synthesized_speech_file") or ""
+        ).strip()
+        current_path = Path(current_path_value) if current_path_value else None
         try:
-            if current_path and current_path != previous_path:
+            if current_path is not None and current_path != previous_path:
                 current_path.unlink(missing_ok=True)
             if previous_audio is None:
-                if previous_path:
+                if previous_path is not None:
                     previous_path.unlink(missing_ok=True)
             else:
+                if previous_path is None:  # pragma: no cover - defensive invariant
+                    raise OSError("Previous audio bytes have no destination path.")
                 previous_path.parent.mkdir(parents=True, exist_ok=True)
                 with previous_path.open("wb") as restored:
                     restored.write(previous_audio)

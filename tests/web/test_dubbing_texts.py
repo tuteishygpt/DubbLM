@@ -552,6 +552,27 @@ def test_regenerate_removes_new_audio_when_no_previous_chunk_existed(
     assert not generated.exists()
 
 
+def test_regenerate_without_previous_audio_preserves_synthesis_error(
+    text_fixture: Fixture,
+) -> None:
+    fixture = text_fixture
+    _write_pickle(fixture.context.cache_path, [_segment()])
+    loaded = fixture.service.load(owner_id="alice", job_id="job-1", config=fixture.config)
+
+    class FailingDubber:
+        def resynthesize_one_segment(self, **_kwargs: object) -> None:
+            raise RuntimeError("synthesis failed")
+
+    fixture.service._dubber_factory = lambda _config: FailingDubber()
+
+    with pytest.raises(RuntimeError, match="synthesis failed"):
+        fixture.service.regenerate(
+            owner_id="alice", job_id="job-1", config=fixture.config,
+            segment_id=loaded.segments[0].segment_id,
+            revision=loaded.revision, synthesized_text="new words",
+        )
+
+
 def test_same_dubbing_revision_cannot_succeed_in_two_processes(
     text_fixture: Fixture,
 ) -> None:

@@ -7,7 +7,6 @@ opaque media identifiers and URLs.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import os
 import re
@@ -307,8 +306,7 @@ class ReferenceLibraryService:
 
     @staticmethod
     def _encoded_component(value: str) -> str:
-        encoded = base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
-        return f"id-{encoded}"
+        return f"id-{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
 
     @classmethod
     def _validate_owner(cls, owner_id: str) -> str:

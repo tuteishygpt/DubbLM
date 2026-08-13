@@ -278,11 +278,37 @@ def test_reference_directory_identity_is_collision_free_for_display_labels(tmp_p
         reference_text="underscore", revision=first.revision,
     )
 
-    assert [(entry.speaker_id, entry.reference_text) for entry in second.entries] == [
+    assert {
+        (entry.speaker_id, entry.reference_text) for entry in second.entries
+    } == {
         ("a/b", "slash"), ("a_b", "underscore")
-    ]
+    }
     directories = [path.name for path in (tmp_path / "library").glob("*/*") if path.is_dir()]
     assert len(set(directories)) == 2
+
+
+def test_reference_directory_identity_is_casefold_safe_on_windows(tmp_path: Path) -> None:
+    source = tmp_path / "voice.wav"
+    source.write_bytes(b"voice")
+    store = FakeMediaStore(tmp_path / "media")
+    service = ReferenceLibraryService(tmp_path / "library", store)
+    first = service.save(
+        owner_id="alice", speaker_id="aaa", source_audio=source,
+        reference_text="lower", revision=service.list(owner_id="alice").revision,
+    )
+
+    second = service.save(
+        owner_id="alice", speaker_id="aaG", source_audio=source,
+        reference_text="upper", revision=first.revision,
+    )
+
+    assert {
+        (entry.speaker_id, entry.reference_text) for entry in second.entries
+    } == {
+        ("aaa", "lower"), ("aaG", "upper")
+    }
+    directories = [path.name for path in (tmp_path / "library" / "alice").iterdir()]
+    assert len({name.casefold() for name in directories}) == 2
 
 
 @pytest.mark.parametrize("owner", ["../alice", "a/b", "..", " alice"])
