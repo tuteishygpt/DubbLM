@@ -169,6 +169,8 @@ def translate_segments(
             if hasattr(translator, "prompt_prefix"):
                 translator.prompt_prefix = original_prompt_prefix
 
+        facade._validate_plan_dependent_segments(translated_segments)
+
         if active_context(facade).semantic_plan_cache_persistable:
             facade.cache_manager.save_to_cache(step_name, cache_key, translated_segments)
 

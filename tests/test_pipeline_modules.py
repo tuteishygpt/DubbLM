@@ -331,6 +331,73 @@ def test_fresh_translation_cache_uses_active_context_when_facade_mirror_is_stale
     assert events == [("snapshot", segments, "audio.wav")]
 
 
+@pytest.mark.parametrize(
+    "translated_segments",
+    [
+        [{"semantic_unit_id": "unit-1"}],
+        [
+            {
+                "semantic_unit_id": "unit-1",
+                "semantic_plan_fingerprint": "plan-stale",
+            }
+        ],
+    ],
+    ids=["missing", "mismatched"],
+)
+def test_fresh_translation_validates_plan_fingerprint_before_persistence(
+    translated_segments,
+):
+    persisted = []
+    transcription = [
+        {
+            "semantic_unit_id": "unit-1",
+            "semantic_plan_fingerprint": "plan-active",
+        }
+    ]
+
+    class Cache:
+        def cache_exists(self, *_args):
+            return False
+
+        def save_to_cache(self, *args):
+            persisted.append(("cache", args))
+
+    class Translator:
+        def is_available(self):
+            return True
+
+        def translate(self, **_kwargs):
+            return translated_segments
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {}
+    dubber.cache_manager = Cache()
+    dubber.performance_tracker = SimpleNamespace(
+        start_timing=lambda *_args: None,
+        end_timing=lambda *_args: 1.0,
+    )
+    dubber.debug_data = {}
+    dubber._pipeline_run_context = PipelineRunContext(
+        semantic_plan_fingerprint="plan-active"
+    )
+    dubber._build_translation_cache_key = lambda _audio: "translation-key"
+    dubber._require_translator = lambda: Translator()
+    dubber._persist_dubbing_text_snapshot = (
+        lambda *args: persisted.append(("snapshot", args))
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Cached artifact semantic_plan_fingerprint is absent or does not "
+            "match the active semantic plan"
+        ),
+    ):
+        translation.translate_segments(dubber, transcription, "audio.wav")
+
+    assert persisted == []
+
+
 def test_direct_emotion_analysis_mutates_input_in_place_and_uses_live_facade_helper():
     segments = [{"start": 0.0, "end": 1.0}]
     saved = []
