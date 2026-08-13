@@ -87,7 +87,6 @@ SAMPLE_RATE = 24000
 class GeminiTTSConfig(BaseModel):
     """Configuration for Gemini TTS."""
     model: str = "gemini-2.5-pro-preview-tts"
-    fallback_model: str = "gemini-2.5-flash-preview-tts"
     default_voice: str = "Enceladus"
     embedding_model_device: Optional[str] = None
     enable_voice_matching: bool = True
@@ -380,9 +379,6 @@ class GeminiAPIClient:
         self.config = config
         self.client: Optional[genai.Client] = None
         self.current_model = config.model
-        self.fallback_model = config.fallback_model
-        # Indicates whether we've permanently switched to the fallback model due to quota limits
-        self.permanent_fallback = False
 
     def initialize(self) -> None:
         """Initialize the Google GenAI client."""
@@ -395,21 +391,8 @@ class GeminiAPIClient:
         except Exception as e:
             raise RuntimeError(f"Failed to initialize Google GenAI client: {str(e)}")
 
-    def switch_to_fallback_model(self) -> bool:
-        """Switch to fallback model for generation."""
-        if self.current_model != self.fallback_model:
-            old_model = self.current_model
-            self.current_model = self.fallback_model
-            logger.debug(f"Switched from model {old_model} to fallback model {self.current_model}")
-            return True
-        return False
-
     def reset_to_original_model(self) -> None:
-        """Reset to the originally configured model unless we've permanently fallen back."""
-        if self.permanent_fallback:
-            # Do not reset if we've permanently switched due to quota exhaustion
-            logger.debug("Permanent fallback active – not resetting to original model.")
-            return
+        """Keep generation pinned to the configured model."""
         self.current_model = self.config.model
         logger.debug(f"Reset to original model: {self.current_model}")
 
@@ -454,16 +437,7 @@ class GeminiAPIClient:
                     return b''
 
             except Exception as e:
-                # Detect quota exhaustion errors and switch to fallback model permanently
-                err_msg = str(e)
-                logger.error(f"Attempt {attempt + 1}/{self.config.max_retries} failed: {err_msg}")
-                if ("RESOURCE_EXHAUSTED" in err_msg) or ("429" in err_msg):
-                    self.config.model = self.fallback_model
-                    self.permanent_fallback = True
-                    if self.switch_to_fallback_model():
-                        # Retry immediately with fallback model
-                        logger.info("Retrying with fallback model after quota exhaustion.")
-                        continue
+                logger.error(f"Attempt {attempt + 1}/{self.config.max_retries} failed: {e}")
                 if attempt + 1 >= self.config.max_retries:
                     logger.error(f"Gemini API call failed after {self.config.max_retries} attempts.")
                     return b''
@@ -495,37 +469,17 @@ class SampleManager:
 
     def generate_sample_with_validation(self, voice_name: str, sample_file_path: Path,
                                       max_retries_per_model: int = 3) -> bool:
-        """
-        Generate a single voice sample with validation and model fallback.
-        
-        Args:
-            voice_name: Name of the voice to generate sample for
-            sample_file_path: Path where to save the sample
-            max_retries_per_model: Maximum retries per model before fallback
-            
-        Returns:
-            True if successful, False otherwise
-        """
+        """Generate one validated sample using the configured model."""
         if not self.api_client.client:
             raise RuntimeError("Gemini client not initialized.")
-        
-        # Ensure the API client is using the original model
+
         self.api_client.reset_to_original_model()
-        original_model = self.api_client.current_model
-        
-        # Try with original model
-        success = self._attempt_sample_generation(voice_name, sample_file_path, max_retries_per_model, max_silence_ratio=0.1)
-        
-        if not success:
-            # Switch to fallback model and try again
-            if self.api_client.switch_to_fallback_model():
-                logger.info(f"Attempting sample generation for {voice_name} with fallback model")
-                success = self._attempt_sample_generation(voice_name, sample_file_path, max_retries_per_model, max_silence_ratio=0.2)
-                
-                # Reset to original model after attempts
-                self.api_client.reset_to_original_model()
-        
-        return success
+        return self._attempt_sample_generation(
+            voice_name,
+            sample_file_path,
+            max_retries_per_model,
+            max_silence_ratio=0.1,
+        )
 
     def _attempt_sample_generation(self, voice_name: str, sample_file_path: Path,
                                  max_retries: int, max_silence_ratio: float = 0.1) -> bool:
@@ -770,7 +724,6 @@ class GeminiTTSWrapper(TTSInterface):
     def __init__(
         self,
         model: str = "gemini-2.5-pro-preview-tts",
-        fallback_model: str = "gemini-2.5-flash-preview-tts",
         default_voice: str = "Kore",
         embedding_model_device: Optional[str] = None,
         enable_voice_matching: bool = True,
@@ -784,7 +737,6 @@ class GeminiTTSWrapper(TTSInterface):
 
         self.config = GeminiTTSConfig(
             model=model,
-            fallback_model=fallback_model,
             default_voice=default_voice,
             embedding_model_device=embedding_model_device,
             enable_voice_matching=enable_voice_matching,
@@ -1111,27 +1063,11 @@ class GeminiTTSWrapper(TTSInterface):
                 shutil.move(primary_best_path, temp_output_path)
             return
 
-        # If primary model fails, try the fallback model
-        fallback_best_path = None
-        if self.api_client.switch_to_fallback_model():
-            logger.info(f"Attempting synthesis for speaker {segment_data.speaker} with fallback model")
-            success, fallback_silence, fallback_best_path = self._attempt_segment_synthesis(
-                segment_data, temp_output_path, language, max_retries_per_model, max_silence_ratio=0.05
-            )
-            self.api_client.reset_to_original_model()
-
-            if success:
-                if fallback_best_path:
-                    shutil.move(fallback_best_path, temp_output_path)
-                if primary_best_path and os.path.exists(primary_best_path):
-                    os.remove(primary_best_path)
-                return
-
         # Every recoverable trailing-silence take already returns success from
         # ``_attempt_segment_synthesis``. Any remaining best attempt failed a
         # structural validation (flat, energy-free, unreadable, or too small)
         # and must never be promoted to final segment audio.
-        for rejected_path in {primary_best_path, fallback_best_path}:
+        for rejected_path in {primary_best_path}:
             if rejected_path and os.path.exists(rejected_path):
                 try:
                     os.remove(rejected_path)

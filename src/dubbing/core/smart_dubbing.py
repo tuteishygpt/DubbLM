@@ -272,7 +272,6 @@ class SmartDubbing:
         return (
             (profile.tts_system or self._default_tts_system() or "").lower(),
             profile.model or (self.config.get('tts_model') or ""),
-            profile.fallback_model or (self.config.get('tts_fallback_model') or ""),
             tuple(sorted(profile.params.items())),
         )
 
@@ -301,7 +300,6 @@ class SmartDubbing:
         """
         tts_system = profile.tts_system or self._default_tts_system()
         model = profile.model or self.config.get('tts_model')
-        fallback_model = profile.fallback_model or self.config.get('tts_fallback_model')
 
         # Provider-specific bootstrap kwargs. Globals still come from the top-level
         # config; per-profile `params` override them.
@@ -325,7 +323,6 @@ class SmartDubbing:
             ),
             debug_tts=self.config.get('debug_tts', False),
             model=model,
-            fallback_model=fallback_model,
             default_reference_audio=self.config.get('reference_audio'),
             **bootstrap,
         )
@@ -833,8 +830,6 @@ class SmartDubbing:
                     "speaker": speaker,
                     "provider": provider,
                     "model": profile.model or self.config.get("tts_model"),
-                    "fallback_model": profile.fallback_model
-                    or self.config.get("tts_fallback_model"),
                     "voice": voice_name,
                     "style_prompt": profile.style_prompt,
                     "reference_mode": profile.reference_mode,

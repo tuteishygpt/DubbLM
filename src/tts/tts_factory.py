@@ -15,6 +15,7 @@ TTS_PROVIDERS: Dict[str, tuple[str, str]] = {
     "omnivoice": ("tts.omnivoice_wrapper", "OmniVoiceWrapper"),
     "higgs": ("tts.higgs_audio_wrapper", "HiggsAudioWrapper"),
 }
+_REMOVED_MODEL_KEYS = {"fallback_model", "tts_fallback_model"}
 
 
 def _load_provider_class(provider_name: str) -> Type[TTSInterface]:
@@ -86,7 +87,10 @@ class TTSFactory:
             "prompt_prefix": prompt_prefix,
         }
         # Provider-specific kwargs filtering (drop None values)
-        filtered_kwargs = {k: v for k, v in dict(kwargs).items() if v is not None}
+        filtered_kwargs = {
+            k: v for k, v in dict(kwargs).items()
+            if v is not None and k not in _REMOVED_MODEL_KEYS
+        }
         config_args.update(filtered_kwargs)  # Pass through other kwargs like model
 
         if isinstance(voice_config, str):
@@ -141,14 +145,13 @@ class TTSFactory:
         if provider_name_lower == "gemini":
             if config.prompt_prefix is not None:
                 init_args["prompt_prefix"] = config.prompt_prefix
-            # Allow passing fallback_model specifically for Gemini
-            fallback = config.kwargs.get("fallback_model") if isinstance(config.kwargs, dict) else None
-            if fallback is not None:
-                init_args["fallback_model"] = fallback
         
         # Pass through any additional kwargs from TTSConfig (drop None values)
         if isinstance(config.kwargs, dict):
-            init_args.update({k: v for k, v in config.kwargs.items() if v is not None})
+            init_args.update({
+                k: v for k, v in config.kwargs.items()
+                if v is not None and k not in _REMOVED_MODEL_KEYS
+            })
         
         try:
             tts_client = provider_class(**init_args)

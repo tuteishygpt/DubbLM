@@ -37,7 +37,6 @@ voices:
   SPEAKER_00:
     tts_system: gemini
     model: gemini-3.1-flash-tts-preview
-    fallback_model: gemini-3.1-flash-tts-preview
     voice_name: Achird
   SPEAKER_01:
     tts_system: higgs

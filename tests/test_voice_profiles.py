@@ -93,6 +93,47 @@ def test_normalize_string_voice_name_becomes_fallback_voice():
     assert voices[FALLBACK_SPEAKER].voice_name == "Kore"
 
 
+def test_normalize_top_level_tts_defaults_become_star_profile():
+    voices = normalize_voices(
+        {
+            "tts_system": "openai",
+            "tts_model": "tts-1-hd",
+            "voice_name": "nova",
+            "reference_audio": "D:/voice.wav",
+            "reference_text": "sample",
+        }
+    )
+
+    fallback = voices[FALLBACK_SPEAKER]
+    assert fallback.tts_system == "openai"
+    assert fallback.model == "tts-1-hd"
+    assert fallback.voice_name == "nova"
+    assert fallback.reference_audio == "D:/voice.wav"
+    assert fallback.reference_text == "sample"
+    assert fallback.reference_mode == "configured"
+
+
+def test_removed_fallback_models_are_ignored_and_warned():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        voices = normalize_voices(
+            {
+                "tts_fallback_model": "top-level-old",
+                "voices": {
+                    "SPEAKER_00": {
+                        "tts_system": "gemini",
+                        "model": "selected-model",
+                        "fallback_model": "profile-old",
+                    }
+                },
+            }
+        )
+
+    assert voices["SPEAKER_00"].model == "selected-model"
+    assert "fallback_model" not in voices["SPEAKER_00"].params
+    assert sum("fallback_model" in str(item.message) for item in caught) == 1
+
+
 def test_new_style_voices_takes_precedence_over_legacy_for_same_speaker():
     config = {
         "voices": {

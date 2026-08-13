@@ -114,7 +114,6 @@ def test_synthesis_measures_normal_then_long_and_selects_closer_wav(tmp_path):
         reference_mode=None,
         tts_system="fake",
         model=None,
-        fallback_model=None,
         params={},
     )
     dubber._resolve_voice_profile = lambda _speaker: profile
@@ -696,7 +695,6 @@ def test_aggregate_tts_fingerprint_includes_reference_file_contents(tmp_path):
     profile = SimpleNamespace(
         tts_system="fake",
         model=None,
-        fallback_model=None,
         voice_name=None,
         style_prompt="",
         reference_mode="configured",
@@ -924,7 +922,6 @@ def test_single_row_resynthesis_generates_only_selected_text(tmp_path):
         reference_mode=None,
         tts_system="fake",
         model=None,
-        fallback_model=None,
         params={},
     )
     dubber = SmartDubbing.__new__(SmartDubbing)

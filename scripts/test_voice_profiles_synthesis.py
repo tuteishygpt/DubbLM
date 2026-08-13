@@ -3,7 +3,7 @@
 Reads `dubbing_config.yml`, resolves the per-speaker VoiceProfile map, spins up
 the corresponding TTS client for each, and writes one WAV per speaker into
 `prj/_voice_profile_samples/`. Prints a summary so it's obvious which profile
-succeeded and which fell back / failed.
+succeeded or failed.
 
 Run:
     .\\.venv\\Scripts\\python.exe scripts/test_voice_profiles_synthesis.py
@@ -68,7 +68,6 @@ def _global_omnivoice_kwargs(cfg: dict) -> dict:
 def _build_client_for_profile(profile, cfg: dict):
     tts_system = profile.tts_system or cfg.get("tts_system", "coqui")
     model = profile.model or cfg.get("tts_model")
-    fallback_model = profile.fallback_model or cfg.get("tts_fallback_model")
 
     bootstrap = {}
     if tts_system.lower() == "omnivoice":
@@ -85,7 +84,6 @@ def _build_client_for_profile(profile, cfg: dict):
         enable_audio_validation=False,      # accept whatever the model returns
         debug_tts=False,
         model=model,
-        fallback_model=fallback_model,
         default_reference_audio=cfg.get("reference_audio"),
         **bootstrap,
     )

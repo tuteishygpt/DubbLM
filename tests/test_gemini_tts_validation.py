@@ -117,7 +117,6 @@ def test_single_segment_never_promotes_structurally_invalid_best_attempt(tmp_pat
     wrapper._attempt_segment_synthesis = (
         lambda *_args, **_kwargs: (False, 1.0, str(rejected_path))
     )
-    wrapper.api_client.switch_to_fallback_model = lambda: False
     segment = TTSSegmentData(
         speaker="SPEAKER_00",
         text="Silence must not reach the final output.",

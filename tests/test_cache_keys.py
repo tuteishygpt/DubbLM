@@ -58,7 +58,6 @@ def test_effective_tts_fingerprint_tracks_strict_reference_contract():
     dubber.config = {
         "tts_system": "higgs",
         "tts_model": None,
-        "tts_fallback_model": None,
     }
     dubber.voice_profiles = {
         "SPEAKER_00": VoiceProfile(

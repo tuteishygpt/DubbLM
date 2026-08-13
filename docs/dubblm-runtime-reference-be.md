@@ -700,7 +700,6 @@ Duration estimation выкарыстоўваецца толькі для пер�
 
 - `tts_prompt_prefix` карысны толькі для часткі TTS wrappers;
 - `reference_text` важны толькі для reference-based systems;
-- `tts_fallback_model` перш за ўсё адносіцца да Gemini TTS;
 - `voice_auto_selection` мае сэнс толькі там, дзе ёсць voice matching logic.
 
 ### 7. Pause removal працуе не па арыгінальным відэаасобна, а па фінальным audio mix

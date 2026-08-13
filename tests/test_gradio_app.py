@@ -73,32 +73,28 @@ def test_build_app_uses_yaml_defaults(tmp_path):
     assert _component_value_by_label(app, "Save original subtitles") is True
     assert _component_value_by_label(app, "Keep background audio") is True
     assert _component_value_by_label(app, "Transcription system") == "assemblyai"
-    assert _component_value_by_label(app, "TTS system") == "bextts"
+    assert _component_value_by_label(app, "Voice profiles") == [
+        ["*", "bextts", "", "", ""]
+    ]
     assert _component_value_by_label(app, "Debug TTS") is True
 
 
 def test_build_app_lists_omnivoice_in_tts_system_choices():
     app = build_app()
 
-    tts_props = _component_props_by_label(app, "TTS system")
+    tts_props = _component_props_by_label(app, "Profile TTS system")
     choice_values = [choice[1] if isinstance(choice, (list, tuple)) else choice for choice in tts_props["choices"]]
 
     assert "omnivoice" in choice_values
 
 
-def test_build_app_exposes_higgs_and_strict_reference_yaml_example():
+def test_build_app_lists_higgs_in_profile_tts_choices():
     app = build_app()
 
-    tts_props = _component_props_by_label(app, "TTS system")
+    tts_props = _component_props_by_label(app, "Profile TTS system")
     choice_values = [choice[1] if isinstance(choice, (list, tuple)) else choice for choice in tts_props["choices"]]
-    voices_props = _component_props_by_label(
-        app, "Voices (YAML) — per-speaker TTS profiles"
-    )
 
     assert "higgs" in choice_values
-    assert "reference_mode: segment" in voices_props["placeholder"]
-    assert "space_id: archivartaunik/higgs-audio-v3-tts" in voices_props["placeholder"]
-    assert "temperature: 0.7" in voices_props["placeholder"]
 
 
 def test_build_app_lists_gemini_in_transcription_system_choices():
@@ -220,7 +216,7 @@ def test_save_settings_writes_to_default_config_and_preserves_other_keys(tmp_pat
             "target_language": "uk",
             "keep_background": True,
             "save_translated_subtitles": True,
-            "tts_system": "bextts",
+            "voices": {"*": {"tts_system": "bextts", "reference_mode": "none"}},
         }
     )
 
@@ -231,7 +227,8 @@ def test_save_settings_writes_to_default_config_and_preserves_other_keys(tmp_pat
     assert saved_data["target_language"] == "uk"
     assert saved_data["keep_background"] is True
     assert saved_data["save_translated_subtitles"] is True
-    assert saved_data["tts_system"] == "bextts"
+    assert saved_data["voices"]["*"]["tts_system"] == "bextts"
+    assert "tts_system" not in saved_data
     assert saved_data["normalize_audio"] is True
     assert "input" not in saved_data
     assert "output" not in saved_data
@@ -268,12 +265,9 @@ def test_build_app_formats_structured_yaml_values_for_text_inputs(tmp_path):
     app = build_app(config_path=str(config_path))
 
     assert _component_value_by_label(app, "Glossary JSON") == '{\n  "AI": "ШІ"\n}'
-    assert _component_value_by_label(app, "Voice prompt JSON") == '{\n  "SPEAKER_00": "warm"\n}'
-    assert _component_value_by_label(app, "TTS system mapping JSON") == '{\n  "SPEAKER_00": "gemini"\n}'
-    assert _component_value_by_label(app, "Speaker reference mappings") == [
-        ["SPEAKER_00", "D:/voices/speaker_00.wav", "First speaker reference"],
-        ["SPEAKER_01", "D:/voices/speaker_01.wav", "Second speaker reference"],
-    ]
+    profile_rows = _component_value_by_label(app, "Voice profiles")
+    assert ["SPEAKER_00", "gemini", "", "", ""] in profile_rows
+    assert ["SPEAKER_01", "", "", "", ""] in profile_rows
     assert _component_value_by_label(app, "Keep original audio ranges") == "00:10-00:15\n01:02-01:08"
 
 
@@ -283,13 +277,18 @@ def test_save_settings_parses_structured_text_fields(tmp_path, monkeypatch):
     status = save_settings(
         {
             "glossary": '{\n  "AI": "ШІ"\n}',
-            "voice_prompt": '{"SPEAKER_00": "warm"}',
-            "tts_system_mapping": '{"SPEAKER_00": "gemini"}',
-            "speaker_reference_rows": [
-                ["SPEAKER_00", "D:/voices/speaker_00.wav", "First speaker reference"],
-                ["SPEAKER_01", "D:/voices/speaker_01.wav", "Second speaker reference"],
-                ["", "", ""],
-            ],
+            "voices": {
+                "*": {
+                    "tts_system": "gemini",
+                    "model": "gemini-2.5-pro-preview-tts",
+                    "voice_name": "Kore",
+                    "style_prompt": None,
+                    "reference_audio": None,
+                    "reference_text": None,
+                    "reference_mode": None,
+                    "params": {},
+                }
+            },
             "keep_original_audio_ranges": "00:10-00:15\n01:02-01:08",
         }
     )
@@ -298,16 +297,7 @@ def test_save_settings_parses_structured_text_fields(tmp_path, monkeypatch):
 
     assert status == f"Settings saved to {DEFAULT_CONFIG_PATH}"
     assert saved_data["glossary"] == {"AI": "ШІ"}
-    assert saved_data["voice_prompt"] == {"SPEAKER_00": "warm"}
-    assert saved_data["tts_system_mapping"] == {"SPEAKER_00": "gemini"}
-    assert saved_data["reference_audio_mapping"] == {
-        "SPEAKER_00": "D:/voices/speaker_00.wav",
-        "SPEAKER_01": "D:/voices/speaker_01.wav",
-    }
-    assert saved_data["reference_text_mapping"] == {
-        "SPEAKER_00": "First speaker reference",
-        "SPEAKER_01": "Second speaker reference",
-    }
+    assert saved_data["voices"]["*"]["tts_system"] == "gemini"
     assert saved_data["keep_original_audio_ranges"] == ["00:10-00:15", "01:02-01:08"]
 
 
@@ -369,25 +359,20 @@ def test_save_speaker_reference_to_library_copies_audio_and_writes_metadata(tmp_
     }
 
 
-def test_save_library_reference_updates_current_mapping_rows(tmp_path, monkeypatch):
+def test_save_library_reference_updates_library_only(tmp_path, monkeypatch):
     library_dir = tmp_path / "speaker_reference_library"
     monkeypatch.setattr(gradio_app, "DEFAULT_SPEAKER_REFERENCE_LIBRARY_PATH", str(library_dir))
 
     source_audio = tmp_path / "speaker00.wav"
     source_audio.write_bytes(b"fake-audio")
 
-    status, updated_rows, library_rows, cleared_file, cleared_text, cleared_speaker = gradio_app._save_library_reference(
+    status, library_rows, cleared_file, cleared_text, cleared_speaker = gradio_app._save_library_reference(
         "SPEAKER_00",
         str(source_audio),
         "First speaker reference",
-        [["SPEAKER_99", "D:/voices/other.wav", "Other"]],
     )
 
     assert "saved" in status.lower()
-    assert updated_rows == [
-        ["SPEAKER_99", "D:/voices/other.wav", "Other"],
-        [str("SPEAKER_00"), str(library_dir / "SPEAKER_00" / "reference.wav"), "First speaker reference"],
-    ]
     assert library_rows == [
         ["SPEAKER_00", str(library_dir / "SPEAKER_00" / "reference.wav"), "First speaker reference"]
     ]
@@ -458,38 +443,6 @@ def test_delete_selected_library_reference_ui_handler(tmp_path, monkeypatch):
     assert library_rows == [["", "", ""]]
 
 
-def test_mapping_row_operations_delete_move_swap():
-    initial_rows = [
-        ["SPEAKER_00", "path/0.wav", "text 0"],
-        ["SPEAKER_01", "path/1.wav", "text 1"],
-        ["SPEAKER_02", "path/2.wav", "text 2"],
-    ]
-
-    # Test Move Down
-    msg, rows, hist = gradio_app._move_mapping_row("down", [0], initial_rows)
-    assert "Moved row 1" in msg
-    assert rows[0][0] == "SPEAKER_01"
-    assert rows[1][0] == "SPEAKER_00"
-
-    # Test Move Up
-    msg, rows, hist = gradio_app._move_mapping_row("up", [1], rows)
-    assert "Moved row 2" in msg
-    assert rows[0][0] == "SPEAKER_00"
-    assert rows[1][0] == "SPEAKER_01"
-
-    # Test Swap
-    msg, rows, hist = gradio_app._swap_selected_mappings([0, 2], initial_rows)
-    assert "Swapped row 1" in msg
-    assert rows[0][0] == "SPEAKER_02"
-    assert rows[2][0] == "SPEAKER_00"
-
-    # Test Delete mapping
-    msg, rows, hist = gradio_app._delete_selected_mapping([1], initial_rows)
-    assert "Deleted mapping for 'SPEAKER_01'" in msg
-    assert len(rows) == 2
-    assert [r[0] for r in rows] == ["SPEAKER_00", "SPEAKER_02"]
-
-
 def test_select_library_row_stores_only_one_selected_entry():
     selected_row = gradio_app._store_selected_library_row(
         SimpleNamespace(
@@ -510,29 +463,6 @@ def test_deselect_library_row_clears_selected_entry():
     )
 
     assert selected_row is None
-
-
-def test_use_selected_library_row_updates_current_mappings():
-    status, updated_rows = gradio_app._use_selected_library_reference(
-        ["SPEAKER_01", "D:/lib/SPEAKER_01/reference.wav", "Second speaker reference"],
-        [["SPEAKER_99", "D:/voices/other.wav", "Other"]],
-    )
-
-    assert "added" in status.lower()
-    assert updated_rows == [
-        ["SPEAKER_99", "D:/voices/other.wav", "Other"],
-        ["SPEAKER_01", "D:/lib/SPEAKER_01/reference.wav", "Second speaker reference"],
-    ]
-
-
-def test_use_selected_library_row_replaces_existing_speaker_mapping():
-    status, updated_rows = gradio_app._use_selected_library_reference(
-        ["SPEAKER_01", "D:/lib/SPEAKER_01/reference.wav", "Library text"],
-        [["SPEAKER_01", "D:/old.wav", "Old text"]],
-    )
-
-    assert "updated" in status.lower()
-    assert updated_rows == [["SPEAKER_01", "D:/lib/SPEAKER_01/reference.wav", "Library text"]]
 
 
 def _patch_projects_root(monkeypatch, tmp_path):

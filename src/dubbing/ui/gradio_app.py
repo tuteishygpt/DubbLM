@@ -9,6 +9,7 @@ import pickle
 import re
 import shutil
 from pathlib import Path
+from typing import Mapping
 
 import gradio as gr
 import yaml
@@ -19,6 +20,10 @@ from ..core.cache_manager import CacheManager
 from ..core.runner import build_config_from_overrides, run_dubbing_job, run_dubbing_job_streaming
 from ..core.smart_dubbing import SmartDubbing
 from ..core.config import DubbingConfig
+from ..core.voice_profiles import VoiceProfile, normalize_voices, resolve_profile
+from tts.gemini_tts_wrapper import ALL_GEMINI_VOICES, GeminiTTSConfig
+from tts.openai_tts_wrapper import ALL_OPENAI_VOICES
+from tts.tts_factory import TTSFactory
 
 
 DEFAULT_CONFIG_PATH = "dubbing_config.yml"
@@ -64,18 +69,9 @@ SETTINGS_FIELDS = [
     "refinement_temperature",
     "refinement_max_tokens",
     "refinement_persona",
-    "tts_system",
-    "tts_model",
-    "tts_fallback_model",
-    "voice_name",
     "voice_auto_selection",
-    "reference_audio",
-    "reference_text",
     "voices",
-    "speaker_reference_rows",
-    "tts_system_mapping",
     "tts_prompt_prefix",
-    "voice_prompt",
     "enable_emotion_analysis",
     "emotion_provider",
     "emotion_model",
@@ -113,12 +109,52 @@ NON_PERSISTED_FIELDS = {
     "isolated_tracks_labels",
 }
 PERSISTED_FIELDS = [field for field in ALL_FIELDS if field not in NON_PERSISTED_FIELDS]
-JSON_TEXT_FIELDS = {"glossary", "voice_prompt", "tts_system_mapping"}
-YAML_TEXT_FIELDS = {"voices"}
+JSON_TEXT_FIELDS = {"glossary"}
+YAML_TEXT_FIELDS: set[str] = set()
 LIST_TEXT_FIELDS = {"keep_original_audio_ranges"}
-SPEAKER_REFERENCE_FIELD = "speaker_reference_rows"
-SPEAKER_REFERENCE_HEADERS = ["Speaker ID", "Reference audio path", "Reference text"]
 SPEAKER_REFERENCE_LIBRARY_HEADERS = ["Speaker ID", "Saved audio path", "Reference text"]
+VOICE_PROFILE_HEADERS = ["Speaker ID", "TTS system", "Model", "Voice name", "Reference mode"]
+VOICE_PROFILE_FIELDS = (
+    "tts_system",
+    "model",
+    "voice_name",
+    "style_prompt",
+    "reference_audio",
+    "reference_text",
+    "reference_mode",
+)
+
+_TTS_MODEL_CHOICES = {
+    "gemini": [GeminiTTSConfig.model_fields["model"].default],
+    "openai": ["tts-1", "tts-1-hd"],
+}
+_TTS_VOICE_CHOICES = {
+    "gemini": list(ALL_GEMINI_VOICES),
+    "openai": list(ALL_OPENAI_VOICES),
+}
+_TTS_REFERENCE_CAPABILITIES = {
+    "coqui": "required",
+    "xtts": "required",
+    "f5": "required",
+    "f5_tts": "required",
+    "omnivoice": "required",
+    "higgs": "required",
+    "bextts": "optional",
+    "gemini": "unsupported",
+    "openai": "unsupported",
+}
+OBSOLETE_TTS_KEYS = {
+    "tts_system_mapping",
+    "voice_prompt",
+    "reference_audio_mapping",
+    "reference_text_mapping",
+    "tts_fallback_model",
+    "tts_system",
+    "tts_model",
+    "voice_name",
+    "reference_audio",
+    "reference_text",
+}
 DUBBING_TEXT_HEADERS = [
     "Speaker",
     "Start",
@@ -191,6 +227,272 @@ def _update_transcription_model_choices(system: str, current_model: str | None =
     default = _TRANSCRIPTION_MODEL_DEFAULTS.get(system, "")
     new_val = current_model if current_model and current_model in choices else default
     return gr.update(choices=choices, value=new_val)
+
+
+def _profile_to_dict(profile: VoiceProfile | Mapping[str, object]) -> dict[str, object]:
+    if isinstance(profile, VoiceProfile):
+        source = profile
+    else:
+        source = VoiceProfile(
+            **{
+                field: profile.get(field)
+                for field in VOICE_PROFILE_FIELDS
+                if profile.get(field) is not None
+            },
+            params=dict(profile.get("params") or {}),
+        )
+    return {
+        "tts_system": source.tts_system,
+        "model": source.model,
+        "voice_name": source.voice_name,
+        "style_prompt": source.style_prompt,
+        "reference_audio": source.reference_audio,
+        "reference_text": source.reference_text,
+        "reference_mode": source.reference_mode,
+        "params": dict(source.params),
+    }
+
+
+def voice_profiles_to_state(config: Mapping[str, object]) -> dict[str, dict[str, object]]:
+    """Convert compatible config shapes to plain Gradio profile state."""
+    return {
+        speaker: _profile_to_dict(profile)
+        for speaker, profile in normalize_voices(config).items()
+    }
+
+
+def _normalize_profile_state(state: object) -> dict[str, dict[str, object]]:
+    if not isinstance(state, Mapping):
+        return {}
+    normalized: dict[str, dict[str, object]] = {}
+    for speaker, profile in state.items():
+        if isinstance(profile, (VoiceProfile, Mapping)):
+            normalized[str(speaker)] = _profile_to_dict(profile)
+    return normalized
+
+
+def voice_profile_table_rows(state: object) -> list[list[str]]:
+    profiles = _normalize_profile_state(state)
+    return [
+        [
+            speaker,
+            str(profile.get("tts_system") or ""),
+            str(profile.get("model") or ""),
+            str(profile.get("voice_name") or ""),
+            str(profile.get("reference_mode") or ""),
+        ]
+        for speaker, profile in profiles.items()
+    ]
+
+
+def get_tts_profile_choices(
+    tts_system: str | None,
+    current_model: str | None = None,
+    current_voice: str | None = None,
+) -> tuple[list[str], list[str], list[str]]:
+    provider = str(tts_system or "").lower()
+    models = list(_TTS_MODEL_CHOICES.get(provider, []))
+    voices = list(_TTS_VOICE_CHOICES.get(provider, []))
+    if current_model and current_model not in models:
+        models.append(str(current_model))
+    if current_voice and current_voice not in voices:
+        voices.append(str(current_voice))
+    capability = _TTS_REFERENCE_CAPABILITIES.get(provider, "unsupported")
+    modes = {
+        "required": ["configured", "segment", "speaker"],
+        "optional": ["none", "configured", "segment", "speaker"],
+    }.get(capability, [])
+    return models, voices, modes
+
+
+def _profile_objects(state: object) -> dict[str, VoiceProfile]:
+    return {
+        speaker: VoiceProfile(
+            **{
+                field: profile.get(field)
+                for field in VOICE_PROFILE_FIELDS
+                if profile.get(field) is not None
+            },
+            params=dict(profile.get("params") or {}),
+        )
+        for speaker, profile in _normalize_profile_state(state).items()
+    }
+
+
+def _validate_voice_profile_state(
+    state: object,
+    speaker_id: str,
+) -> None:
+    if speaker_id != "*" and not re.fullmatch(r"SPEAKER_\d+", speaker_id):
+        raise ValueError("Speaker ID must be '*' or match SPEAKER_XX.")
+    profiles = _profile_objects(state)
+    effective = resolve_profile(profiles, speaker_id)
+    provider = str(effective.tts_system or "").lower()
+    if not provider:
+        raise ValueError("The effective profile must define tts_system.")
+    if provider not in TTSFactory.get_available_providers() and provider != "f5_tts":
+        raise ValueError(f"Unknown TTS system: {provider}.")
+    if provider in {"gemini", "openai"} and not effective.model:
+        raise ValueError(f"A model is required for {provider}.")
+
+    capability = _TTS_REFERENCE_CAPABILITIES.get(provider, "unsupported")
+    mode = effective.reference_mode
+    if capability == "unsupported" and mode:
+        raise ValueError(f"{provider} does not support reference_mode.")
+    if capability in {"required", "optional"} and not mode:
+        raise ValueError(f"An explicit reference_mode is required for {provider}.")
+    if capability == "required" and mode == "none":
+        raise ValueError(f"reference_mode 'none' is not allowed for {provider}.")
+    if mode == "configured":
+        configured_path = str(effective.reference_audio or "").strip()
+        path = Path(configured_path).expanduser() if configured_path else None
+        if path is None or not path.is_file():
+            raise ValueError(
+                f"Reference file does not exist: {configured_path or '<missing>'}."
+            )
+
+
+def save_voice_profile(
+    state: object,
+    selected_speaker: str | None,
+    speaker_id: str,
+    tts_system: str,
+    model: str,
+    voice_name: str,
+    style_prompt: str,
+    reference_mode: str,
+    reference_audio: str,
+    reference_text: str,
+    params_yaml: str,
+) -> tuple[str, dict[str, dict[str, object]], list[list[str]], str | None]:
+    current = _normalize_profile_state(state)
+    speaker = str(speaker_id or "").strip()
+    if speaker != "*" and not re.fullmatch(r"SPEAKER_\d+", speaker):
+        return (
+            "Speaker ID must be '*' or match SPEAKER_XX.",
+            current,
+            voice_profile_table_rows(current),
+            selected_speaker,
+        )
+    if speaker in current and speaker != selected_speaker:
+        return (
+            f"Profile {speaker} already exists.",
+            current,
+            voice_profile_table_rows(current),
+            selected_speaker,
+        )
+    try:
+        parsed_params = yaml.safe_load(params_yaml) if str(params_yaml or "").strip() else {}
+    except yaml.YAMLError as exc:
+        return (
+            f"Invalid params YAML: {exc}",
+            current,
+            voice_profile_table_rows(current),
+            selected_speaker,
+        )
+    if not isinstance(parsed_params, dict):
+        return (
+            "Profile params must decode to a mapping.",
+            current,
+            voice_profile_table_rows(current),
+            selected_speaker,
+        )
+
+    candidate = dict(current)
+    if selected_speaker and selected_speaker != speaker:
+        candidate.pop(selected_speaker, None)
+    candidate[speaker] = {
+        "tts_system": str(tts_system or "").strip() or None,
+        "model": str(model or "").strip() or None,
+        "voice_name": str(voice_name or "").strip() or None,
+        "style_prompt": str(style_prompt or "").strip() or None,
+        "reference_audio": str(reference_audio or "").strip() or None,
+        "reference_text": str(reference_text or "").strip() or None,
+        "reference_mode": str(reference_mode or "").strip() or None,
+        "params": parsed_params,
+    }
+    affected_speakers = candidate if speaker == "*" or selected_speaker == "*" else [speaker]
+    try:
+        for affected_speaker in affected_speakers:
+            _validate_voice_profile_state(candidate, affected_speaker)
+    except ValueError as exc:
+        return str(exc), current, voice_profile_table_rows(current), selected_speaker
+    return f"Saved profile {speaker}.", candidate, voice_profile_table_rows(candidate), speaker
+
+
+def delete_voice_profile(
+    state: object,
+    selected_speaker: str | None,
+) -> tuple[str, dict[str, dict[str, object]], list[list[str]], str | None]:
+    current = _normalize_profile_state(state)
+    if not selected_speaker or selected_speaker not in current:
+        return "Select a profile first.", current, voice_profile_table_rows(current), None
+    updated = dict(current)
+    updated.pop(selected_speaker)
+    if selected_speaker == "*":
+        try:
+            for speaker in updated:
+                _validate_voice_profile_state(updated, speaker)
+        except ValueError as exc:
+            return str(exc), current, voice_profile_table_rows(current), selected_speaker
+    return (
+        f"Deleted profile {selected_speaker}.",
+        updated,
+        voice_profile_table_rows(updated),
+        None,
+    )
+
+
+def assign_library_reference_to_profile(
+    selected_row: object,
+    state: object,
+    selected_speaker: str | None,
+) -> tuple[str, dict[str, dict[str, object]], list[list[str]]]:
+    current = _normalize_profile_state(state)
+    if not selected_speaker or selected_speaker not in current:
+        return "Select a voice profile first.", current, voice_profile_table_rows(current)
+    if not isinstance(selected_row, (list, tuple)) or len(selected_row) < 3:
+        return "Select one library row first.", current, voice_profile_table_rows(current)
+    label = str(selected_row[0] or "").strip()
+    audio_path = str(selected_row[1] or "").strip()
+    reference_text = str(selected_row[2] or "").strip()
+    if not label or not audio_path:
+        return "Selected library row is incomplete.", current, voice_profile_table_rows(current)
+    updated = {speaker: dict(profile) for speaker, profile in current.items()}
+    updated[selected_speaker]["reference_audio"] = audio_path
+    updated[selected_speaker]["reference_text"] = reference_text or None
+    updated[selected_speaker]["reference_mode"] = "configured"
+    try:
+        _validate_voice_profile_state(updated, selected_speaker)
+    except ValueError as exc:
+        return str(exc), current, voice_profile_table_rows(current)
+    return (
+        f"Assigned library entry '{label}' to {selected_speaker}.",
+        updated,
+        voice_profile_table_rows(updated),
+    )
+
+
+def _assign_library_reference_in_ui(
+    selected_row: object,
+    state: object,
+    selected_speaker: str | None,
+):
+    status, updated, rows = assign_library_reference_to_profile(
+        selected_row, state, selected_speaker
+    )
+    profile = updated.get(selected_speaker or "", {})
+    mode = str(profile.get("reference_mode") or "")
+    provider = str(profile.get("tts_system") or "")
+    modes = get_tts_profile_choices(provider)[2]
+    return (
+        status,
+        updated,
+        rows,
+        profile.get("reference_audio") or "",
+        profile.get("reference_text") or "",
+        gr.update(choices=modes, value=mode if mode in modes else None),
+    )
 
 
 
@@ -275,63 +577,16 @@ def save_speaker_reference_to_library(
     return str(saved_audio_path)
 
 
-def _normalize_table_rows(rows: object) -> list[list[str]]:
-    if isinstance(rows, dict) and "data" in rows:
-        rows = rows["data"]
-    elif hasattr(rows, "to_numpy"):
-        rows = rows.to_numpy().tolist()
-    elif hasattr(rows, "values"):
-        rows = rows.values.tolist()
-
-    normalized_rows: list[list[str]] = []
-    if not isinstance(rows, (list, tuple)):
-        return normalized_rows
-
-    for row in rows:
-        if not isinstance(row, (list, tuple)):
-            continue
-        normalized_rows.append(
-            [
-                str(row[0]).strip() if len(row) > 0 and row[0] is not None else "",
-                str(row[1]).strip() if len(row) > 1 and row[1] is not None else "",
-                str(row[2]).strip() if len(row) > 2 and row[2] is not None else "",
-            ]
-        )
-    return normalized_rows
-
-
-def _upsert_speaker_reference_row(
-    rows: object,
-    speaker_id: str,
-    reference_audio_path: str,
-    reference_text: str,
-) -> list[list[str]]:
-    normalized_rows = [
-        row for row in _normalize_table_rows(rows) if any(cell for cell in row)
-    ]
-    updated_row = [speaker_id, reference_audio_path, reference_text]
-
-    for index, row in enumerate(normalized_rows):
-        if row[0] == speaker_id:
-            normalized_rows[index] = updated_row
-            return normalized_rows
-
-    normalized_rows.append(updated_row)
-    return normalized_rows
-
-
 def _save_library_reference(
     speaker_id: str,
     reference_audio_file: str,
     reference_text: str,
-    current_rows: object,
 ):
     speaker_id = str(speaker_id or "").strip()
     reference_text = str(reference_text or "").strip()
     if not speaker_id:
         return (
             "Speaker ID is required to save a library reference.",
-            _normalize_table_rows(current_rows),
             load_speaker_reference_library(),
             None,
             reference_text,
@@ -340,7 +595,6 @@ def _save_library_reference(
     if not reference_audio_file:
         return (
             "Reference audio file is required to save a library reference.",
-            _normalize_table_rows(current_rows),
             load_speaker_reference_library(),
             None,
             reference_text,
@@ -355,11 +609,9 @@ def _save_library_reference(
     # Library entries accept any label ("MaleDeep", "Anchor", "SPEAKER_01",
     # …). The mapping table below is what has to match the diarization IDs,
     # not the library.
-    updated_rows = _upsert_speaker_reference_row(current_rows, speaker_id, saved_audio_path, reference_text)
     library_rows = load_speaker_reference_library()
     return (
         f"Saved speaker reference for {speaker_id} to library.",
-        updated_rows,
         library_rows,
         None,
         "",
@@ -379,49 +631,6 @@ def _store_selected_library_row(evt: gr.SelectData):
             str(row_value[2]).strip(),
         ]
     return None
-
-
-def _use_selected_library_reference(
-    selected_row: object,
-    current_rows: object,
-    assign_speaker_id: str = "",
-):
-    """Copy the selected library entry into the active mapping table.
-
-    ``assign_speaker_id`` overrides the mapping key so a library entry can be
-    stored under any label ("MaleDeep", "Anchor", …) and still assigned to a
-    real diarization ID (SPEAKER_00, SPEAKER_01, …) here.
-    """
-    if not isinstance(selected_row, (list, tuple)) or len(selected_row) < 3:
-        return "Select one library row first.", _normalize_table_rows(current_rows)
-
-    library_label = str(selected_row[0]).strip()
-    reference_audio_path = str(selected_row[1]).strip()
-    reference_text = str(selected_row[2]).strip()
-    if not library_label or not reference_audio_path:
-        return "Selected library row is incomplete.", _normalize_table_rows(current_rows)
-
-    target_speaker_id = str(assign_speaker_id or "").strip() or library_label
-
-    normalized_rows = _normalize_table_rows(current_rows)
-    existing_speakers = {row[0] for row in normalized_rows if row[0]}
-    updated_rows = _upsert_speaker_reference_row(
-        normalized_rows,
-        target_speaker_id,
-        reference_audio_path,
-        reference_text,
-    )
-    action = "updated" if target_speaker_id in existing_speakers else "added"
-    status = f"{target_speaker_id} {action} from library entry '{library_label}'."
-
-    import re
-    if not re.match(r"^SPEAKER_\d+$", target_speaker_id):
-        status += (
-            " ⚠ Warning: this ID does not match the diarization pattern "
-            "SPEAKER_00, SPEAKER_01, … — the pipeline will ignore this mapping "
-            "at runtime. Fill 'Assign to speaker' with the correct SPEAKER_XX before running."
-        )
-    return status, updated_rows
 
 
 def delete_speaker_reference_from_library(
@@ -471,171 +680,8 @@ def _delete_selected_library_reference(selected_row: object):
     return status_msg, library_rows or [["", "", ""]]
 
 
-def _store_selected_mapping_info(evt: gr.SelectData, history: object):
-    if not getattr(evt, "selected", True):
-        return history
-    row_idx = evt.index[0] if isinstance(evt.index, (list, tuple)) else 0
-
-    history_list = list(history) if isinstance(history, list) else []
-    if history_list and history_list[-1] == row_idx:
-        return history_list
-
-    history_list.append(row_idx)
-    if len(history_list) > 2:
-        history_list = history_list[-2:]
-    return history_list
-
-
-def _delete_selected_mapping(mapping_history: object, current_rows: object):
-    normalized_rows = [
-        row for row in _normalize_table_rows(current_rows) if any(cell for cell in row)
-    ]
-    if not normalized_rows:
-        return "No mappings to delete.", [["", "", ""]], []
-
-    history_list = list(mapping_history) if isinstance(mapping_history, list) else []
-    idx = history_list[-1] if history_list else None
-
-    if idx is not None and 0 <= idx < len(normalized_rows):
-        deleted_spk = normalized_rows[idx][0]
-        del normalized_rows[idx]
-        msg = f"Deleted mapping for '{deleted_spk}'."
-    else:
-        msg = "Select a mapping row to delete first."
-
-    if not normalized_rows:
-        normalized_rows = [["", "", ""]]
-    return msg, normalized_rows, []
-
-
-def _move_mapping_row(direction: str, mapping_history: object, current_rows: object):
-    normalized_rows = [
-        row for row in _normalize_table_rows(current_rows) if any(cell for cell in row)
-    ]
-    if not normalized_rows or len(normalized_rows) < 2:
-        return "Need at least 2 rows to reorder.", normalized_rows or [["", "", ""]], mapping_history
-
-    history_list = list(mapping_history) if isinstance(mapping_history, list) else []
-    idx = history_list[-1] if history_list else None
-
-    if idx is None or not (0 <= idx < len(normalized_rows)):
-        return "Select a mapping row first.", normalized_rows, mapping_history
-
-    target_idx = idx - 1 if direction == "up" else idx + 1
-    if 0 <= target_idx < len(normalized_rows):
-        normalized_rows[idx], normalized_rows[target_idx] = (
-            normalized_rows[target_idx],
-            normalized_rows[idx],
-        )
-        msg = f"Moved row {idx + 1} ({normalized_rows[target_idx][0]}) {direction}."
-        return msg, normalized_rows, [target_idx]
-    else:
-        msg = f"Row is already at the {'top' if direction == 'up' else 'bottom'}."
-        return msg, normalized_rows, mapping_history
-
-
-def _swap_selected_mappings(mapping_history: object, current_rows: object):
-    normalized_rows = [
-        row for row in _normalize_table_rows(current_rows) if any(cell for cell in row)
-    ]
-    if len(normalized_rows) < 2:
-        return "Need at least 2 rows to swap.", normalized_rows or [["", "", ""]], mapping_history
-
-    history_list = list(mapping_history) if isinstance(mapping_history, list) else []
-    valid_indices = [i for i in history_list if isinstance(i, int) and 0 <= i < len(normalized_rows)]
-
-    if len(valid_indices) >= 2:
-        i1, i2 = valid_indices[-2], valid_indices[-1]
-        normalized_rows[i1], normalized_rows[i2] = (
-            normalized_rows[i2],
-            normalized_rows[i1],
-        )
-        msg = f"Swapped row {i1 + 1} ({normalized_rows[i2][0]}) and row {i2 + 1} ({normalized_rows[i1][0]})."
-        return msg, normalized_rows, [i1, i2]
-    elif len(valid_indices) == 1:
-        i1 = valid_indices[0]
-        i2 = i1 + 1 if i1 + 1 < len(normalized_rows) else i1 - 1
-        normalized_rows[i1], normalized_rows[i2] = (
-            normalized_rows[i2],
-            normalized_rows[i1],
-        )
-        msg = f"Swapped row {i1 + 1} ({normalized_rows[i2][0]}) with row {i2 + 1} ({normalized_rows[i1][0]})."
-        return msg, normalized_rows, [i1, i2]
-    else:
-        return "Select mapping row(s) to swap first.", normalized_rows, mapping_history
-
-
-def _speaker_reference_rows_from_mappings(
-    reference_audio_mapping: object,
-    reference_text_mapping: object,
-) -> list[list[str]]:
-    audio_mapping = reference_audio_mapping if isinstance(reference_audio_mapping, dict) else {}
-    text_mapping = reference_text_mapping if isinstance(reference_text_mapping, dict) else {}
-    rows: list[list[str]] = []
-    seen: set[str] = set()
-
-    for mapping in (audio_mapping, text_mapping):
-        for speaker in mapping:
-            speaker_id = str(speaker).strip()
-            if not speaker_id or speaker_id in seen:
-                continue
-            rows.append(
-                [
-                    speaker_id,
-                    str(audio_mapping.get(speaker_id, "") or ""),
-                    str(text_mapping.get(speaker_id, "") or ""),
-                ]
-            )
-            seen.add(speaker_id)
-
-    return rows or [["", "", ""]]
-
-
-def _speaker_reference_rows_to_mappings(rows: object) -> tuple[dict[str, str] | None, dict[str, str] | None]:
-    if isinstance(rows, dict) and "data" in rows:
-        rows = rows["data"]
-    elif hasattr(rows, "to_numpy"):
-        rows = rows.to_numpy().tolist()
-    elif hasattr(rows, "values"):
-        rows = rows.values.tolist()
-
-    if not isinstance(rows, (list, tuple)):
-        return None, None
-
-    reference_audio_mapping: dict[str, str] = {}
-    reference_text_mapping: dict[str, str] = {}
-
-    for row in rows:
-        if not isinstance(row, (list, tuple)):
-            continue
-
-        speaker_id = str(row[0]).strip() if len(row) > 0 and row[0] is not None else ""
-        reference_audio = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
-        reference_text = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
-
-        if not speaker_id:
-            continue
-        if reference_audio:
-            reference_audio_mapping[speaker_id] = reference_audio
-        if reference_text:
-            reference_text_mapping[speaker_id] = reference_text
-
-    return reference_audio_mapping or None, reference_text_mapping or None
-
-
-def _expand_speaker_reference_rows(overrides: dict[str, object]) -> dict[str, object]:
-    expanded = dict(overrides)
-    if SPEAKER_REFERENCE_FIELD in expanded:
-        reference_audio_mapping, reference_text_mapping = _speaker_reference_rows_to_mappings(
-            expanded.pop(SPEAKER_REFERENCE_FIELD, None)
-        )
-        expanded["reference_audio_mapping"] = reference_audio_mapping or {}
-        expanded["reference_text_mapping"] = reference_text_mapping or {}
-
-    return expanded
-
-
 def load_ui_defaults(config_path: str = DEFAULT_CONFIG_PATH) -> dict[str, object]:
+    persisted_config = _load_yaml_mapping(config_path)
     config = DubbingConfig()
     config.load_from_yaml(config_path)
     from ..core.timing import normalize_timing_config
@@ -647,22 +693,13 @@ def load_ui_defaults(config_path: str = DEFAULT_CONFIG_PATH) -> dict[str, object
         if value is not None:
             defaults[field] = json.dumps(value, ensure_ascii=False, indent=2)
 
-    for field in YAML_TEXT_FIELDS:
-        value = defaults.get(field)
-        if isinstance(value, dict) and value:
-            defaults[field] = yaml.safe_dump(value, sort_keys=False, allow_unicode=True)
-        else:
-            defaults[field] = ""
+    defaults["voices"] = voice_profiles_to_state(persisted_config)
 
     for field in LIST_TEXT_FIELDS:
         value = defaults.get(field)
         if isinstance(value, list):
             defaults[field] = "\n".join(str(item) for item in value)
 
-    defaults[SPEAKER_REFERENCE_FIELD] = _speaker_reference_rows_from_mappings(
-        defaults.get("reference_audio_mapping"),
-        defaults.get("reference_text_mapping"),
-    )
     # These are UI-only fields and are not stored in YAML.  Keep the same
     # initial two-speaker value when ``app.load`` refreshes component values.
     defaults["isolated_tracks_labels"] = "SPEAKER_00, SPEAKER_01"
@@ -677,24 +714,11 @@ def save_settings(
 ) -> str:
     config_data = _load_yaml_mapping(config_path)
     config_data.pop("group_overflow_tolerance", None)
-    reference_audio_mapping, reference_text_mapping = _speaker_reference_rows_to_mappings(
-        overrides.get(SPEAKER_REFERENCE_FIELD)
-    )
+    for obsolete_key in OBSOLETE_TTS_KEYS:
+        config_data.pop(obsolete_key, None)
 
     for field in PERSISTED_FIELDS:
         if field not in overrides:
-            continue
-
-        if field == SPEAKER_REFERENCE_FIELD:
-            if reference_audio_mapping is None:
-                config_data.pop("reference_audio_mapping", None)
-            else:
-                config_data["reference_audio_mapping"] = reference_audio_mapping
-
-            if reference_text_mapping is None:
-                config_data.pop("reference_text_mapping", None)
-            else:
-                config_data["reference_text_mapping"] = reference_text_mapping
             continue
 
         value = overrides[field]
@@ -709,7 +733,11 @@ def save_settings(
             except (TypeError, ValueError):
                 value = None
 
-        if isinstance(value, str) and field in JSON_TEXT_FIELDS:
+        if field == "voices":
+            value = _normalize_profile_state(value)
+            for speaker in value:
+                _validate_voice_profile_state(value, speaker)
+        elif isinstance(value, str) and field in JSON_TEXT_FIELDS:
             value = json.loads(value)
         elif isinstance(value, str) and field in YAML_TEXT_FIELDS:
             parsed = yaml.safe_load(value)
@@ -727,26 +755,11 @@ def save_settings(
     with Path(config_path).open("w", encoding="utf-8") as config_file:
         yaml.safe_dump(config_data, config_file, sort_keys=False, allow_unicode=True)
 
-    status = f"Settings saved to {DEFAULT_CONFIG_PATH}"
-
-    import re
-    invalid_speakers = [
-        s
-        for s in (reference_audio_mapping or {}).keys()
-        if not re.match(r"^SPEAKER_\d+$", s)
-    ]
-    if invalid_speakers:
-        status += (
-            f". ⚠ Warning: speaker IDs {invalid_speakers} do not match the diarization pattern "
-            "SPEAKER_00, SPEAKER_01, … — those mappings will be silently ignored by the pipeline. "
-            "Check for typos like 'SPEACKER_' (two Cs)."
-        )
-    return status
+    return f"Settings saved to {config_path}"
 
 
 def _collect_overrides(*values) -> dict[str, object]:
     overrides = dict(zip(ALL_FIELDS, values))
-    overrides = _expand_speaker_reference_rows(overrides)
     overrides = _expand_isolated_tracks(overrides)
     return overrides
 
@@ -1299,8 +1312,82 @@ def _collect_values(*values):
 
 def _save_values(*values):
     overrides = dict(zip(ALL_FIELDS, values))
-    status = save_settings(overrides)
+    try:
+        status = save_settings(overrides)
+    except (ValueError, TypeError, yaml.YAMLError, json.JSONDecodeError) as exc:
+        return f"Settings not saved: {exc}", "Configuration file was not changed."
     return status, f"Saved current settings to {DEFAULT_CONFIG_PATH}"
+
+
+def _profile_editor_updates(tts_system: str, model: str, voice_name: str, reference_mode: str):
+    models, voices, modes = get_tts_profile_choices(tts_system, model, voice_name)
+    return (
+        gr.update(choices=models, value=model or None),
+        gr.update(choices=voices, value=voice_name or None),
+        gr.update(
+            choices=modes,
+            value=reference_mode if reference_mode in modes else None,
+        ),
+    )
+
+
+def _select_voice_profile(evt: gr.SelectData, state: object):
+    row = getattr(evt, "row_value", None)
+    speaker = str(row[0]).strip() if isinstance(row, (list, tuple)) and row else ""
+    profile = _normalize_profile_state(state).get(speaker)
+    if not profile:
+        return (None, "", "", gr.update(choices=[], value=None), gr.update(choices=[], value=None), "", gr.update(choices=[], value=None), "", "", "")
+    model_update, voice_update, mode_update = _profile_editor_updates(
+        str(profile.get("tts_system") or ""),
+        str(profile.get("model") or ""),
+        str(profile.get("voice_name") or ""),
+        str(profile.get("reference_mode") or ""),
+    )
+    params = profile.get("params") or {}
+    params_text = yaml.safe_dump(params, sort_keys=False, allow_unicode=True).strip() if params else ""
+    return (
+        speaker,
+        speaker,
+        profile.get("tts_system") or None,
+        model_update,
+        voice_update,
+        profile.get("style_prompt") or "",
+        mode_update,
+        profile.get("reference_audio") or "",
+        profile.get("reference_text") or "",
+        params_text,
+    )
+
+
+def _start_new_voice_profile():
+    return (
+        "New profile draft. Save profile to add it.",
+        None,
+        "",
+        None,
+        gr.update(choices=[], value=None),
+        gr.update(choices=[], value=None),
+        "",
+        gr.update(choices=[], value=None),
+        "",
+        "",
+        "",
+    )
+
+
+def _update_tts_profile_choice_components(
+    tts_system: str,
+    current_model: str | None,
+    current_voice: str | None,
+):
+    models, voices, modes = get_tts_profile_choices(
+        tts_system, current_model, current_voice
+    )
+    return (
+        gr.update(choices=models, value=current_model or None),
+        gr.update(choices=voices, value=current_voice or None),
+        gr.update(choices=modes, value=None),
+    )
 
 
 def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
@@ -1310,7 +1397,8 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
 
     with gr.Blocks(title="DubbLM", theme=gr.themes.Soft()) as app:
         selected_library_row = gr.State(None)
-        selected_mapping_history = gr.State([])
+        selected_voice_profile = gr.State(None)
+        voice_profiles_state = gr.State(defaults.get("voices") or {})
         gr.Markdown(
             """
             # DubbLM
@@ -1495,43 +1583,57 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                 )
 
                 gr.Markdown("## TTS")
-                gr.Markdown(
-                    "Per-speaker profiles live under `voices:` below. The `TTS system` / "
-                    "`TTS model` / `Voice name` fields set the **defaults** used when a profile "
-                    "doesn't specify its own — think of them as the `*` fallback."
+                voice_profiles_table = gr.Dataframe(
+                    headers=VOICE_PROFILE_HEADERS,
+                    datatype=["str"] * len(VOICE_PROFILE_HEADERS),
+                    row_count=(max(1, len(defaults.get("voices") or {})), "fixed"),
+                    col_count=(len(VOICE_PROFILE_HEADERS), "fixed"),
+                    label="Voice profiles",
+                    value=voice_profile_table_rows(defaults.get("voices")),
+                    type="array",
+                    interactive=False,
                 )
                 with gr.Row():
-                    tts_system = gr.Dropdown(
-                        label="TTS system",
-                        choices=["coqui", "xtts", "openai", "f5_tts", "gemini", "bextts", "omnivoice", "higgs"],
-                        value=defaults.get("tts_system", "coqui"),
-                        info="Default backend used when a voice profile doesn't set one.",
+                    profile_speaker_id = gr.Textbox(
+                        label="Profile speaker ID",
+                        placeholder="SPEAKER_00 or *",
                     )
-                    tts_model = gr.Textbox(label="TTS model", value=defaults.get("tts_model"))
-                    tts_fallback_model = gr.Textbox(label="Fallback TTS model", value=defaults.get("tts_fallback_model"))
-                    voice_name = gr.Textbox(label="Voice name or speaker mapping", value=defaults.get("voice_name"))
+                    profile_tts_system = gr.Dropdown(
+                        label="Profile TTS system",
+                        choices=TTSFactory.get_available_providers(),
+                    )
+                    profile_model = gr.Dropdown(
+                        label="Profile model",
+                        choices=[],
+                        allow_custom_value=True,
+                    )
+                    profile_voice_name = gr.Dropdown(
+                        label="Profile voice name",
+                        choices=[],
+                        allow_custom_value=True,
+                    )
+                profile_style_prompt = gr.Textbox(label="Profile style prompt", lines=2)
+                with gr.Row():
+                    profile_reference_mode = gr.Dropdown(
+                        label="Profile reference mode",
+                        choices=[],
+                    )
+                    profile_reference_audio = gr.Textbox(label="Profile reference audio")
+                    profile_reference_text = gr.Textbox(label="Profile reference text")
+                profile_params = gr.Textbox(
+                    label="Profile params (YAML)",
+                    lines=6,
+                    placeholder="temperature: 0.7",
+                )
+                with gr.Row():
+                    add_profile_button = gr.Button("Add profile")
+                    save_profile_button = gr.Button("Save profile", variant="primary")
+                    delete_profile_button = gr.Button("Delete profile", variant="stop")
                 with gr.Row():
                     voice_auto_selection = gr.Checkbox(
                         label="Automatic voice selection",
                         value=bool(defaults.get("voice_auto_selection", True)),
                     )
-                    reference_audio = gr.Textbox(label="Reference audio path", value=defaults.get("reference_audio"))
-                    reference_text = gr.Textbox(label="Reference text", value=defaults.get("reference_text"))
-                speaker_reference_rows = gr.Dataframe(
-                    headers=SPEAKER_REFERENCE_HEADERS,
-                    datatype=["str", "str", "str"],
-                    row_count=(1, "dynamic"),
-                    col_count=(3, "fixed"),
-                    label="Speaker reference mappings",
-                    value=defaults.get(SPEAKER_REFERENCE_FIELD),
-                    type="array",
-                    interactive=True,
-                )
-                with gr.Row():
-                    move_up_button = gr.Button("Move Up", size="sm")
-                    move_down_button = gr.Button("Move Down", size="sm")
-                    swap_mappings_button = gr.Button("Swap selected rows", size="sm")
-                    delete_mapping_button = gr.Button("Delete selected mapping", size="sm", variant="stop")
                 gr.Markdown(f"Speaker reference library path: `{DEFAULT_SPEAKER_REFERENCE_LIBRARY_PATH}`")
                 with gr.Row():
                     library_speaker_id = gr.Textbox(label="Library speaker ID", placeholder="SPEAKER_01")
@@ -1549,12 +1651,7 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                     type="array",
                 )
                 with gr.Row():
-                    library_assign_speaker_id = gr.Textbox(
-                        label="Assign to speaker",
-                        placeholder="SPEAKER_00",
-                        info="Diarization ID that will receive this library entry. Leave empty to reuse the library label.",
-                    )
-                    use_selected_library_button = gr.Button("Use selected from library")
+                    use_selected_library_button = gr.Button("Use in selected profile")
                     delete_library_button = gr.Button("Delete selected from library", variant="stop")
                 with gr.Row():
                     enable_emotion_analysis = gr.Checkbox(
@@ -1577,57 +1674,6 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         label="Min segment reference duration",
                         value=defaults.get("segment_reference_min_duration", 2.0),
                         precision=2,
-                    )
-                voices = gr.Textbox(
-                    label="Voices (YAML) — per-speaker TTS profiles",
-                    lines=14,
-                    placeholder=(
-                        "SPEAKER_00:\n"
-                        "  tts_system: gemini\n"
-                        "  model: gemini-2.5-flash-preview-tts\n"
-                        "  voice_name: Kore\n"
-                        "  style_prompt: calm, friendly\n"
-                        '"*":\n'
-                        "  tts_system: higgs\n"
-                        "  reference_mode: segment\n"
-                        "  params:\n"
-                        "    space_id: archivartaunik/higgs-audio-v3-tts\n"
-                        "    api_name: /synthesize\n"
-                        "    temperature: 0.7\n"
-                        "    top_p: 0.95\n"
-                        "    top_k: 50\n"
-                        "    max_new_tokens: 2048\n"
-                        "    seed: -1\n"
-                        "SPEAKER_01:\n"
-                        "  reference_mode: configured\n"
-                        "  reference_audio: D:/path/to/reference.wav\n"
-                        "  reference_text: sample text\n"
-                    ),
-                    info=(
-                        "Each key is a diarization speaker ID (SPEAKER_00, SPEAKER_01, …). "
-                        "Use `\"*\"` for the fallback profile applied to any speaker not listed. "
-                        "Fields not set here inherit from the defaults above. Provider-specific knobs "
-                        "go under `params:` (or directly at the top level of the profile — unknown "
-                        "keys fall through to params)."
-                    ),
-                    value=defaults.get("voices") or "",
-                )
-                with gr.Accordion("Legacy per-speaker fields (deprecated)", open=False):
-                    gr.Markdown(
-                        "These fields are folded into `voices` automatically on load. Editing them "
-                        "still works but new configs should use the `voices` block above."
-                    )
-                    tts_system_mapping = gr.Textbox(
-                        label="TTS system mapping JSON",
-                        lines=4,
-                        placeholder='{"SPEAKER_00": "gemini"}',
-                        value=defaults.get("tts_system_mapping"),
-                    )
-                    voice_prompt = gr.Textbox(
-                        label="Voice prompt JSON",
-                        lines=4,
-                        placeholder='{"SPEAKER_00": "calm, friendly"}',
-                        value=defaults.get("voice_prompt"),
                     )
                 tts_prompt_prefix = gr.Textbox(label="TTS prompt prefix", lines=3, value=defaults.get("tts_prompt_prefix"))
 
@@ -1742,18 +1788,9 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                         refinement_temperature,
                         refinement_max_tokens,
                         refinement_persona,
-                        tts_system,
-                        tts_model,
-                        tts_fallback_model,
-                        voice_name,
                         voice_auto_selection,
-                        reference_audio,
-                        reference_text,
-                        voices,
-                        speaker_reference_rows,
-                        tts_system_mapping,
+                        voice_profiles_state,
                         tts_prompt_prefix,
-                        voice_prompt,
                         enable_emotion_analysis,
                         emotion_provider,
                         emotion_model,
@@ -1836,41 +1873,73 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
                 library_speaker_id,
                 library_reference_audio_file,
                 library_reference_text,
-                speaker_reference_rows,
             ],
             outputs=[
                 status,
-                speaker_reference_rows,
                 speaker_reference_library,
                 library_reference_audio_file,
                 library_reference_text,
                 library_speaker_id,
             ],
         )
-        speaker_reference_rows.select(
-            fn=_store_selected_mapping_info,
-            inputs=[selected_mapping_history],
-            outputs=selected_mapping_history,
+        voice_profiles_table.select(
+            fn=_select_voice_profile,
+            inputs=[voice_profiles_state],
+            outputs=[
+                selected_voice_profile,
+                profile_speaker_id,
+                profile_tts_system,
+                profile_model,
+                profile_voice_name,
+                profile_style_prompt,
+                profile_reference_mode,
+                profile_reference_audio,
+                profile_reference_text,
+                profile_params,
+            ],
         )
-        move_up_button.click(
-            fn=lambda hist, rows: _move_mapping_row("up", hist, rows),
-            inputs=[selected_mapping_history, speaker_reference_rows],
-            outputs=[status, speaker_reference_rows, selected_mapping_history],
+        add_profile_button.click(
+            fn=_start_new_voice_profile,
+            outputs=[
+                status,
+                selected_voice_profile,
+                profile_speaker_id,
+                profile_tts_system,
+                profile_model,
+                profile_voice_name,
+                profile_style_prompt,
+                profile_reference_mode,
+                profile_reference_audio,
+                profile_reference_text,
+                profile_params,
+            ],
         )
-        move_down_button.click(
-            fn=lambda hist, rows: _move_mapping_row("down", hist, rows),
-            inputs=[selected_mapping_history, speaker_reference_rows],
-            outputs=[status, speaker_reference_rows, selected_mapping_history],
+        save_profile_button.click(
+            fn=save_voice_profile,
+            inputs=[
+                voice_profiles_state,
+                selected_voice_profile,
+                profile_speaker_id,
+                profile_tts_system,
+                profile_model,
+                profile_voice_name,
+                profile_style_prompt,
+                profile_reference_mode,
+                profile_reference_audio,
+                profile_reference_text,
+                profile_params,
+            ],
+            outputs=[status, voice_profiles_state, voice_profiles_table, selected_voice_profile],
         )
-        swap_mappings_button.click(
-            fn=_swap_selected_mappings,
-            inputs=[selected_mapping_history, speaker_reference_rows],
-            outputs=[status, speaker_reference_rows, selected_mapping_history],
+        delete_profile_button.click(
+            fn=delete_voice_profile,
+            inputs=[voice_profiles_state, selected_voice_profile],
+            outputs=[status, voice_profiles_state, voice_profiles_table, selected_voice_profile],
         )
-        delete_mapping_button.click(
-            fn=_delete_selected_mapping,
-            inputs=[selected_mapping_history, speaker_reference_rows],
-            outputs=[status, speaker_reference_rows, selected_mapping_history],
+        profile_tts_system.change(
+            fn=_update_tts_profile_choice_components,
+            inputs=[profile_tts_system, profile_model, profile_voice_name],
+            outputs=[profile_model, profile_voice_name, profile_reference_mode],
         )
 
         speaker_reference_library.select(
@@ -1878,9 +1947,16 @@ def build_app(config_path: str = DEFAULT_CONFIG_PATH) -> gr.Blocks:
             outputs=selected_library_row,
         )
         use_selected_library_button.click(
-            fn=_use_selected_library_reference,
-            inputs=[selected_library_row, speaker_reference_rows, library_assign_speaker_id],
-            outputs=[status, speaker_reference_rows],
+            fn=_assign_library_reference_in_ui,
+            inputs=[selected_library_row, voice_profiles_state, selected_voice_profile],
+            outputs=[
+                status,
+                voice_profiles_state,
+                voice_profiles_table,
+                profile_reference_audio,
+                profile_reference_text,
+                profile_reference_mode,
+            ],
         )
         delete_library_button.click(
             fn=_delete_selected_library_reference,

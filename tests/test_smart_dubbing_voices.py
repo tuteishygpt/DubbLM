@@ -13,10 +13,9 @@ from tts.models import TTSSegmentData
 class _StubTTSClient:
     """Minimal TTS client shim used to observe factory calls without touching real backends."""
 
-    def __init__(self, *, tts_system, model=None, fallback_model=None, **kwargs):
+    def __init__(self, *, tts_system, model=None, **kwargs):
         self.tts_system = tts_system
         self.model = model
-        self.fallback_model = fallback_model
         self.kwargs = kwargs
 
     def cleanup(self):
@@ -37,8 +36,11 @@ def _skip_optional_init(dubber):
 
 def _install_stub_factory(monkeypatch, log):
     def fake_create_tts(*, tts_system, **kwargs):
-        client = _StubTTSClient(tts_system=tts_system, model=kwargs.get("model"),
-                                fallback_model=kwargs.get("fallback_model"), **{k: v for k, v in kwargs.items() if k not in {"model", "fallback_model"}})
+        client = _StubTTSClient(
+            tts_system=tts_system,
+            model=kwargs.get("model"),
+            **{k: v for k, v in kwargs.items() if k != "model"},
+        )
         log.append(client)
         return client
 
@@ -225,6 +227,46 @@ def test_pool_key_stable_across_param_ordering():
     a = VoiceProfile(tts_system="gemini", model="flash", params={"a": 1, "b": 2})
     b = VoiceProfile(tts_system="gemini", model="flash", params={"b": 2, "a": 1})
     assert a.pool_key() == b.pool_key()
+
+
+def test_tts_factory_call_contains_only_selected_model(tmp_path, monkeypatch):
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"video")
+    _patch_projects_root(monkeypatch, tmp_path)
+    config = build_config_from_overrides(
+        {
+            "config": "",
+            "input": str(video_path),
+            "source_language": "en",
+            "target_language": "be",
+            "voices": {
+                "*": {
+                    "tts_system": "gemini",
+                    "model": "selected-model",
+                    "fallback_model": "ignored-model",
+                }
+            },
+            "tts_fallback_model": "also-ignored",
+        }
+    )
+    calls = []
+
+    def fake_create_tts(*, tts_system, **kwargs):
+        calls.append((tts_system, kwargs))
+        return _StubTTSClient(tts_system=tts_system, model=kwargs.get("model"))
+
+    monkeypatch.setattr(
+        smart_dubbing_module.TTSFactory,
+        "create_tts",
+        staticmethod(fake_create_tts),
+    )
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = config
+    _skip_optional_init(dubber)
+    dubber.__init__(config)
+
+    assert calls[0][1]["model"] == "selected-model"
+    assert "fallback_model" not in calls[0][1]
 
 
 def test_preflight_collects_all_pool_errors_before_any_synthesis():

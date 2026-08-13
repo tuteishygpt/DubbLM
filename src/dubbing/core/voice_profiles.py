@@ -59,7 +59,6 @@ class VoiceProfile:
 
     tts_system: Optional[str] = None
     model: Optional[str] = None
-    fallback_model: Optional[str] = None
     voice_name: Optional[str] = None
     style_prompt: Optional[str] = None
     reference_audio: Optional[str] = None
@@ -72,7 +71,6 @@ class VoiceProfile:
         return (
             (self.tts_system or "").lower(),
             self.model or "",
-            self.fallback_model or "",
             tuple(sorted(self.params.items())),
         )
 
@@ -91,7 +89,6 @@ class VoiceProfile:
         return VoiceProfile(
             tts_system=self.tts_system or fallback.tts_system,
             model=self.model or fallback.model,
-            fallback_model=self.fallback_model or fallback.fallback_model,
             voice_name=self.voice_name or fallback.voice_name,
             style_prompt=self.style_prompt or fallback.style_prompt,
             reference_audio=self.reference_audio or fallback.reference_audio,
@@ -109,7 +106,6 @@ def _profile_from_dict(data: Mapping[str, Any]) -> VoiceProfile:
     known = {
         "tts_system",
         "model",
-        "fallback_model",
         "voice_name",
         "style_prompt",
         "reference_audio",
@@ -119,7 +115,7 @@ def _profile_from_dict(data: Mapping[str, Any]) -> VoiceProfile:
     kwargs = {k: data.get(k) for k in known if data.get(k) is not None}
     params = dict(data.get("params") or {})
     for key, value in data.items():
-        if key in known or key == "params":
+        if key in known or key in {"params", "fallback_model"}:
             continue
         params[key] = value
     return VoiceProfile(params=params, **kwargs)
@@ -163,9 +159,6 @@ def _extract_legacy(config: Mapping[str, Any]) -> Dict[str, VoiceProfile]:
     if reference_text_mapping:
         used.add("reference_text_mapping")
 
-    if not used and global_voice_name is None:
-        return {}
-
     if used:
         _emit_legacy_warning(used)
 
@@ -175,7 +168,7 @@ def _extract_legacy(config: Mapping[str, Any]) -> Dict[str, VoiceProfile]:
         speakers.update(str(k) for k in source.keys())
 
     profiles: Dict[str, VoiceProfile] = {}
-    for speaker in speakers:
+    for speaker in sorted(speakers):
         profiles[speaker] = VoiceProfile(
             tts_system=tts_mapping.get(speaker) if isinstance(tts_mapping, dict) else None,
             voice_name=voice_name_mapping.get(speaker) or global_voice_name,
@@ -190,10 +183,50 @@ def _extract_legacy(config: Mapping[str, Any]) -> Dict[str, VoiceProfile]:
             ),
         )
 
-    if global_voice_name and FALLBACK_SPEAKER not in profiles:
-        profiles[FALLBACK_SPEAKER] = VoiceProfile(voice_name=global_voice_name)
+    top_level = VoiceProfile(
+        tts_system=(str(config.get("tts_system")).strip() if config.get("tts_system") else None),
+        model=(str(config.get("tts_model")).strip() if config.get("tts_model") else None),
+        voice_name=global_voice_name,
+        reference_audio=(
+            str(config.get("reference_audio")).strip()
+            if config.get("reference_audio") else None
+        ),
+        reference_text=(
+            str(config.get("reference_text")).strip()
+            if config.get("reference_text") else None
+        ),
+    )
+    if top_level.reference_audio or top_level.reference_text:
+        top_level.reference_mode = "configured"
+    if any(
+        value is not None
+        for value in (
+            top_level.tts_system,
+            top_level.model,
+            top_level.voice_name,
+            top_level.reference_audio,
+            top_level.reference_text,
+        )
+    ):
+        profiles.setdefault(FALLBACK_SPEAKER, top_level)
 
     return profiles
+
+
+def _warn_removed_fallback_models(config: Mapping[str, Any]) -> None:
+    raw_voices = config.get("voices")
+    profile_has_fallback = isinstance(raw_voices, Mapping) and any(
+        isinstance(entry, Mapping) and "fallback_model" in entry
+        for entry in raw_voices.values()
+    )
+    if "tts_fallback_model" not in config and not profile_has_fallback:
+        return
+    message = (
+        "fallback_model and tts_fallback_model are obsolete and ignored; "
+        "TTS retries keep the selected model."
+    )
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
+    logger.warning(message)
 
 
 def normalize_voices(config: Mapping[str, Any]) -> Dict[str, VoiceProfile]:
@@ -203,6 +236,7 @@ def normalize_voices(config: Mapping[str, Any]) -> Dict[str, VoiceProfile]:
     missing from ``voices`` is still filled from the legacy mappings so partial
     migrations work.
     """
+    _warn_removed_fallback_models(config)
     legacy_profiles = _extract_legacy(config)
 
     raw_voices = config.get("voices")

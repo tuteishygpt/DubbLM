@@ -197,7 +197,7 @@ def test_segment_reference_uses_only_non_negative_integer_canonical_index(
 
 
 def test_segment_reference_cache_fingerprint_changes_with_isolated_content(tmp_path):
-    dubber = _dubber(tmp_path, tts_system="higgs", tts_model=None, tts_fallback_model=None)
+    dubber = _dubber(tmp_path, tts_system="higgs", tts_model=None)
     isolated = _audio(tmp_path / "isolated.wav", 440)
     dubber.config["isolated_tracks"] = {"SPEAKER_00": str(isolated)}
     dubber.voice_profiles = {
@@ -213,7 +213,7 @@ def test_segment_reference_cache_fingerprint_changes_with_isolated_content(tmp_p
 
 
 def test_effective_tts_fingerprint_hashes_shared_segment_source_once(tmp_path, monkeypatch):
-    dubber = _dubber(tmp_path, tts_system="higgs", tts_model=None, tts_fallback_model=None)
+    dubber = _dubber(tmp_path, tts_system="higgs", tts_model=None)
     isolated = _audio(tmp_path / "isolated.wav", 440)
     dubber.config["isolated_tracks"] = {
         "SPEAKER_00": str(isolated),

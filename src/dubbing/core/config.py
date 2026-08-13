@@ -51,7 +51,6 @@ class DubbingConfig:
             'no_cache': False,
             'tts_system': 'coqui',
             'tts_model': None,
-            'tts_fallback_model': None,
             'omnivoice_space_id': 'k2-fsa/OmniVoice',
             'omnivoice_api_name': '/_clone_fn',
             'omnivoice_lang': None,
@@ -392,6 +391,7 @@ class DubbingConfig:
 
         from .voice_profiles import normalize_voices
         self.config['voices'] = normalize_voices(self.config)
+        self.config.pop('tts_fallback_model', None)
 
         from .timing import normalize_timing_config
         normalize_timing_config(self.config, warn=logger.warning)
@@ -448,7 +448,6 @@ class DubbingConfig:
         parser.add_argument('--no_cache', action='store_true', default=argparse.SUPPRESS, help='Disable caching of pipeline steps')
         parser.add_argument('--tts_system', type=str, choices=['coqui', 'xtts', 'openai', 'f5_tts', 'gemini', 'bextts', 'omnivoice'], help='Text-to-speech system to use')
         parser.add_argument('--tts_model', type=str, help='Model name for the selected TTS provider')
-        parser.add_argument('--tts_fallback_model', type=str, help='Fallback model name for the TTS provider (used by Gemini)')
         parser.add_argument('--omnivoice_space_id', type=str, help='Hugging Face Space ID for OmniVoice')
         parser.add_argument('--omnivoice_api_name', type=str, help='Gradio API endpoint for OmniVoice synthesis')
         parser.add_argument('--omnivoice_lang', type=str, help='Language setting for OmniVoice (default: Belarusian)')

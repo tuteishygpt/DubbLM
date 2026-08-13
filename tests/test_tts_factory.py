@@ -1,6 +1,7 @@
 import importlib
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,3 +68,67 @@ def test_gemini_tts_client_uses_vertex_ai_client_configuration(monkeypatch):
         "project": "vertex-project",
         "location": "global",
     }
+
+
+def test_gemini_retries_keep_the_selected_model(monkeypatch):
+    module = importlib.import_module("tts.gemini_tts_wrapper")
+    attempted_models = []
+
+    class FakeModels:
+        def generate_content(self, *, model, contents, config):
+            attempted_models.append(model)
+            if len(attempted_models) < 3:
+                raise RuntimeError("429 RESOURCE_EXHAUSTED")
+            return SimpleNamespace(
+                candidates=[
+                    SimpleNamespace(
+                        content=SimpleNamespace(
+                            parts=[
+                                SimpleNamespace(
+                                    inline_data=SimpleNamespace(
+                                        data=b"audio",
+                                        mime_type="audio/L16;rate=24000",
+                                    )
+                                )
+                            ]
+                        )
+                    )
+                ]
+            )
+
+    monkeypatch.setattr(
+        module.genai_types,
+        "GenerateContentConfig",
+        lambda **kwargs: kwargs,
+    )
+    config = module.GeminiTTSConfig(
+        model="selected-model", max_retries=3, retry_delay_base=0
+    )
+    client = module.GeminiAPIClient(config)
+    client.client = SimpleNamespace(models=FakeModels())
+
+    assert client.synthesize_chunk("hello", object()) == b"audio"
+    assert attempted_models == ["selected-model", "selected-model", "selected-model"]
+
+
+def test_factory_discards_removed_fallback_model_inputs(monkeypatch):
+    factory = importlib.import_module("tts.tts_factory")
+    received = {}
+
+    class FakeProvider:
+        def __init__(self, **kwargs):
+            received.update(kwargs)
+
+        def initialize(self):
+            pass
+
+    monkeypatch.setattr(factory, "_load_provider_class", lambda _name: FakeProvider)
+
+    factory.TTSFactory.create_tts(
+        "gemini",
+        model="selected-model",
+        fallback_model="old-profile-model",
+        tts_fallback_model="old-top-level-model",
+    )
+
+    assert received == {"model": "selected-model"}

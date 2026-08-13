@@ -32,7 +32,6 @@ voices:
   SPEAKER_00:
     tts_system: gemini
     model: gemini-2.5-flash-preview-tts
-    fallback_model: gemini-2.5-pro-preview-tts
     voice_name: Kore
     style_prompt: "calm, friendly narrator"
     params:
@@ -57,7 +56,7 @@ voices:
   are folded into `params` too, so
   `{tts_system: omnivoice, num_steps: 32}` == `{tts_system: omnivoice, params: {num_steps: 32}}`.
 - Fields not set in a profile inherit from the `"*"` fallback, and then from
-  the top-level `tts_system` / `tts_model` / `tts_fallback_model` / `voice_name`
+  the top-level `tts_system` / `tts_model` / `voice_name`
   defaults in the config.
 
 ## Runtime
@@ -65,7 +64,7 @@ voices:
 `src/dubbing/core/voice_profiles.py`:
 
 - `VoiceProfile` dataclass with `pool_key()` for identity comparison
-  (`(system, model, fallback_model, sorted(params))`).
+  (`(system, model, sorted(params))`).
 - `normalize_voices(config)` returns `dict[str, VoiceProfile]`, folding the
   legacy fields into the same shape.
 - `resolve_profile(profiles, speaker, tts_system_default=...)` looks up a
