@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from tts.gemini_tts_wrapper import ALL_GEMINI_VOICES, GeminiTTSConfig
-from tts.openai_tts_wrapper import ALL_OPENAI_VOICES
+from .provider_metadata import (
+    GEMINI_TTS_DEFAULT_MODEL,
+    GEMINI_VOICE_CHOICES,
+    OPENAI_VOICE_CHOICES,
+)
 
 
 WORKFLOW_FIELDS = [
@@ -62,10 +65,13 @@ REFINEMENT_PERSONA_CHOICES = [
 ]
 
 TTS_MODEL_CHOICES = {
-    "gemini": [GeminiTTSConfig.model_fields["model"].default],
+    "gemini": [GEMINI_TTS_DEFAULT_MODEL],
     "openai": ["tts-1", "tts-1-hd"],
 }
-TTS_VOICE_CHOICES = {"gemini": list(ALL_GEMINI_VOICES), "openai": list(ALL_OPENAI_VOICES)}
+TTS_VOICE_CHOICES = {
+    "gemini": list(GEMINI_VOICE_CHOICES),
+    "openai": list(OPENAI_VOICE_CHOICES),
+}
 TTS_REFERENCE_CAPABILITIES = {
     "coqui": "required", "xtts": "required", "f5": "required", "f5_tts": "required",
     "omnivoice": "required", "higgs": "required", "bextts": "optional",

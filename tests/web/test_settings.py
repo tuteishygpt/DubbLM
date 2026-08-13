@@ -3,6 +3,8 @@
 from hashlib import sha256
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
+import multiprocessing
+import sys
 
 import pytest
 import yaml
@@ -14,6 +16,15 @@ from dubbing.web.settings import (
     SettingsValidationError,
     SettingsWriteError,
 )
+
+
+def _save_settings_in_process(config_path, revision, value, start, outcomes):
+    start.wait()
+    try:
+        SettingsService(config_path).save({"llm_temperature": value}, revision=revision)
+        outcomes.put("saved")
+    except SettingsConflictError:
+        outcomes.put("conflict")
 
 
 def test_schema_preserves_exact_legacy_field_inventory():
@@ -77,6 +88,11 @@ def test_schema_exposes_legacy_model_voice_and_reference_choices():
     assert schema.get_tts_profile_choices("bextts")[2] == ["none", "configured", "segment", "speaker"]
 
 
+def test_schema_import_does_not_load_tts_implementation_wrappers():
+    assert "tts.gemini_tts_wrapper" not in sys.modules
+    assert "tts.openai_tts_wrapper" not in sys.modules
+
+
 def _write_config(path, values):
     path.write_text(yaml.safe_dump(values, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
@@ -126,6 +142,17 @@ def test_settings_save_removes_zero_duration(tmp_path):
     assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"source_language": "en"}
 
 
+def test_settings_save_rejects_non_numeric_duration_without_deleting_existing_value(tmp_path):
+    config_path = tmp_path / "dubbing_config.yml"
+    _write_config(config_path, {"duration": 30})
+    service = SettingsService(config_path)
+
+    with pytest.raises(SettingsValidationError, match="duration"):
+        service.save({"duration": "not-a-number"}, revision=service.load().revision)
+
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"duration": 30}
+
+
 def test_settings_save_rejects_stale_content_revision(tmp_path):
     config_path = tmp_path / "dubbing_config.yml"
     _write_config(config_path, {"llm_temperature": 0.5})
@@ -157,6 +184,30 @@ def test_settings_save_serializes_same_revision_writers(tmp_path):
         outcomes = list(executor.map(save, [0.7, 0.9]))
 
     assert sorted(outcomes) == ["conflict", "saved"]
+
+
+def test_settings_save_serializes_same_revision_writers_across_processes(tmp_path):
+    config_path = tmp_path / "dubbing_config.yml"
+    _write_config(config_path, {"llm_temperature": 0.5})
+    revision = SettingsService(config_path).load().revision
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    outcomes = context.Queue()
+    processes = [
+        context.Process(
+            target=_save_settings_in_process,
+            args=(str(config_path), revision, value, start, outcomes),
+        )
+        for value in (0.7, 0.9)
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(timeout=20)
+
+    assert all(process.exitcode == 0 for process in processes)
+    assert sorted(outcomes.get(timeout=2) for _ in processes) == ["conflict", "saved"]
 
 
 def test_settings_atomic_save_preserves_prior_file_when_replace_fails(tmp_path, monkeypatch):

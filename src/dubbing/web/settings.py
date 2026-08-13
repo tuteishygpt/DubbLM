@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import msvcrt
 import os
 import re
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -73,22 +75,23 @@ class SettingsService:
 
     def save(self, values: Mapping[str, Any], *, revision: str) -> SettingsSnapshot:
         with self._write_lock:
-            raw = self._read_bytes()
-            actual_revision = self._revision(raw)
-            if revision != actual_revision:
-                raise SettingsConflictError("Settings were changed by another writer.")
+            with self._interprocess_lock():
+                raw = self._read_bytes()
+                actual_revision = self._revision(raw)
+                if revision != actual_revision:
+                    raise SettingsConflictError("Settings were changed by another writer.")
 
-            updated = self._decode(raw)
-            for field, value in values.items():
-                normalized = self._normalize_value(str(field), value)
-                if normalized is None:
-                    updated.pop(str(field), None)
-                else:
-                    updated[str(field)] = normalized
+                updated = self._decode(raw)
+                for field, value in values.items():
+                    normalized = self._normalize_value(str(field), value)
+                    if normalized is None:
+                        updated.pop(str(field), None)
+                    else:
+                        updated[str(field)] = normalized
 
-            written = self._encode(updated)
-            self._atomic_replace(written)
-            return SettingsSnapshot(revision=self._revision(written), values=updated)
+                written = self._encode(updated)
+                self._atomic_replace(written)
+                return SettingsSnapshot(revision=self._revision(written), values=updated)
 
     def list_profiles(self) -> VoiceProfilesSnapshot:
         """Return only explicit ``voices`` entries without legacy expansion."""
@@ -191,7 +194,7 @@ class SettingsService:
                 if float(value) <= 0:
                     return None
             except (TypeError, ValueError):
-                return None
+                raise SettingsValidationError("duration must be numeric.")
         if field in JSON_TEXT_FIELDS and isinstance(value, str):
             try:
                 return json.loads(value)
@@ -309,3 +312,21 @@ class SettingsService:
                     Path(temp_name).unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    @contextmanager
+    def _interprocess_lock(self):
+        """Hold an OS-released Windows byte lock across one full write transaction."""
+        lock_path = self._config_path.with_name(f".{self._config_path.name}.lock")
+        self._config_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.touch(exist_ok=True)
+        with lock_path.open("r+b") as lock_file:
+            lock_file.seek(0)
+            try:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            except OSError as exc:
+                raise SettingsWriteError(f"Could not lock settings for writing: {exc}") from exc
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
