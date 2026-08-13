@@ -73,17 +73,16 @@ describe('WorkflowView', () => {
     await user.selectOptions(screen.getByLabelText('Speaker report mode'), 'detailed')
     await user.click(screen.getByLabelText('Include subtitles'))
     await user.selectOptions(screen.getByLabelText('Run mode'), 'preview')
-    fireEvent.change(screen.getByLabelText('Speaker-label mapping'), { target: { value: JSON.stringify({ SPEAKER_00: 'Narrator' }) } })
+    fireEvent.change(screen.getByLabelText('Speaker-label mapping'), { target: { value: JSON.stringify({ SPEAKER_00: 'voice.wav' }) } })
     await user.click(screen.getByRole('button', { name: 'Queue job' }))
 
     await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/jobs', {
-      video_upload_id: 'video-1',
-      isolated_track_upload_id: 'track-1',
-      speaker_label_mapping: { SPEAKER_00: 'Narrator' },
+      input_upload_id: 'video-1',
+      isolated_tracks: { SPEAKER_00: 'track-1' },
       overrides: { target_language: 'es', speaker_report_mode: 'detailed', include_subtitles: true, run_mode: 'preview' },
     }))
-    expect(api.upload).toHaveBeenNthCalledWith(1, '/api/uploads/video', expect.any(FormData))
-    expect(api.upload).toHaveBeenNthCalledWith(2, '/api/uploads/isolated-track', expect.any(FormData))
+    expect(api.upload).toHaveBeenNthCalledWith(1, '/api/uploads', expect.any(FormData))
+    expect(api.upload).toHaveBeenNthCalledWith(2, '/api/uploads', expect.any(FormData))
     expect(screen.getByRole('status')).toHaveTextContent('Job job-8 queued')
   })
 })

@@ -45,7 +45,7 @@ export interface OptionsResponse {
 }
 
 export interface SseEvent {
-  id: string
+  id: number
   job_id: string
   type: string
   timestamp: string
@@ -58,7 +58,7 @@ export interface ApiClient {
   get<T = unknown>(path: string): Promise<T>
   put<T = unknown>(path: string, body?: unknown): Promise<T>
   post<T = unknown>(path: string, body?: unknown): Promise<T>
-  delete<T = unknown>(path: string): Promise<T>
+  delete<T = unknown>(path: string, body?: unknown): Promise<T>
   upload<T = unknown>(path: string, data: FormData): Promise<T>
   subscribeJobEvents(
     jobId: string,

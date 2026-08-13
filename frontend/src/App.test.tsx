@@ -54,15 +54,15 @@ describe('API client', () => {
 
   it('decodes the documented SSE DTO', () => {
     expect(decodeSseEvent(JSON.stringify({
-      id: 'event-2',
+      id: 2,
       job_id: 'job-1',
-      type: 'progress',
+      type: 'state',
       timestamp: '2026-08-13T10:00:00Z',
       data: { percent: 50 },
     }))).toEqual({
-      id: 'event-2',
+      id: 2,
       job_id: 'job-1',
-      type: 'progress',
+      type: 'state',
       timestamp: '2026-08-13T10:00:00Z',
       data: { percent: 50 },
     })
@@ -102,12 +102,12 @@ describe('API client', () => {
     const received = vi.fn()
 
     const close = client.subscribeJobEvents('job 1', received)
-    sources[0].message({ id: 'evt/9', job_id: 'job 1', type: 'log', timestamp: 'now', data: {} })
+    sources[0].namedMessage('log', { id: 9, job_id: 'job 1', type: 'log', timestamp: 'now', data: {} })
     sources[0].fail()
     await act(() => vi.advanceTimersByTimeAsync(10))
 
-    expect(received).toHaveBeenCalledWith(expect.objectContaining({ id: 'evt/9' }))
-    expect(sources[1].url).toBe('/api/jobs/job%201/events?last_event_id=evt%2F9')
+    expect(received).toHaveBeenCalledWith(expect.objectContaining({ id: 9 }))
+    expect(sources[1].url).toBe('/api/jobs/job%201/events?last_event_id=9')
     close()
     expect(sources[1].closed).toBe(true)
   })
@@ -117,11 +117,21 @@ class FakeEventSource implements EventSourceLike {
   onmessage: ((event: MessageEvent<string>) => void) | null = null
   onerror: ((event: Event) => void) | null = null
   closed = false
+  private readonly listeners = new Map<string, Array<(event: MessageEvent<string>) => void>>()
 
   constructor(readonly url: string) {}
 
   message(value: object) {
     this.onmessage?.({ data: JSON.stringify(value) } as MessageEvent<string>)
+  }
+
+  addEventListener(type: string, listener: (event: MessageEvent<string>) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener])
+  }
+
+  namedMessage(type: string, value: object) {
+    const event = { data: JSON.stringify(value) } as MessageEvent<string>
+    for (const listener of this.listeners.get(type) ?? []) listener(event)
   }
 
   fail() {
