@@ -1,7 +1,7 @@
 """Per-run state shared by SmartDubbing pipeline services."""
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 
 @dataclass
@@ -37,10 +37,30 @@ def snapshot_context(facade: Any) -> PipelineRunContext:
     )
 
 
-def commit_context(facade: Any, context: PipelineRunContext) -> None:
-    """Copy the five context values back to their compatibility attributes."""
-    for field_name, facade_name in _FACADE_MIRRORS.items():
+def commit_context(
+    facade: Any,
+    context: PipelineRunContext,
+    *,
+    changed_fields: Iterable[str],
+) -> None:
+    """Copy only stage-changed context values to compatibility attributes."""
+    changed_fields = set(changed_fields)
+    unknown_fields = changed_fields.difference(_FACADE_MIRRORS)
+    if unknown_fields:
+        raise ValueError(
+            f"Unknown PipelineRunContext fields: {sorted(unknown_fields)}"
+        )
+    for field_name in changed_fields:
+        facade_name = _FACADE_MIRRORS[field_name]
         setattr(facade, facade_name, getattr(context, field_name))
+
+
+def active_context(facade: Any) -> PipelineRunContext:
+    """Return a run's shared context, or a short snapshot for a direct call."""
+    context = getattr(facade, "_pipeline_run_context", None)
+    if context is not None:
+        return context
+    return snapshot_context(facade)
 
 
 def validate_plan_dependent_segments(

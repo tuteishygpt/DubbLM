@@ -19,6 +19,7 @@ import torch
 import warnings
 import shutil
 import subprocess
+from functools import wraps
 from typing import Dict, Iterable, List, Tuple, Optional, Any, Literal, Union
 from pathlib import Path
 from urllib.parse import quote
@@ -45,7 +46,12 @@ from ..debug.debug_generator import DebugGenerator
 from ..debug.reporter import SpeakerReporter
 from ..utils.subtitle_utils import SubtitleManager
 from .log_config import get_logger
-from .pipeline.context import snapshot_context, validate_plan_dependent_segments
+from .pipeline.context import (
+    active_context,
+    commit_context,
+    snapshot_context,
+    validate_plan_dependent_segments,
+)
 
 # Import existing factories and interfaces
 from tts.tts_factory import TTSFactory
@@ -89,6 +95,45 @@ SMART_DUBBING_STRESS_MARKS_REQUIREMENT = (
     "for example: каса́. Apply this to the main translation and to alternative "
     "very_short / short / long variants intended for TTS."
 )
+
+
+def _with_pipeline_context(method):
+    """Give each outer run one shared context without changing its signature."""
+
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        if getattr(self, "_pipeline_run_context", None) is not None:
+            return method(self, *args, **kwargs)
+
+        context = snapshot_context(self)
+        initial_values = vars(context).copy()
+        self._pipeline_run_context = context
+        completed = False
+        try:
+            result = method(self, *args, **kwargs)
+            completed = True
+            return result
+        finally:
+            if completed:
+                changed_fields = {
+                    field_name
+                    for field_name, initial_value in initial_values.items()
+                    if getattr(context, field_name) != initial_value
+                }
+                commit_context(
+                    self, context, changed_fields=changed_fields
+                )
+            if getattr(self, "_pipeline_run_context", None) is context:
+                del self._pipeline_run_context
+
+    wrapper.pipeline_context_owner = True
+    return wrapper
+
+
+def _update_pipeline_context(facade, field_name: str, value: Any) -> None:
+    """Keep an active run context and its compatibility mirror synchronized."""
+    setattr(active_context(facade), field_name, value)
+    setattr(facade, f"_{field_name}", value)
 
 
 class SmartDubbing:
@@ -1037,11 +1082,15 @@ class SmartDubbing:
             )
         ):
             raise ValueError("Cached semantic plan has a missing or inconsistent fingerprint")
-        self._semantic_plan_fingerprint = next(iter(fingerprints))
-        self._semantic_plan_cache_persistable = True
+        _update_pipeline_context(
+            self, "semantic_plan_fingerprint", next(iter(fingerprints))
+        )
+        _update_pipeline_context(
+            self, "semantic_plan_cache_persistable", True
+        )
 
     def _validate_plan_dependent_segments(self, segments: List[Dict[str, Any]]) -> None:
-        validate_plan_dependent_segments(snapshot_context(self), segments)
+        validate_plan_dependent_segments(active_context(self), segments)
 
     def _load_required_cached_step(self, *, step_name: str, cache_key: str, hint: str) -> Any:
         """Load a required cached artifact or raise an actionable error."""
@@ -1292,6 +1341,7 @@ class SmartDubbing:
                 except Exception as e:
                     logger.warning(f"Could not remove legacy cache {legacy_dir}: {e}")
 
+    @_with_pipeline_context
     def run_transcribe_only(self, save_original_subtitles: bool = False) -> str:
         """Run only audio extraction, diarization, and transcription; then exit.
 
@@ -1326,6 +1376,7 @@ class SmartDubbing:
         finally:
             self._cleanup()
 
+    @_with_pipeline_context
     def run_translate_only(
         self,
         save_original_subtitles: bool = False,
@@ -1379,6 +1430,7 @@ class SmartDubbing:
         finally:
             self._cleanup()
 
+    @_with_pipeline_context
     def run_analyze_emotions_only(
         self,
         save_translated_subtitles: bool = False,
@@ -1453,6 +1505,7 @@ class SmartDubbing:
         finally:
             self._cleanup()
 
+    @_with_pipeline_context
     def run_from_scratch(
         self,
         save_original_subtitles: bool = False,
@@ -1469,6 +1522,7 @@ class SmartDubbing:
             save_translated_subtitles=save_translated_subtitles,
         )
 
+    @_with_pipeline_context
     def run_from_tts(self, save_original_subtitles: bool = False, save_translated_subtitles: bool = False) -> str:
         """Resume from cached translation artifacts, rerun TTS, and finish the video."""
         logger.info("Resuming dubbing process from the TTS step")
@@ -1603,6 +1657,7 @@ class SmartDubbing:
 
         return output_video_path
     
+    @_with_pipeline_context
     def run_pipeline(self, save_original_subtitles: bool = False, save_translated_subtitles: bool = False) -> str:
         """Run the full dubbing pipeline."""
         pipeline_start_time = time.perf_counter()
@@ -2119,9 +2174,15 @@ class SmartDubbing:
                         )
                         cached = None
                     else:
-                        self._semantic_plan_fingerprint = next(iter(fingerprints))
+                        _update_pipeline_context(
+                            self,
+                            "semantic_plan_fingerprint",
+                            next(iter(fingerprints)),
+                        )
                 if cached is not None:
-                    self._semantic_plan_cache_persistable = True
+                    _update_pipeline_context(
+                        self, "semantic_plan_cache_persistable", True
+                    )
                     self.debug_data["diarization"] = speakers_rolls
                     self.debug_data["transcription"] = transcription
                     self._save_transcription_file(transcription)
@@ -2226,10 +2287,14 @@ class SmartDubbing:
             },
         )
         if transcription and semantic_enabled:
-            self._semantic_plan_fingerprint = transcription[0].get(
-                "semantic_plan_fingerprint"
+            _update_pipeline_context(
+                self,
+                "semantic_plan_fingerprint",
+                transcription[0].get("semantic_plan_fingerprint"),
             )
-            self._semantic_plan_cache_persistable = True
+            _update_pipeline_context(
+                self, "semantic_plan_cache_persistable", True
+            )
 
         self.debug_data["diarization"] = speakers_rolls
         self.debug_data["transcription"] = transcription
@@ -2272,7 +2337,11 @@ class SmartDubbing:
         if len(semantic_fingerprints) > 1:
             raise ValueError("Transcription contains multiple semantic plan fingerprints")
         if semantic_fingerprints:
-            self._semantic_plan_fingerprint = next(iter(semantic_fingerprints))
+            _update_pipeline_context(
+                self,
+                "semantic_plan_fingerprint",
+                next(iter(semantic_fingerprints)),
+            )
         cache_key = self._build_translation_cache_key(audio_file)
         step_name = "translation"
         
@@ -2523,10 +2592,14 @@ class SmartDubbing:
         from tts.models import TTSSegmentData
 
         try:
-            self._timing_source_duration = len(AudioSegment.from_file(audio_file)) / 1000.0
+            _update_pipeline_context(
+                self,
+                "timing_source_duration",
+                len(AudioSegment.from_file(audio_file)) / 1000.0,
+            )
         except Exception as exc:
             raise ValueError(f"Cannot measure processed source audio for timing: {audio_file}") from exc
-        self._timing_source_audio_file = audio_file
+        _update_pipeline_context(self, "timing_source_audio_file", audio_file)
 
         planned = plan_anchor_windows(segments, self._timing_source_duration)
         for item in planned:
@@ -2536,8 +2609,10 @@ class SmartDubbing:
         segments[:] = [item.segment for item in planned]
 
         policy = TimingPolicy.from_config(self.config)
-        self._plan_dependent_cache_allowed = getattr(
-            self, "_semantic_plan_cache_persistable", True
+        _update_pipeline_context(
+            self,
+            "plan_dependent_cache_allowed",
+            active_context(self).semantic_plan_cache_persistable,
         )
         self.performance_tracker.start_timing("speech_synthesis")
 
@@ -3143,8 +3218,14 @@ class SmartDubbing:
         if not isinstance(segments, list) or not segments:
             raise ValueError("Dubbing Texts snapshot has no segments to combine")
 
-        self._timing_source_audio_file = str(source_audio_path)
-        self._timing_source_duration = len(AudioSegment.from_file(source_audio_path)) / 1000.0
+        _update_pipeline_context(
+            self, "timing_source_audio_file", str(source_audio_path)
+        )
+        _update_pipeline_context(
+            self,
+            "timing_source_duration",
+            len(AudioSegment.from_file(source_audio_path)) / 1000.0,
+        )
         combined_audio, real_segment_positions = self._adjust_and_combine_audio_grouped(
             segments
         )

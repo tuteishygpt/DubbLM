@@ -53,7 +53,7 @@ def test_snapshot_context_reads_facade_mirrors_and_uses_only_frozen_defaults():
     assert vars(context).keys() == set(CONTEXT_FIELDS)
 
 
-def test_commit_context_updates_only_the_five_facade_mirrors():
+def test_commit_context_updates_only_fields_changed_by_the_completed_stage():
     dubber = SmartDubbing.__new__(SmartDubbing)
     unrelated_state = object()
     dubber.unrelated_state = unrelated_state
@@ -65,14 +65,15 @@ def test_commit_context_updates_only_the_five_facade_mirrors():
         timing_source_duration=12.5,
     )
 
-    commit_context(dubber, context)
+    commit_context(
+        dubber,
+        context,
+        changed_fields={"semantic_plan_fingerprint", "timing_source_duration"},
+    )
 
     assert dubber.__dict__ == {
         "unrelated_state": unrelated_state,
         "_semantic_plan_fingerprint": "plan-b",
-        "_semantic_plan_cache_persistable": False,
-        "_plan_dependent_cache_allowed": False,
-        "_timing_source_audio_file": "processed.wav",
         "_timing_source_duration": 12.5,
     }
 
@@ -83,7 +84,14 @@ def test_partial_new_facade_can_snapshot_commit_and_validate_context():
     context = snapshot_context(dubber)
     context.semantic_plan_fingerprint = "plan-c"
     context.semantic_plan_cache_persistable = False
-    commit_context(dubber, context)
+    commit_context(
+        dubber,
+        context,
+        changed_fields={
+            "semantic_plan_fingerprint",
+            "semantic_plan_cache_persistable",
+        },
+    )
 
     dubber._validate_plan_dependent_segments(
         [{"semantic_plan_fingerprint": "plan-c"}]
@@ -110,6 +118,88 @@ def test_plan_dependent_validation_is_read_only_and_uses_context_fingerprint():
     with pytest.raises(ValueError):
         validate_plan_dependent_segments(context, [{}])
     validate_plan_dependent_segments(PipelineRunContext(), [{}])
+
+
+def test_facade_validation_uses_active_run_context_and_direct_calls_snapshot():
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber._semantic_plan_fingerprint = "facade-plan"
+    dubber._pipeline_run_context = PipelineRunContext(
+        semantic_plan_fingerprint="active-plan"
+    )
+
+    dubber._validate_plan_dependent_segments(
+        [{"semantic_plan_fingerprint": "active-plan"}]
+    )
+
+    del dubber._pipeline_run_context
+    dubber._validate_plan_dependent_segments(
+        [{"semantic_plan_fingerprint": "facade-plan"}]
+    )
+
+
+def test_run_transcribe_only_shares_one_context_and_commits_only_its_changes():
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    seen_contexts = []
+
+    def record_context():
+        context = dubber._pipeline_run_context
+        seen_contexts.append(context)
+        return context
+
+    class PerformanceTracker:
+        def start_timing(self, _name):
+            record_context()
+
+    class SubtitleManager:
+        def save_debug_tsv(self, *_args, **_kwargs):
+            record_context()
+
+    dubber.performance_tracker = PerformanceTracker()
+    dubber.subtitle_manager = SubtitleManager()
+    dubber.config = {
+        "debug_dir": "debug",
+        "transcription_path": "transcription.tsv",
+    }
+    dubber._reset_input_cache = lambda _reason: record_context()
+
+    def prepare_audio_inputs():
+        record_context().semantic_plan_fingerprint = "plan-from-stage"
+        return "audio.wav", None, "audio.wav"
+
+    dubber._prepare_audio_inputs = prepare_audio_inputs
+    dubber.diarize_and_transcribe = lambda _audio: (
+        record_context() and {(0.0, 1.0): "SPEAKER_00"},
+        [{"speaker": "SPEAKER_00"}],
+    )
+    dubber._apply_speaker_filter = lambda segments: record_context() and segments
+    dubber._save_requested_subtitles = lambda *_args, **_kwargs: record_context()
+    dubber._cleanup = lambda: record_context()
+
+    assert dubber.run_transcribe_only() == "transcription.tsv"
+    assert len({id(context) for context in seen_contexts}) == 1
+    assert dubber._semantic_plan_fingerprint == "plan-from-stage"
+    assert not hasattr(dubber, "_semantic_plan_cache_persistable")
+    assert not hasattr(dubber, "_plan_dependent_cache_allowed")
+    assert not hasattr(dubber, "_timing_source_audio_file")
+    assert not hasattr(dubber, "_timing_source_duration")
+    assert not hasattr(dubber, "_pipeline_run_context")
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "run_transcribe_only",
+        "run_translate_only",
+        "run_analyze_emotions_only",
+        "run_from_scratch",
+        "run_from_tts",
+        "run_pipeline",
+    ],
+)
+def test_every_top_level_run_method_owns_a_pipeline_context(method_name):
+    method = SmartDubbing.__dict__[method_name]
+
+    assert method.__dict__.get("pipeline_context_owner") is True
 
 
 def test_pipeline_context_callables_remain_internal_to_the_context_module():
