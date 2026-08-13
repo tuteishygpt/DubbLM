@@ -68,6 +68,48 @@ def test_sse_honors_last_event_id_replay():
     assert [decode(chunk)["id"] for chunk in chunks if chunk.startswith("id:")] == [2]
 
 
+def test_sse_waits_for_terminal_state_event_after_terminal_status_is_persisted():
+    class TerminalPersistenceRaceRepository:
+        def __init__(self):
+            self.event_calls = 0
+            self.terminal_event_appended = False
+            self.file_event = JobEvent(
+                1, JOB_ID, "file", {"id": "result-1"},
+                "2026-08-13T10:00:01+00:00",
+            )
+            self.terminal_event = JobEvent(
+                2, JOB_ID, "state", {"status": "succeeded"},
+                "2026-08-13T10:00:02+00:00",
+            )
+
+        def get(self, owner_id, job_id):
+            assert owner_id == OWNER and job_id == JOB_ID
+            return replace(
+                make_job(),
+                status="succeeded",
+                state={"status": "succeeded"},
+                last_event_id=2 if self.terminal_event_appended else 1,
+            )
+
+        def events(self, owner_id, job_id, *, after_id=0):
+            assert owner_id == OWNER and job_id == JOB_ID
+            self.event_calls += 1
+            if self.event_calls >= 3:
+                self.terminal_event_appended = True
+            events = [self.file_event]
+            if self.terminal_event_appended:
+                events.append(self.terminal_event)
+            return [event for event in events if event.id > after_id]
+
+    repository = TerminalPersistenceRaceRepository()
+    chunks = collect(job_event_stream(
+        repository, OWNER, JOB_ID, after_id=0,
+        heartbeat_interval=0.01, poll_interval=0.001,
+    ))
+
+    assert [decode(chunk)["id"] for chunk in chunks if chunk.startswith("id:")] == [1, 2]
+
+
 def test_expired_history_starts_with_current_snapshot_and_retained_log_tail():
     chunks = collect(job_event_stream(StreamingRepository(expired=True), OWNER, JOB_ID, after_id=1, heartbeat_interval=0.01, poll_interval=0.001))
     snapshot = decode(chunks[0])

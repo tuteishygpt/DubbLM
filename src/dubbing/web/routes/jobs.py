@@ -100,6 +100,14 @@ async def job_event_stream(
     terminal_without_event = (
         not retained and job.status in TERMINAL_JOB_STATUSES
     )
+    terminal_event_recorded = any(
+        event.type == "error"
+        or (
+            event.type == "state"
+            and event.data.get("status") in TERMINAL_JOB_STATUSES
+        )
+        for event in retained
+    )
     if history_expired or terminal_without_event:
         log_tail = [
             {"id": event.id, "message": str(event.data.get("message") or "")}
@@ -127,10 +135,16 @@ async def job_event_stream(
         for event in events:
             yield _encode_event(event)
             last_id = event.id
+            if event.type == "error":
+                terminal_event_recorded = True
             if event.type == "state" and event.data.get("status") in TERMINAL_JOB_STATUSES:
                 return
         current = repository.get(owner_id, job_id)
-        if current.status in TERMINAL_JOB_STATUSES and last_id >= current.last_event_id:
+        if (
+            current.status in TERMINAL_JOB_STATUSES
+            and last_id >= current.last_event_id
+            and terminal_event_recorded
+        ):
             return
         await asyncio.sleep(sleep_interval)
         elapsed += sleep_interval
