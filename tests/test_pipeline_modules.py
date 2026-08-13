@@ -1,5 +1,6 @@
 import inspect
 import importlib.util
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -36,6 +37,22 @@ EMOTIONS_METHODS = {
     "_analyze_emotions_speechbrain": "analyze_emotions_speechbrain",
 }
 
+ARTIFACT_METHODS = {
+    "_prepare_audio_inputs": "prepare_audio_inputs",
+    "_load_required_cached_step": "load_required_cached_step",
+    "_build_speaker_rolls_from_segments": "build_speaker_rolls_from_segments",
+    "_save_requested_subtitles": "save_requested_subtitles",
+    "_combine_final_video": "combine_final_video",
+    "_reset_input_cache": "reset_input_cache",
+    "_save_transcription_file": "save_transcription_file",
+    "_get_subtitle_path": "get_subtitle_path",
+    "adjust_subtitle_timestamps": "adjust_subtitle_timestamps",
+}
+
+
+def _artifacts_module():
+    return importlib.import_module("dubbing.core.pipeline.artifacts")
+
 
 def test_translation_pipeline_module_exists():
     assert importlib.util.find_spec("dubbing.core.pipeline.translation") is not None
@@ -43,6 +60,420 @@ def test_translation_pipeline_module_exists():
 
 def test_emotions_pipeline_module_exists():
     assert importlib.util.find_spec("dubbing.core.pipeline.emotions") is not None
+
+
+def test_artifacts_pipeline_module_exists():
+    assert importlib.util.find_spec("dubbing.core.pipeline.artifacts") is not None
+
+
+def test_artifact_service_exports_every_owned_internal_callable():
+    artifacts = _artifacts_module()
+
+    for helper_name in ARTIFACT_METHODS.values():
+        assert callable(getattr(artifacts, helper_name, None)), helper_name
+
+
+@pytest.mark.parametrize(("facade_name", "helper_name"), ARTIFACT_METHODS.items())
+def test_every_owned_artifact_facade_method_is_a_thin_delegate(
+    facade_name, helper_name
+):
+    source = inspect.getsource(SmartDubbing.__dict__[facade_name])
+
+    assert f"artifact_helpers.{helper_name}(" in source
+    assert len(source.splitlines()) <= 16
+
+
+def test_artifact_facade_uses_module_callable_patched_at_call_time(monkeypatch):
+    artifacts = _artifacts_module()
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    sentinel = object()
+    calls = []
+
+    def replacement(facade):
+        calls.append(facade)
+        return sentinel
+
+    monkeypatch.setattr(artifacts, "prepare_audio_inputs", replacement)
+
+    assert dubber._prepare_audio_inputs() is sentinel
+    assert calls == [dubber]
+
+
+def test_prepare_audio_inputs_uses_live_processor_and_exact_source_selection():
+    artifacts = _artifacts_module()
+    calls = []
+
+    class Processor:
+        def extract_audio(self, *args):
+            calls.append(("extract", args))
+            return "source.wav"
+
+        def separate_background_and_vocals(self, audio_file):
+            calls.append(("separate", audio_file))
+            return "background.wav", "vocals.wav"
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {
+        "input": "movie.mp4",
+        "start_time": 1.25,
+        "duration": 8.5,
+        "keep_background": True,
+    }
+    dubber.audio_processor = Processor()
+
+    assert artifacts.prepare_audio_inputs(dubber) == (
+        "source.wav",
+        "background.wav",
+        "vocals.wav",
+    )
+    assert calls == [
+        ("extract", ("movie.mp4", 1.25, 8.5)),
+        ("separate", "source.wav"),
+    ]
+
+    dubber.config["keep_background"] = False
+    calls.clear()
+    assert artifacts.prepare_audio_inputs(dubber) == (
+        "source.wav",
+        None,
+        "source.wav",
+    )
+    assert calls == [("extract", ("movie.mp4", 1.25, 8.5))]
+
+
+@pytest.mark.parametrize(
+    ("cache", "message"),
+    [
+        (
+            SimpleNamespace(use_cache=False),
+            "run_step=tts_to_end requires cached translation artifacts from a previous full dubbing run, but caching is currently disabled. Re-enable cache or run the full pipeline first.",
+        ),
+        (
+            SimpleNamespace(
+                use_cache=True, cache_exists=lambda *_args: False
+            ),
+            "run_step=tts_to_end requires cached translation artifacts from a previous full dubbing run in the same project directory, but no cache entry was found for step 'translation'.",
+        ),
+        (
+            SimpleNamespace(
+                use_cache=True,
+                cache_exists=lambda *_args: True,
+                load_from_cache=lambda *_args: None,
+            ),
+            "run_step=tts_to_end found step 'translation' but could not load cached translation artifacts. Re-run the full pipeline to rebuild them.",
+        ),
+    ],
+)
+def test_load_required_cached_step_preserves_exact_errors(cache, message):
+    artifacts = _artifacts_module()
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.cache_manager = cache
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        artifacts.load_required_cached_step(
+            dubber,
+            step_name="translation",
+            cache_key="cache-key",
+            hint="translation",
+        )
+
+    assert str(exc_info.value) == message
+
+
+def test_load_required_cached_step_returns_exact_cached_object():
+    artifacts = _artifacts_module()
+    cached = [{"translation": "Bonjour"}]
+    calls = []
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.cache_manager = SimpleNamespace(
+        use_cache=True,
+        cache_exists=lambda *args: calls.append(("exists", args)) or True,
+        load_from_cache=lambda *args: calls.append(("load", args)) or cached,
+    )
+
+    result = artifacts.load_required_cached_step(
+        dubber,
+        step_name="translation",
+        cache_key="cache-key",
+        hint="translation",
+    )
+
+    assert result is cached
+    assert calls == [
+        ("exists", ("translation", "cache-key")),
+        ("load", ("translation", "cache-key")),
+    ]
+
+
+def test_build_speaker_rolls_preserves_exact_filtering_and_coercion():
+    artifacts = _artifacts_module()
+    segments = [
+        {"start": "1.25", "end": 2, "speaker": 7},
+        {"start": None, "end": 3, "speaker": "missing-start"},
+        {"start": 3, "end": None, "speaker": "missing-end"},
+        {"start": 4, "end": 5, "speaker": None},
+    ]
+
+    assert artifacts.build_speaker_rolls_from_segments(
+        SmartDubbing.__new__(SmartDubbing), segments
+    ) == {
+        (1.25, 2.0): "7"
+    }
+    assert segments[0] == {"start": "1.25", "end": 2, "speaker": 7}
+
+
+def test_save_requested_subtitles_uses_live_facade_helpers_and_exact_paths():
+    artifacts = _artifacts_module()
+    segments = [{"start": 1.0, "end": 2.0}]
+    adjusted = [{"start": 0.5, "end": 1.5}]
+    calls = []
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {
+        "remove_pauses": True,
+        "input": "movie.mp4",
+        "source_language": "en",
+        "target_language": "fr",
+    }
+    dubber.adjust_subtitle_timestamps = (
+        lambda value, pauses: calls.append(("adjust", value, pauses)) or adjusted
+    )
+    dubber._get_subtitle_path = (
+        lambda kind, path, language: calls.append(
+            ("path", kind, path, language)
+        )
+        or f"C:/{kind}-{language}.srt"
+    )
+    dubber.subtitle_manager = SimpleNamespace(
+        save_subtitles=lambda *args: calls.append(("save", args))
+    )
+    pauses = [{"time_removed": 0.5}]
+
+    artifacts.save_requested_subtitles(
+        dubber,
+        segments,
+        save_original_subtitles=True,
+        save_translated_subtitles=True,
+        pause_adjustments=pauses,
+    )
+
+    assert calls == [
+        ("adjust", segments, pauses),
+        ("path", "original", "movie.mp4", "en"),
+        ("save", (adjusted, "original", "C:/original-en.srt")),
+        ("path", "original", "movie.mp4", "en"),
+        ("path", "translation", "movie.mp4", "fr"),
+        ("save", (adjusted, "translation", "C:/translation-fr.srt")),
+        ("path", "translation", "movie.mp4", "fr"),
+    ]
+    assert segments == [{"start": 1.0, "end": 2.0}]
+
+
+def test_save_requested_subtitles_without_pause_removal_keeps_segment_identity():
+    artifacts = _artifacts_module()
+    segments = [{"text": "hello"}]
+    saved = []
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {
+        "remove_pauses": False,
+        "input": "movie.mp4",
+        "source_language": "en",
+        "target_language": "fr",
+    }
+    dubber._get_subtitle_path = (
+        lambda kind, _path, language: f"{kind}-{language}.srt"
+    )
+    dubber.subtitle_manager = SimpleNamespace(
+        save_subtitles=lambda *args: saved.append(args)
+    )
+
+    artifacts.save_requested_subtitles(
+        dubber,
+        segments,
+        save_original_subtitles=False,
+        save_translated_subtitles=True,
+        pause_adjustments=[{"ignored": True}],
+    )
+
+    assert saved == [(segments, "translation", "translation-fr.srt")]
+    assert saved[0][0] is segments
+
+
+def test_combine_final_video_forwards_exact_options_and_computed_ranges():
+    artifacts = _artifacts_module()
+    received = []
+    result = ("dubbed.mp4", [{"time_removed": 0.5}])
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {
+        "input": "movie.mp4",
+        "include_original_audio": True,
+        "output": "output.mp4",
+        "source_language": "en",
+        "target_language": "fr",
+    }
+    dubber.muted_speakers = {"MUTED"}
+    dubber.video_processor = SimpleNamespace(
+        combine_audio_with_video=lambda **kwargs: received.append(kwargs) or result
+    )
+    rolls = {(0.0, 1.0): "KEPT", (1.0, 2.0): "MUTED"}
+
+    actual = artifacts.combine_final_video(
+        dubber,
+        translated_audio_path="translated.wav",
+        background_audio_path="background.wav",
+        speakers_rolls=rolls,
+    )
+
+    assert actual is result
+    assert received == [
+        {
+            "video_path": "movie.mp4",
+            "translated_audio_path": "translated.wav",
+            "background_audio_path": "background.wav",
+            "watermark_path": None,
+            "watermark_text": None,
+            "include_original_audio": True,
+            "output_file": "output.mp4",
+            "start_time": None,
+            "duration": None,
+            "keep_original_audio_ranges": [(0.0, 1.0)],
+            "source_language": "en",
+            "target_language": "fr",
+            "normalize_audio": True,
+            "use_two_pass_encoding": True,
+            "remove_pauses": False,
+            "min_pause_duration": 300,
+            "preserve_pause_duration": 1.5,
+            "keyframe_buffer": 0.2,
+            "ffmpeg_batch_size": 50,
+            "dubbed_volume": 1.0,
+            "background_volume": 0.562341,
+            "upscale_factor": 1.0,
+            "upscale_sharpen": True,
+        }
+    ]
+
+
+def test_reset_input_cache_preserves_exact_deletion_scope(tmp_path):
+    artifacts = _artifacts_module()
+    audio_chunks = tmp_path / "audio_chunks"
+    su_chunks = tmp_path / "su_chunks"
+    audio_chunks.mkdir()
+    su_chunks.mkdir()
+    (audio_chunks / "0.wav").write_bytes(b"wav")
+    (audio_chunks / "keep.mp3").write_bytes(b"mp3")
+    (su_chunks / "1.wav").write_bytes(b"wav")
+    cache_root = tmp_path / "cache"
+    removable = cache_root / "translation"
+    untouched = cache_root / "unrelated"
+    removable.mkdir(parents=True)
+    untouched.mkdir()
+    (removable / "value.pkl").write_bytes(b"cache")
+    (untouched / "value.pkl").write_bytes(b"cache")
+    cleared = []
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {"input": "movie.mp4"}
+    dubber.audio_chunks_dir = audio_chunks
+    dubber.su_audio_chunks_dir = su_chunks
+    dubber.cache_manager = SimpleNamespace(
+        cache_root=cache_root,
+        clear_input_cache=lambda path: cleared.append(path),
+    )
+
+    artifacts.reset_input_cache(dubber, "test reset")
+
+    assert cleared == ["movie.mp4"]
+    assert not (audio_chunks / "0.wav").exists()
+    assert (audio_chunks / "keep.mp3").exists()
+    assert not (su_chunks / "1.wav").exists()
+    assert not removable.exists()
+    assert untouched.exists()
+
+
+def test_save_transcription_file_preserves_exact_utf8_format(tmp_path):
+    artifacts = _artifacts_module()
+    transcription_path = tmp_path / "nested" / "transcription.txt"
+    segments = [
+        {
+            "speaker": "SPEAKER_00",
+            "start": 0.096,
+            "end": 11.853,
+            "text": "Precise timing — café",
+        }
+    ]
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {"transcription_path": str(transcription_path)}
+
+    artifacts.save_transcription_file(dubber, segments)
+
+    assert transcription_path.read_text(encoding="utf-8") == (
+        "[00.00.00.096-00.00.11.853] SPEAKER_00: Precise timing — café\n"
+    )
+    assert segments[0]["start"] == 0.096
+
+
+def test_get_subtitle_path_preserves_exact_project_layout_and_disambiguation(
+    tmp_path,
+):
+    artifacts = _artifacts_module()
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {
+        "project_dir": str(tmp_path / "project"),
+        "source_language": "en",
+        "target_language": "fr",
+    }
+
+    assert artifacts.get_subtitle_path(
+        dubber, "original", r"C:\media\Film.mp4", "en"
+    ) == str(tmp_path / "project" / "Film_en.srt")
+
+    dubber.config["target_language"] = "en"
+    assert artifacts.get_subtitle_path(
+        dubber, "original", r"C:\media\Film.mp4", "en"
+    ) == str(tmp_path / "project" / "source_Film_en.srt")
+    assert artifacts.get_subtitle_path(
+        dubber, "translation", r"C:\media\Film.mp4", "en"
+    ) == str(tmp_path / "project" / "target_Film_en.srt")
+
+
+def test_adjust_subtitle_timestamps_returns_copies_with_exact_values():
+    artifacts = _artifacts_module()
+    segments = [
+        {"start": 1.5, "end": 2.5, "text": "during"},
+        {"start": 4.0, "end": 5.0, "text": "after"},
+    ]
+    original = [segment.copy() for segment in segments]
+    adjustments = [
+        {
+            "original_start": 1.0,
+            "original_end": 3.0,
+            "time_removed": 1.0,
+            "cumulative_offset": 1.0,
+        }
+    ]
+
+    adjusted = artifacts.adjust_subtitle_timestamps(
+        SmartDubbing.__new__(SmartDubbing), segments, adjustments
+    )
+
+    assert adjusted == [
+        {"start": 1.5, "end": 2.0, "text": "during"},
+        {"start": 3.0, "end": 4.0, "text": "after"},
+    ]
+    assert segments == original
+    assert adjusted is not segments
+    assert adjusted[0] is not segments[0]
+
+
+def test_adjust_subtitle_timestamps_without_adjustments_preserves_identity():
+    artifacts = _artifacts_module()
+    segments = [{"start": 1.0, "end": 2.0}]
+
+    assert (
+        artifacts.adjust_subtitle_timestamps(
+            SmartDubbing.__new__(SmartDubbing), segments, []
+        )
+        is segments
+    )
 
 
 @pytest.mark.parametrize(
