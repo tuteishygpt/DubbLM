@@ -6,12 +6,15 @@ import json
 import os
 import re
 import threading
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Callable, Mapping
 from uuid import UUID, uuid4
+
+from dubbing.core.runner import build_config_from_overrides
 
 
 DEFAULT_EVENT_RETENTION_BYTES = 10 * 1024**2
@@ -77,6 +80,79 @@ class JobEvent:
 Clock = Callable[[], datetime]
 
 
+class JobService:
+    """Validate and freeze owner-scoped uploads before accepting a job."""
+
+    def __init__(self, repository: object, media_store: object, queue: object | None = None) -> None:
+        self._repository = repository
+        self._media_store = media_store
+        self._queue = queue
+
+    def submit(
+        self,
+        owner_id: str,
+        input_upload_id: str,
+        *,
+        isolated_tracks: Mapping[str, str] | None = None,
+        overrides: Mapping[str, Any] | None = None,
+    ) -> Job:
+        job_id = str(uuid4())
+        values = dict(overrides or {})
+        # Resolve every reference first so a cross-owner track cannot leave a
+        # partially materialized submission behind.
+        self._media_store.get(owner_id, input_upload_id)
+        for upload_id in (isolated_tracks or {}).values():
+            self._media_store.get(owner_id, str(upload_id))
+        input_media = self._media_store.materialize_for_job(
+            owner_id, input_upload_id, job_id
+        )
+        values["input"] = str(input_media.path)
+
+        resolved_tracks: dict[str, str] = {}
+        for speaker, upload_id in (isolated_tracks or {}).items():
+            label = str(speaker).strip()
+            if not label:
+                raise JobValidationError("Isolated-track speaker labels cannot be empty.")
+            materialized = self._media_store.materialize_for_job(
+                owner_id, str(upload_id), job_id
+            )
+            resolved_tracks[label] = str(materialized.path)
+        if resolved_tracks:
+            values["isolated_tracks"] = resolved_tracks
+
+        try:
+            config = build_config_from_overrides(values)
+        except SystemExit as exc:
+            raise JobValidationError("Dubbing configuration is invalid.") from exc
+        except (TypeError, ValueError) as exc:
+            raise JobValidationError(f"Dubbing configuration is invalid: {exc}") from exc
+
+        config_snapshot = json.loads(
+            json.dumps(
+                config.to_dict(),
+                ensure_ascii=False,
+                default=self._config_json_default,
+            )
+        )
+        job = self._repository.create(
+            owner_id,
+            config_snapshot,
+            job_id=job_id,
+            state={"status": "queued"},
+        )
+        if self._queue is not None:
+            self._queue.enqueue(job.id)
+        return job
+
+    @staticmethod
+    def _config_json_default(value: object) -> object:
+        if is_dataclass(value) and not isinstance(value, type):
+            return asdict(value)
+        if isinstance(value, Path):
+            return str(value)
+        raise TypeError(f"Unsupported configuration value: {type(value).__name__}")
+
+
 class FileJobRepository:
     """Store job state beneath ``jobs/<owner>/<job-id>``."""
 
@@ -132,9 +208,10 @@ class FileJobRepository:
         }
         job_path = self._job_path(owner, opaque_id)
         with self._lock:
-            if job_path.exists():
-                raise JobValidationError("Job ID already exists.")
-            self._atomic_json(job_path, raw)
+            with self._job_file_lock(owner, opaque_id):
+                if job_path.exists():
+                    raise JobValidationError("Job ID already exists.")
+                self._atomic_json(job_path, raw)
         return self._decode_job(raw)
 
     def get(self, owner_id: str, job_id: str) -> Job:
@@ -188,27 +265,28 @@ class FileJobRepository:
                 f"Cannot update immutable or unknown job fields: {', '.join(sorted(unknown))}."
             )
         with self._lock:
-            current = self._read_raw_job(owner, opaque_id)
-            now = self._now()
-            if "status" in changes:
-                status = str(changes["status"])
-                if status not in JOB_STATUSES:
-                    raise JobValidationError(f"Invalid job status: {status}.")
-                current["status"] = status
-                if status == "running" and current.get("started_at") is None:
-                    current["started_at"] = now
-                if status in TERMINAL_JOB_STATUSES and current.get("finished_at") is None:
-                    current["finished_at"] = now
-            if "state" in changes:
-                current["state"] = self._mapping_copy(changes["state"], "state")
-            if "error" in changes:
-                error = changes["error"]
-                current["error"] = None if error is None else self._mapping_copy(error, "error")
-            if "files" in changes:
-                current["files"] = self._files_copy(changes["files"])
-            current["updated_at"] = now
-            self._atomic_json(self._job_path(owner, opaque_id), current)
-            return self._decode_job(current)
+            with self._job_file_lock(owner, opaque_id):
+                current = self._read_raw_job(owner, opaque_id)
+                now = self._now()
+                if "status" in changes:
+                    status = str(changes["status"])
+                    if status not in JOB_STATUSES:
+                        raise JobValidationError(f"Invalid job status: {status}.")
+                    current["status"] = status
+                    if status == "running" and current.get("started_at") is None:
+                        current["started_at"] = now
+                    if status in TERMINAL_JOB_STATUSES and current.get("finished_at") is None:
+                        current["finished_at"] = now
+                if "state" in changes:
+                    current["state"] = self._mapping_copy(changes["state"], "state")
+                if "error" in changes:
+                    error = changes["error"]
+                    current["error"] = None if error is None else self._mapping_copy(error, "error")
+                if "files" in changes:
+                    current["files"] = self._files_copy(changes["files"])
+                current["updated_at"] = now
+                self._atomic_json(self._job_path(owner, opaque_id), current)
+                return self._decode_job(current)
 
     def append_event(
         self,
@@ -224,37 +302,38 @@ class FileJobRepository:
             raise JobValidationError("Invalid SSE event type.")
         event_data = self._mapping_copy(data, "event data")
         with self._lock:
-            current = self._read_raw_job(owner, opaque_id)
-            event_path = self._event_path(owner, opaque_id)
-            try:
-                existing = event_path.read_bytes() if event_path.is_file() else b""
-                retained_ids = [
-                    int(json.loads(line)["id"])
-                    for line in existing.splitlines()
-                    if line
-                ]
-            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-                raise JobWriteError(f"Could not read job events: {exc}") from exc
-            event = JobEvent(
-                id=max([int(current["last_event_id"]), *retained_ids]) + 1,
-                job_id=opaque_id,
-                type=normalized_type,
-                data=event_data,
-                timestamp=self._now(),
-            )
-            encoded = self._event_bytes(event)
-            if len(encoded) > self._event_retention_bytes:
-                raise JobValidationError("Event exceeds the configured retention limit.")
-            lines = [line + b"\n" for line in existing.splitlines() if line]
-            lines.append(encoded)
-            total = sum(map(len, lines))
-            while lines and total > self._event_retention_bytes:
-                total -= len(lines.pop(0))
-            self._atomic_bytes(event_path, b"".join(lines))
-            current["last_event_id"] = event.id
-            current["updated_at"] = event.timestamp
-            self._atomic_json(self._job_path(owner, opaque_id), current)
-            return event
+            with self._job_file_lock(owner, opaque_id):
+                current = self._read_raw_job(owner, opaque_id)
+                event_path = self._event_path(owner, opaque_id)
+                try:
+                    existing = event_path.read_bytes() if event_path.is_file() else b""
+                    retained_ids = [
+                        int(json.loads(line)["id"])
+                        for line in existing.splitlines()
+                        if line
+                    ]
+                except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+                    raise JobWriteError(f"Could not read job events: {exc}") from exc
+                event = JobEvent(
+                    id=max([int(current["last_event_id"]), *retained_ids]) + 1,
+                    job_id=opaque_id,
+                    type=normalized_type,
+                    data=event_data,
+                    timestamp=self._now(),
+                )
+                encoded = self._event_bytes(event)
+                if len(encoded) > self._event_retention_bytes:
+                    raise JobValidationError("Event exceeds the configured retention limit.")
+                lines = [line + b"\n" for line in existing.splitlines() if line]
+                lines.append(encoded)
+                total = sum(map(len, lines))
+                while lines and total > self._event_retention_bytes:
+                    total -= len(lines.pop(0))
+                self._atomic_bytes(event_path, b"".join(lines))
+                current["last_event_id"] = event.id
+                current["updated_at"] = event.timestamp
+                self._atomic_json(self._job_path(owner, opaque_id), current)
+                return event
 
     def events(self, owner_id: str, job_id: str, *, after_id: int = 0) -> list[JobEvent]:
         owner = self._validate_owner(owner_id)
@@ -282,17 +361,19 @@ class FileJobRepository:
         with self._lock:
             for job_path in self._jobs_root.glob("*/*/job.json"):
                 try:
-                    raw = json.loads(job_path.read_text(encoding="utf-8"))
-                    if raw.get("status") not in {"queued", "running"}:
-                        continue
-                    raw["status"] = "failed"
-                    raw["error"] = {
-                        "code": "server_restarted",
-                        "message": "The server restarted before the job completed.",
-                    }
-                    raw["finished_at"] = self._now()
-                    raw["updated_at"] = raw["finished_at"]
-                    self._atomic_json(job_path, raw)
+                    owner, job_id = job_path.parent.parent.name, job_path.parent.name
+                    with self._job_file_lock(owner, job_id):
+                        raw = json.loads(job_path.read_text(encoding="utf-8"))
+                        if raw.get("status") not in {"queued", "running"}:
+                            continue
+                        raw["status"] = "failed"
+                        raw["error"] = {
+                            "code": "server_restarted",
+                            "message": "The server restarted before the job completed.",
+                        }
+                        raw["finished_at"] = self._now()
+                        raw["updated_at"] = raw["finished_at"]
+                        self._atomic_json(job_path, raw)
                 except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
                     continue
 
@@ -402,6 +483,35 @@ class FileJobRepository:
 
     def _event_path(self, owner: str, job_id: str) -> Path:
         return self._jobs_root / owner / job_id / "events.jsonl"
+
+    @contextmanager
+    def _job_file_lock(self, owner: str, job_id: str):
+        """Hold a portable exclusive lock for one persisted job."""
+        lock_path = self._jobs_root / owner / job_id / ".lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as lock_file:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _now(self) -> str:
         value = self._clock()

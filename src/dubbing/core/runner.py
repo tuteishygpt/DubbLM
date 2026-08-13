@@ -205,11 +205,78 @@ def run_dubbing_job_streaming(
     yield final_result.status, final_result.logs, final_result
 
 
+def run_validated_dubbing_job_streaming(
+    config: DubbingConfig,
+    *,
+    dubbing_factory: Optional[Callable[[DubbingConfig], Any]] = None,
+    poll_interval: float = 0.5,
+):
+    """Stream execution of an already validated, fully resolved config.
+
+    Unlike :func:`run_dubbing_job_streaming`, this entry point never consults
+    a YAML file or reapplies defaults and overrides.
+    """
+    result_container: dict[str, Any] = {"result": None}
+    log_stream = io.StringIO()
+
+    if not logging.getLogger().handlers:
+        setup_logging()
+
+    def _worker() -> None:
+        result_container["result"] = run_validated_dubbing_job(
+            config,
+            dubbing_factory=dubbing_factory,
+            _log_stream=log_stream,
+        )
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+
+    last_len = 0
+    while thread.is_alive():
+        thread.join(timeout=poll_interval)
+        current = log_stream.getvalue()
+        if len(current) != last_len:
+            last_len = len(current)
+            yield "Running…", current, None
+
+    final_result = result_container.get("result")
+    if final_result is None:
+        yield "Failed: worker thread ended without result", log_stream.getvalue(), None
+        return
+    yield final_result.status, final_result.logs, final_result
+
+
+def run_validated_dubbing_job(
+    config: DubbingConfig,
+    *,
+    dubbing_factory: Optional[Callable[[DubbingConfig], Any]] = None,
+    _log_stream: Optional[io.StringIO] = None,
+) -> DubbingJobResult:
+    """Execute a validated config without rebuilding or reloading it."""
+    if not isinstance(config, DubbingConfig):
+        raise TypeError("config must be a validated DubbingConfig")
+    return run_dubbing_job(
+        {},
+        dubbing_factory=dubbing_factory,
+        _log_stream=_log_stream,
+        _validated_config=config,
+    )
+
+
+def config_from_snapshot(snapshot: dict[str, Any]) -> DubbingConfig:
+    """Reconstruct a validated config snapshot without consulting YAML."""
+    config = DubbingConfig()
+    config.config = json.loads(json.dumps(snapshot, ensure_ascii=False))
+    return config
+
+
 def run_dubbing_job(
     overrides: dict[str, Any],
     *,
     dubbing_factory: Optional[Callable[[DubbingConfig], Any]] = None,
     _log_stream: Optional[io.StringIO] = None,
+    _validated_config: Optional[DubbingConfig] = None,
 ) -> DubbingJobResult:
     """Run the configured dubbing job and capture logs for the caller.
 
@@ -241,7 +308,7 @@ def run_dubbing_job(
 
     try:
         load_dotenv(override=True)
-        config = build_config_from_overrides(overrides)
+        config = _validated_config or build_config_from_overrides(overrides)
 
         if dubbing_factory is None:
             from .smart_dubbing import SmartDubbing

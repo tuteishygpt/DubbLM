@@ -12,7 +12,11 @@ from dubbing.core.smart_dubbing import (
     SOFT_STYLE_BY_EMOTION,
     SmartDubbing,
 )
-from dubbing.core.runner import build_config_from_overrides, run_dubbing_job
+from dubbing.core.runner import (
+    build_config_from_overrides,
+    run_dubbing_job,
+    run_validated_dubbing_job_streaming,
+)
 from dubbing.core.voice_profiles import VoiceProfile
 
 
@@ -171,6 +175,41 @@ def test_run_dubbing_job_loads_dotenv_before_constructing_dubber(tmp_path, monke
 
     assert result.status == "Completed"
     assert calls == [("dotenv", {"override": True}), "dubber"]
+
+
+def test_validated_config_streaming_never_reloads_yaml(tmp_path, monkeypatch):
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"video")
+    output_path = tmp_path / "dubbed.mp4"
+    config = build_config_from_overrides(
+        {
+            "config": "",
+            "input": str(video_path),
+            "source_language": "en",
+            "target_language": "be",
+        }
+    )
+
+    def fail_yaml(*_args, **_kwargs):
+        raise AssertionError("validated execution must not load YAML")
+
+    monkeypatch.setattr(config, "load_from_yaml", fail_yaml)
+
+    class FakeDubber:
+        def __init__(self, received):
+            assert received is config
+
+        def run_pipeline(self, **_kwargs):
+            return str(output_path)
+
+    updates = list(
+        run_validated_dubbing_job_streaming(
+            config, dubbing_factory=FakeDubber, poll_interval=0.001
+        )
+    )
+
+    assert updates[-1][2].status == "Completed"
+    assert updates[-1][2].output_file == str(output_path)
 
 
 def test_run_dubbing_job_returns_speaker_report_paths(tmp_path):

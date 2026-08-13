@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 import json
-from pathlib import Path
+import multiprocessing
 from uuid import UUID
 
 import pytest
@@ -15,6 +15,14 @@ from dubbing.web.jobs import (
     JobValidationError,
     JobWriteError,
 )
+
+
+def _append_events_in_process(root, owner, job_id, count, ready, start):
+    repository = FileJobRepository(root)
+    ready.put(True)
+    start.wait(timeout=10)
+    for index in range(count):
+        repository.append_event(owner, job_id, "log", {"index": index})
 
 
 class _MemoryJobRepository:
@@ -268,6 +276,33 @@ def test_append_event_recovers_monotonic_id_after_metadata_replace_failure(tmp_p
     assert second.id == 2
     assert [event.id for event in repository.events("alice", created.id)] == [1, 2]
     assert repository.get("alice", created.id).last_event_id == 2
+
+
+def test_append_event_is_serialized_across_processes(tmp_path):
+    repository = FileJobRepository(tmp_path)
+    created = repository.create("alice", {})
+    context = multiprocessing.get_context("spawn")
+    ready = context.Queue()
+    start = context.Event()
+    processes = [
+        context.Process(
+            target=_append_events_in_process,
+            args=(str(tmp_path), "alice", created.id, 12, ready, start),
+        )
+        for _index in range(3)
+    ]
+    for process in processes:
+        process.start()
+    for _process in processes:
+        assert ready.get(timeout=10) is True
+    start.set()
+    for process in processes:
+        process.join(timeout=15)
+        assert process.exitcode == 0
+
+    events = repository.events("alice", created.id)
+    assert [event.id for event in events] == list(range(1, 37))
+    assert repository.get("alice", created.id).last_event_id == 36
 
 
 def test_restart_fails_queued_and_running_jobs_but_preserves_terminal_jobs(tmp_path):
