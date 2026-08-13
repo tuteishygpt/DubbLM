@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from dubbing.web import schema
+import dubbing.web.settings as settings_module
 from dubbing.web.settings import (
     SettingsConflictError,
     SettingsService,
@@ -208,6 +209,10 @@ def test_settings_save_serializes_same_revision_writers_across_processes(tmp_pat
 
     assert all(process.exitcode == 0 for process in processes)
     assert sorted(outcomes.get(timeout=2) for _ in processes) == ["conflict", "saved"]
+
+
+def test_settings_lock_uses_platform_specific_stdlib_backend():
+    assert (settings_module._msvcrt is None) != (settings_module._fcntl is None)
 
 
 def test_settings_atomic_save_preserves_prior_file_when_replace_fails(tmp_path, monkeypatch):

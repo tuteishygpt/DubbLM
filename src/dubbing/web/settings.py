@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import msvcrt
 import os
 import re
 import threading
@@ -19,6 +18,16 @@ from tempfile import NamedTemporaryFile
 from typing import Any, Mapping
 
 import yaml
+
+try:  # Windows locking backend
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - exercised on POSIX
+    _msvcrt = None
+
+try:  # POSIX locking backend
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    _fcntl = None
 
 from .schema import JSON_TEXT_FIELDS, LIST_TEXT_FIELDS
 from .schema import TTS_PROVIDER_CHOICES, TTS_REFERENCE_CAPABILITIES
@@ -320,13 +329,21 @@ class SettingsService:
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.touch(exist_ok=True)
         with lock_path.open("r+b") as lock_file:
-            lock_file.seek(0)
             try:
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                if _msvcrt is not None:
+                    lock_file.seek(0)
+                    _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_LOCK, 1)
+                elif _fcntl is not None:
+                    _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+                else:  # pragma: no cover - supported Python platforms provide one
+                    raise OSError("No supported file-locking backend is available.")
             except OSError as exc:
                 raise SettingsWriteError(f"Could not lock settings for writing: {exc}") from exc
             try:
                 yield
             finally:
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                if _msvcrt is not None:
+                    lock_file.seek(0)
+                    _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)
+                else:
+                    _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
