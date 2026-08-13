@@ -304,3 +304,16 @@ def test_configured_reference_profile_requires_existing_audio_path(tmp_path):
             },
             revision=service.list_profiles().revision,
         )
+
+
+def test_profile_params_must_be_a_mapping(tmp_path):
+    config_path = tmp_path / "dubbing_config.yml"
+    _write_config(config_path, {"voices": {}})
+    service = SettingsService(config_path)
+
+    with pytest.raises(SettingsValidationError, match="params"):
+        service.put_profile(
+            "SPEAKER_00",
+            {"tts_system": "gemini", "model": "model", "params": "not-a-mapping"},
+            revision=service.list_profiles().revision,
+        )

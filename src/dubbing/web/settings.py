@@ -240,8 +240,14 @@ class SettingsService:
 
     @classmethod
     def _validate_profiles(cls, profiles: Mapping[str, Mapping[str, Any]]) -> None:
-        profile_objects = {
-            speaker: VoiceProfile(
+        profile_objects: dict[str, VoiceProfile] = {}
+        for speaker, profile in profiles.items():
+            raw_params = profile.get("params")
+            if raw_params is not None and not isinstance(raw_params, Mapping):
+                raise SettingsValidationError(
+                    f"Voice profile {speaker} params must be a mapping."
+                )
+            profile_objects[speaker] = VoiceProfile(
                 tts_system=profile.get("tts_system"),
                 model=profile.get("model"),
                 voice_name=profile.get("voice_name"),
@@ -249,10 +255,8 @@ class SettingsService:
                 reference_audio=profile.get("reference_audio"),
                 reference_text=profile.get("reference_text"),
                 reference_mode=profile.get("reference_mode"),
-                params=dict(profile.get("params") or {}),
+                params=dict(raw_params or {}),
             )
-            for speaker, profile in profiles.items()
-        }
         for speaker in profile_objects:
             cls._validate_profile(speaker, resolve_profile(profile_objects, speaker))
 
