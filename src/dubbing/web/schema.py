@@ -33,6 +33,12 @@ SETTINGS_FIELDS = [
 ]
 
 ALL_FIELDS = WORKFLOW_FIELDS + SETTINGS_FIELDS
+SERVER_MANAGED_FIELDS = {"input", "output", "config"}
+DEDICATED_UPLOAD_FIELDS = {"isolated_tracks_files", "isolated_tracks_labels"}
+PUBLIC_SCHEMA_FIELDS = [
+    field for field in ALL_FIELDS
+    if field not in SERVER_MANAGED_FIELDS | DEDICATED_UPLOAD_FIELDS
+]
 NON_PERSISTED_FIELDS = {
     "input", "output", "config", "run_step", "generate_speaker_report",
     "isolated_tracks_files", "isolated_tracks_labels",
@@ -63,6 +69,54 @@ TTS_PROVIDER_CHOICES = [
 REFINEMENT_PERSONA_CHOICES = [
     "normal", "casual_manager", "child", "housewife", "science_popularizer", "it_buddy", "ai_buddy",
 ]
+
+BOOLEAN_FIELDS = {
+    "generate_speaker_report", "save_original_subtitles", "save_translated_subtitles",
+    "keep_background", "include_original_audio", "remove_pauses", "no_cache",
+    "voice_auto_selection", "enable_emotion_analysis", "use_two_pass_encoding",
+    "semantic_split_enabled", "debug_info", "debug_tts", "debug_diarize_only",
+}
+NUMBER_FIELDS = {
+    "start_time", "duration", "llm_temperature", "refinement_temperature",
+    "refinement_max_tokens", "segment_reference_min_duration", "min_pause_duration",
+    "keyframe_buffer", "dubbed_volume", "background_volume",
+    "timing_short_segment_threshold", "timing_short_segment_max_speed",
+    "timing_max_speed", "timing_max_stretch", "timing_max_overflow",
+    "tts_preferred_segment_duration", "tts_hard_segment_duration",
+    "semantic_split_search_window",
+}
+OBJECT_FIELDS = {"glossary", "voices"}
+LIST_FIELDS = {"keep_original_audio_ranges"}
+SELECT_OPTION_KEYS = {
+    "run_step": "run_modes",
+    "inner_transcription_system": "inner_transcription_systems",
+    "transcription_system": "transcription_systems",
+    "llm_provider": "llm_providers",
+    "refinement_llm_provider": "llm_providers",
+    "refinement_persona": "refinement_personas",
+    "emotion_provider": "emotion_providers",
+    "emotion_model": "emotion_models",
+}
+
+
+def api_field(name: str) -> dict[str, object]:
+    """Return the authoritative browser control metadata for one public field."""
+    definition: dict[str, object] = {
+        "name": name,
+        "type": (
+            "boolean" if name in BOOLEAN_FIELDS
+            else "number" if name in NUMBER_FIELDS
+            else "object" if name in OBJECT_FIELDS
+            else "list" if name in LIST_FIELDS
+            else "select" if name in SELECT_OPTION_KEYS
+            else "string"
+        ),
+        "workflow": name in WORKFLOW_FIELDS,
+    }
+    options_key = SELECT_OPTION_KEYS.get(name)
+    if options_key:
+        definition["options_key"] = options_key
+    return definition
 
 TTS_MODEL_CHOICES = {
     "gemini": [GEMINI_TTS_DEFAULT_MODEL],

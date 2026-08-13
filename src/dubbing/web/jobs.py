@@ -84,10 +84,18 @@ Clock = Callable[[], datetime]
 class JobService:
     """Validate and freeze owner-scoped uploads before accepting a job."""
 
-    def __init__(self, repository: object, media_store: object, queue: object | None = None) -> None:
+    def __init__(
+        self,
+        repository: object,
+        media_store: object,
+        queue: object | None = None,
+        *,
+        config_path: str | Path = "dubbing_config.yml",
+    ) -> None:
         self._repository = repository
         self._media_store = media_store
         self._queue = queue
+        self._config_path = str(config_path)
 
     def submit(
         self,
@@ -97,8 +105,14 @@ class JobService:
         isolated_tracks: Mapping[str, str] | None = None,
         overrides: Mapping[str, Any] | None = None,
     ) -> Job:
-        job_id = str(uuid4())
         values = dict(overrides or {})
+        reserved = sorted({"input", "output", "config"}.intersection(values))
+        if reserved:
+            raise JobValidationError(
+                f"Browser overrides contain server-managed fields: {', '.join(reserved)}."
+            )
+        values["config"] = self._config_path
+        job_id = str(uuid4())
         # Resolve every reference first so a cross-owner track cannot leave a
         # partially materialized submission behind.
         self._media_store.get(owner_id, input_upload_id)

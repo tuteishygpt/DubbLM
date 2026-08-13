@@ -230,8 +230,34 @@ def test_config_options_and_revision_error_contract(tmp_path):
         response = client.get("/api/config")
         assert response.status_code == 200
         assert set(response.json()) == {"revision", "values", "schema"}
-        assert len(response.json()["schema"]["fields"]) > 20
-        assert "run_modes" in client.get("/api/options").json()
+        fields = {
+            field["name"]: field for field in response.json()["schema"]["fields"]
+        }
+        assert len(fields) > 20
+        assert {"input", "output", "config"}.isdisjoint(fields)
+        for name in (
+            "generate_speaker_report",
+            "save_original_subtitles",
+            "save_translated_subtitles",
+            "keep_background",
+            "include_original_audio",
+            "remove_pauses",
+        ):
+            assert fields[name]["type"] == "boolean"
+        assert fields["run_step"] == {
+            "name": "run_step",
+            "type": "select",
+            "workflow": True,
+            "options_key": "run_modes",
+        }
+        assert fields["inner_transcription_system"]["type"] == "select"
+        assert fields["inner_transcription_system"]["options_key"] == "inner_transcription_systems"
+        options = client.get("/api/options").json()
+        assert options["run_modes"] == [
+            "full_pipeline", "from_scratch", "transcribe_only", "translate_only",
+            "analyze_emotions_only", "combine_video", "tts_to_end",
+        ]
+        assert options["inner_transcription_systems"] == ["deepgram", "assemblyai", "gemini"]
         assert client.put("/api/config", json={"revision": "settings-1", "values": {"target_language": "fr"}}).json()["revision"] == "settings-2"
         stale = client.put("/api/config", json={"revision": "stale", "values": {}})
     assert stale.status_code == 409

@@ -19,16 +19,8 @@ class ConfigUpdate(BaseModel):
 
 
 def _schema() -> dict[str, Any]:
-    workflow = set(schema.WORKFLOW_FIELDS)
     return {
-        "fields": [
-            {
-                "name": name,
-                "type": "object" if name in {"voices", "glossary"} else "string",
-                "workflow": name in workflow,
-            }
-            for name in schema.ALL_FIELDS
-        ]
+        "fields": [schema.api_field(name) for name in schema.PUBLIC_SCHEMA_FIELDS]
     }
 
 
@@ -48,10 +40,12 @@ def put_config(payload: ConfigUpdate, settings=Depends(get_settings)):
 def get_options():
     return {
         "run_modes": schema.RUN_MODES,
+        "inner_transcription_systems": schema.INNER_TRANSCRIPTION_SYSTEM_CHOICES,
         "transcription_systems": schema.TRANSCRIPTION_SYSTEM_CHOICES,
         "transcription_models": schema.TRANSCRIPTION_MODEL_CHOICES,
         "transcription_model_defaults": schema.TRANSCRIPTION_MODEL_DEFAULTS,
         "llm_providers": schema.LLM_PROVIDER_CHOICES,
+        "refinement_personas": schema.REFINEMENT_PERSONA_CHOICES,
         "emotion_providers": schema.EMOTION_PROVIDER_CHOICES,
         "emotion_models": schema.EMOTION_MODEL_CHOICES,
         "tts_providers": schema.TTS_PROVIDER_CHOICES,

@@ -60,7 +60,12 @@ def create_app(
     )
     job_repository = job_repository or FileJobRepository(data_root)
     job_queue = job_queue or InProcessJobQueue(job_repository, media_store, owner_id=owner.id)
-    job_service = job_service or JobService(job_repository, media_store, job_queue)
+    job_service = job_service or JobService(
+        job_repository,
+        media_store,
+        job_queue,
+        config_path=config_path or "dubbing_config.yml",
+    )
     reference_service = reference_service or ReferenceLibraryService(data_root / "references", media_store)
     dubbing_text_service = dubbing_text_service or DubbingTextService(media_store, job_repository=job_repository)
 

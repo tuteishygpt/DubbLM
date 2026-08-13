@@ -49,11 +49,11 @@ def test_submission_materializes_owner_uploads_and_freezes_normalized_config(
     config_path = tmp_path / "settings.yml"
     config_path.write_text("source_language: en\ntarget_language: fr\n", encoding="utf-8")
 
-    job = JobService(repository, store).submit(
+    job = JobService(repository, store, config_path=config_path).submit(
         owner_id="alice",
         input_upload_id=video.id,
         isolated_tracks={"SPEAKER_00": track.id},
-        overrides={"config": str(config_path), "target_language": "es"},
+        overrides={"target_language": "es"},
     )
 
     assert Path(job.config["input"]).name == "My_unsafe_clip_final.mp4"
@@ -68,6 +68,26 @@ def test_submission_materializes_owner_uploads_and_freezes_normalized_config(
     assert repository.get("alice", job.id).config["source_language"] == "en"
 
 
+def test_submission_rejects_browser_managed_paths_before_media_access(tmp_path):
+    class UnreachableMediaStore:
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("reserved overrides must be rejected before media access")
+
+    service = JobService(
+        FileJobRepository(tmp_path / "data"),
+        UnreachableMediaStore(),
+        config_path=tmp_path / "trusted.yml",
+    )
+
+    for reserved in ("input", "output", "config"):
+        with pytest.raises(JobValidationError, match="server-managed"):
+            service.submit(
+                owner_id="alice",
+                input_upload_id="90000000-0000-4000-8000-000000000009",
+                overrides={reserved: str(tmp_path / "attacker.yml")},
+            )
+
+
 def test_submission_masks_cross_owner_upload_and_invalid_jobs_are_not_created(
     tmp_path, monkeypatch
 ):
@@ -75,13 +95,13 @@ def test_submission_masks_cross_owner_upload_and_invalid_jobs_are_not_created(
     store = _store(tmp_path / "data")
     repository = FileJobRepository(tmp_path / "data")
     video = _upload(store, "bob", "private.mp4")
-    service = JobService(repository, store)
+    service = JobService(repository, store, config_path="")
 
     with pytest.raises(MediaNotFoundError):
         service.submit(
             owner_id="alice",
             input_upload_id=video.id,
-            overrides={"config": "", "source_language": "en", "target_language": "es"},
+            overrides={"source_language": "en", "target_language": "es"},
         )
     assert repository.list("alice").items == []
 
@@ -90,7 +110,7 @@ def test_submission_masks_cross_owner_upload_and_invalid_jobs_are_not_created(
         service.submit(
             owner_id="alice",
             input_upload_id=alice_video.id,
-            overrides={"config": "", "source_language": "en"},
+            overrides={"source_language": "en"},
         )
     assert repository.list("alice").items == []
     store.delete("alice", alice_video.id)
@@ -117,11 +137,11 @@ def test_submission_rolls_back_all_partial_materializations(tmp_path, monkeypatc
     monkeypatch.setattr(store, "materialize_for_job", fail_third)
 
     with pytest.raises(JobWriteError, match="copy failed"):
-        JobService(repository, store).submit(
+        JobService(repository, store, config_path="").submit(
             owner_id="alice",
             input_upload_id=uploads[0].id,
             isolated_tracks={"ONE": uploads[1].id, "TWO": uploads[2].id},
-            overrides={"config": "", "source_language": "en", "target_language": "es"},
+            overrides={"source_language": "en", "target_language": "es"},
         )
 
     assert repository.list("alice").items == []
@@ -143,10 +163,10 @@ def test_submission_rolls_back_materialization_when_repository_create_fails(
     )
 
     with pytest.raises(JobWriteError, match="disk full"):
-        JobService(repository, store).submit(
+        JobService(repository, store, config_path="").submit(
             owner_id="alice",
             input_upload_id=video.id,
-            overrides={"config": "", "source_language": "en", "target_language": "es"},
+            overrides={"source_language": "en", "target_language": "es"},
         )
 
     assert repository.list("alice").items == []
@@ -166,10 +186,10 @@ def test_submission_removes_job_and_materialization_when_enqueue_fails(
             raise RuntimeError("queue stopped")
 
     with pytest.raises(RuntimeError, match="queue stopped"):
-        JobService(repository, store, BrokenQueue()).submit(
+        JobService(repository, store, BrokenQueue(), config_path="").submit(
             owner_id="alice",
             input_upload_id=video.id,
-            overrides={"config": "", "source_language": "en", "target_language": "es"},
+            overrides={"source_language": "en", "target_language": "es"},
         )
 
     assert repository.list("alice").items == []
