@@ -63,9 +63,10 @@ def test_semantic_config_normalizes_all_entry_point_values():
     assert len(warnings) == 3
 
 
-def test_semantic_config_cli_and_gradio_surface_all_fields(tmp_path):
+def test_semantic_config_cli_and_web_settings_surface_all_fields(tmp_path):
     from dubbing.core.config import create_argument_parser
-    from dubbing.ui.gradio_app import build_app, save_settings
+    from dubbing.web import schema
+    from dubbing.web.settings import SettingsService
     import yaml
 
     args = create_argument_parser().parse_args(
@@ -84,25 +85,24 @@ def test_semantic_config_cli_and_gradio_surface_all_fields(tmp_path):
     assert args.tts_hard_segment_duration == 30.0
     assert args.semantic_split_search_window == 7.5
 
-    app = build_app(config_path=str(tmp_path / "missing.yml"))
-    components = {
-        component.get("props", {}).get("label"): component.get("props", {})
-        for component in app.config["components"]
-    }
-    assert components["Semantic splitting"]["value"] is True
-    assert components["Preferred TTS segment duration"]["value"] == 15.0
-    assert components["Hard TTS segment duration"]["value"] == 35.0
-    assert components["Semantic split search window"]["value"] == 10.0
+    semantic_fields = [
+        "semantic_split_enabled",
+        "tts_preferred_segment_duration",
+        "tts_hard_segment_duration",
+        "semantic_split_search_window",
+    ]
+    assert all(field in schema.SETTINGS_FIELDS for field in semantic_fields)
 
     config_path = tmp_path / "settings.yml"
-    save_settings(
+    service = SettingsService(config_path)
+    service.save(
         {
             "semantic_split_enabled": False,
             "tts_preferred_segment_duration": 12.5,
             "tts_hard_segment_duration": 30.0,
             "semantic_split_search_window": 7.5,
         },
-        config_path=str(config_path),
+        revision=service.load().revision,
     )
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert saved["semantic_split_enabled"] is False

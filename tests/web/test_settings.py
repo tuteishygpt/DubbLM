@@ -4,6 +4,8 @@ from hashlib import sha256
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 import multiprocessing
+from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -90,8 +92,21 @@ def test_schema_exposes_legacy_model_voice_and_reference_choices():
 
 
 def test_schema_import_does_not_load_tts_implementation_wrappers():
-    assert "tts.gemini_tts_wrapper" not in sys.modules
-    assert "tts.openai_tts_wrapper" not in sys.modules
+    script = """
+import sys
+sys.path.insert(0, "src")
+from dubbing.web import schema
+assert "tts.gemini_tts_wrapper" not in sys.modules
+assert "tts.openai_tts_wrapper" not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _write_config(path, values):

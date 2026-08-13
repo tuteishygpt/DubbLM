@@ -89,17 +89,23 @@ python dubblm_cli.py --input ori.mp4 --config dubbing_config.yml --run_step comb
 
 ---
 
-## 3. Запуск праз Gradio UI (`gradio_app.py`)
+## 3. Запуск вэб-праграмы FastAPI + React (`web_app.py`)
 
 ```powershell
+# Сабраць React frontend:
+npm --prefix frontend run build
+
 # З актываваным .venv:
-python gradio_app.py
+python web_app.py
 
 # БЕЗ актывацыі:
-.\.venv\Scripts\python.exe gradio_app.py
+.\.venv\Scripts\python.exe web_app.py
+
+# Альтэрнатыва пасля ўсталявання пакета:
+dubblm-web
 ```
 
-Пасля запуску адкрыйце браўзер па адрасе: **http://localhost:7860**
+Пасля запуску адкрыйце браўзер па адрасе: **http://127.0.0.1:8000**
 
 ---
 
@@ -184,7 +190,7 @@ prj/
 
 **Прычына**: Пакет не ўсталяваны ў рэжыме editable.
 
-**Рашэнне**: Праект аўтаматычна дадае `src/` у `sys.path` пры запуску праз `dubblm_cli.py` або `gradio_app.py` — заўсёды запускайце **праз гэтыя файлы**, не напрамую праз `python src/dubbing/...`.
+**Рашэнне**: Праект аўтаматычна дадае `src/` у `sys.path` пры запуску праз `dubblm_cli.py` або `web_app.py` — заўсёды запускайце **праз гэтыя файлы**, не напрамую праз `python src/dubbing/...`.
 
 ### ❌ `Set-ExecutionPolicy` (блакіроўка скрыпту)
 

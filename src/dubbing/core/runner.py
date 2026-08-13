@@ -116,7 +116,7 @@ def _run_combine_video_step(dubber: Any, config: DubbingConfig) -> str:
         raise FileNotFoundError(
             "run_step=combine_video requires existing artifacts from a previous full dubbing run. "
             f"Expected translated audio {expected_translated_audio} not found. "
-            "If you are using the Gradio UI, clear 'Run step' and click 'Run DubbLM' to execute the full pipeline first."
+            "In the web app, choose the full pipeline run mode and start a job first."
         )
 
     watermark_input_path = config.get("watermark_path")

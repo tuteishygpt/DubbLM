@@ -161,6 +161,17 @@ If you enable OpenAI transcription (`--transcription_system openai` or `pyannote
 
 ## Usage Examples
 
+### Web Application
+
+The local web application uses a FastAPI backend and React frontend. Build the frontend once,
+then launch the production server and open **http://127.0.0.1:8000**:
+
+```bash
+npm --prefix frontend run build
+python web_app.py
+# Or, after installing the package: dubblm-web
+```
+
 ### Basic Dubbing
 ```bash
 python dubblm_cli.py --input video.mp4 --source_language en --target_language es

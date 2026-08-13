@@ -1,4 +1,4 @@
-"""Committed parity gate for removing the legacy Gradio UI."""
+"""Committed parity gate for removing the legacy Python UI."""
 
 from dubbing.web import schema
 

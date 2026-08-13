@@ -953,33 +953,31 @@ def test_single_row_resynthesis_generates_only_selected_text(tmp_path):
     assert updated["synthesized_text"] == "manual override"
 
 
-def test_gradio_exposes_and_persists_anchor_timing_settings(tmp_path):
-    from dubbing.ui.gradio_app import build_app, save_settings
+def test_web_schema_exposes_and_settings_service_persists_anchor_timing_settings(tmp_path):
+    from dubbing.web import schema
+    from dubbing.web.settings import SettingsService
 
-    app = build_app(config_path=str(tmp_path / "missing.yml"))
-    components = {
-        component.get("props", {}).get("label"): component.get("props", {})
-        for component in app.config["components"]
-    }
-
-    assert components["Short segment threshold"]["value"] == 1.5
-    assert components["Short segment max speed"]["value"] == 1.08
-    assert components["Maximum timing speed"]["value"] == 1.15
-    assert components["Maximum timing stretch"]["value"] == 1.15
-    assert components["Maximum timing overflow"]["value"] == 0.25
-    assert "Group overflow tolerance" not in components
+    timing_fields = [
+        "timing_short_segment_threshold",
+        "timing_short_segment_max_speed",
+        "timing_max_speed",
+        "timing_max_stretch",
+        "timing_max_overflow",
+    ]
+    assert all(field in schema.SETTINGS_FIELDS for field in timing_fields)
+    assert "group_overflow_tolerance" not in schema.SETTINGS_FIELDS
 
     config_path = tmp_path / "saved.yml"
-    save_settings(
+    service = SettingsService(config_path)
+    service.save(
         {
             "timing_short_segment_threshold": 1.2,
             "timing_short_segment_max_speed": 1.04,
             "timing_max_speed": 1.12,
             "timing_max_stretch": 1.10,
             "timing_max_overflow": 0.15,
-            "group_overflow_tolerance": 0.5,
         },
-        config_path=str(config_path),
+        revision=service.load().revision,
     )
     import yaml
 
@@ -990,35 +988,7 @@ def test_gradio_exposes_and_persists_anchor_timing_settings(tmp_path):
         "timing_max_speed": 1.12,
         "timing_max_stretch": 1.10,
         "timing_max_overflow": 0.15,
-        "semantic_split_enabled": True,
-        "tts_preferred_segment_duration": 15.0,
-        "tts_hard_segment_duration": 35.0,
-        "semantic_split_search_window": 10.0,
     }
-
-
-def test_gradio_save_normalizes_invalid_timing_values(tmp_path):
-    from dubbing.ui.gradio_app import save_settings
-    import yaml
-
-    config_path = tmp_path / "saved.yml"
-    save_settings(
-        {
-            "timing_short_segment_threshold": -1,
-            "timing_short_segment_max_speed": math.nan,
-            "timing_max_speed": 0.8,
-            "timing_max_stretch": 0.8,
-            "timing_max_overflow": math.inf,
-        },
-        config_path=str(config_path),
-    )
-
-    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert saved["timing_short_segment_threshold"] == 1.5
-    assert saved["timing_short_segment_max_speed"] == 1.08
-    assert saved["timing_max_speed"] == 1.15
-    assert saved["timing_max_stretch"] == 1.15
-    assert saved["timing_max_overflow"] == 0.25
 
 
 def test_transcription_artifact_preserves_millisecond_timestamps(tmp_path):

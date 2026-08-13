@@ -262,7 +262,7 @@ def test_run_dubbing_job_explains_missing_combine_video_artifacts(tmp_path):
 
     assert result.status.startswith("Failed:")
     assert "combine_video" in result.status
-    assert "Run step" in result.status
+    assert "full pipeline" in result.status
 
 
 def test_combine_video_rebuilds_translated_audio_from_regenerated_chunks(tmp_path):

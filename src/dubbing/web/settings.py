@@ -1,7 +1,7 @@
 """Revisioned YAML settings and voice-profile operations.
 
-This module deliberately depends on neither Gradio nor FastAPI so it can be
-used by the legacy UI now and HTTP routes later.
+This module deliberately has no framework dependency, keeping the settings
+contract reusable by HTTP routes and other callers.
 """
 
 from __future__ import annotations
