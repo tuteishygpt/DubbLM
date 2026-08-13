@@ -225,6 +225,112 @@ def test_synthesis_persistence_keeps_snapshot_before_reusable_translation_cache(
     ]
 
 
+def test_dubbing_snapshot_uses_active_context_when_facade_mirror_is_stale():
+    saved = []
+    segments = [{}]
+
+    class Cache:
+        def save_to_cache(self, step, key, payload):
+            saved.append((step, key, payload))
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.cache_manager = Cache()
+    dubber._pipeline_run_context = PipelineRunContext(
+        semantic_plan_cache_persistable=False
+    )
+    dubber._semantic_plan_cache_persistable = True
+    dubber._build_dubbing_text_snapshot_key = lambda _audio: "snapshot-key"
+    dubber._build_translation_cache_key = lambda _audio: pytest.fail(
+        "active context forbids a reusable translation cache key"
+    )
+
+    translation.persist_dubbing_text_snapshot(dubber, segments, "audio.wav")
+
+    assert saved == [
+        (
+            "dubbing_texts",
+            "snapshot-key",
+            {
+                "version": 1,
+                "segments": segments,
+                "translation_cache_reusable": False,
+                "translation_cache_key": None,
+            },
+        )
+    ]
+
+
+def test_synthesis_persistence_uses_active_context_when_facade_mirror_is_stale():
+    events = []
+    segments = [{}]
+
+    class Cache:
+        def save_to_cache(self, step, key, payload):
+            events.append(("save", step, key, payload))
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.cache_manager = Cache()
+    dubber._pipeline_run_context = PipelineRunContext(
+        semantic_plan_cache_persistable=False
+    )
+    dubber._semantic_plan_cache_persistable = True
+    dubber._persist_dubbing_text_snapshot = (
+        lambda value, audio: events.append(("snapshot", value, audio))
+    )
+    dubber._build_translation_cache_key = lambda _audio: pytest.fail(
+        "active context forbids reusable translation persistence"
+    )
+
+    translation.persist_synthesis_results(dubber, segments, "audio.wav")
+
+    assert events == [("snapshot", segments, "audio.wav")]
+
+
+def test_fresh_translation_cache_uses_active_context_when_facade_mirror_is_stale():
+    events = []
+    segments = [
+        {
+            "semantic_unit_id": "unit-1",
+            "semantic_plan_fingerprint": "plan-live",
+        }
+    ]
+
+    class Cache:
+        def cache_exists(self, *_args):
+            return False
+
+        def save_to_cache(self, step, key, payload):
+            events.append(("save", step, key, payload))
+
+    class Translator:
+        def is_available(self):
+            return True
+
+        def translate(self, **_kwargs):
+            return segments
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = {}
+    dubber.cache_manager = Cache()
+    dubber.performance_tracker = SimpleNamespace(
+        start_timing=lambda *_args: None,
+        end_timing=lambda *_args: 1.0,
+    )
+    dubber.debug_data = {}
+    dubber._pipeline_run_context = PipelineRunContext(
+        semantic_plan_cache_persistable=False
+    )
+    dubber._semantic_plan_cache_persistable = True
+    dubber._build_translation_cache_key = lambda _audio: "translation-key"
+    dubber._require_translator = lambda: Translator()
+    dubber._persist_dubbing_text_snapshot = (
+        lambda value, audio: events.append(("snapshot", value, audio))
+    )
+
+    assert translation.translate_segments(dubber, segments, "audio.wav") is segments
+    assert events == [("snapshot", segments, "audio.wav")]
+
+
 def test_direct_emotion_analysis_mutates_input_in_place_and_uses_live_facade_helper():
     segments = [{"start": 0.0, "end": 1.0}]
     saved = []

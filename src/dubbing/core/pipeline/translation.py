@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 from translation.translator_factory import TranslatorFactory
 
 from ..log_config import get_logger
+from .context import active_context
 from .context import update_context as _update_pipeline_context
 
 logger = get_logger(__name__)
@@ -57,9 +58,9 @@ def persist_dubbing_text_snapshot(
     facade, segments: List[Dict], audio_file: str
 ) -> None:
     """Persist the latest real segment state for the Dubbing Texts editor."""
-    translation_cache_reusable = getattr(
-        facade, "_semantic_plan_cache_persistable", True
-    )
+    translation_cache_reusable = active_context(
+        facade
+    ).semantic_plan_cache_persistable
     try:
         snapshot_key = facade._build_dubbing_text_snapshot_key(audio_file)
         snapshot_payload = {
@@ -85,9 +86,9 @@ def persist_synthesis_results(
     """Persist post-synthesis editor state and reusable pipeline state."""
     facade._persist_dubbing_text_snapshot(segments, audio_file)
 
-    translation_cache_reusable = getattr(
-        facade, "_semantic_plan_cache_persistable", True
-    )
+    translation_cache_reusable = active_context(
+        facade
+    ).semantic_plan_cache_persistable
     if not translation_cache_reusable:
         return
     try:
@@ -168,7 +169,7 @@ def translate_segments(
             if hasattr(translator, "prompt_prefix"):
                 translator.prompt_prefix = original_prompt_prefix
 
-        if getattr(facade, "_semantic_plan_cache_persistable", True):
+        if active_context(facade).semantic_plan_cache_persistable:
             facade.cache_manager.save_to_cache(step_name, cache_key, translated_segments)
 
         elapsed_time = facade.performance_tracker.end_timing("translation")
