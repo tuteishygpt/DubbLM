@@ -45,6 +45,7 @@ from ..debug.debug_generator import DebugGenerator
 from ..debug.reporter import SpeakerReporter
 from ..utils.subtitle_utils import SubtitleManager
 from .log_config import get_logger
+from .pipeline.context import snapshot_context, validate_plan_dependent_segments
 
 # Import existing factories and interfaces
 from tts.tts_factory import TTSFactory
@@ -1040,17 +1041,7 @@ class SmartDubbing:
         self._semantic_plan_cache_persistable = True
 
     def _validate_plan_dependent_segments(self, segments: List[Dict[str, Any]]) -> None:
-        expected = getattr(self, "_semantic_plan_fingerprint", None)
-        if expected is None:
-            return
-        if any(
-            segment.get("semantic_plan_fingerprint") != expected
-            for segment in segments
-        ):
-            raise ValueError(
-                "Cached artifact semantic_plan_fingerprint is absent or does not "
-                "match the active semantic plan"
-            )
+        validate_plan_dependent_segments(snapshot_context(self), segments)
 
     def _load_required_cached_step(self, *, step_name: str, cache_key: str, hint: str) -> Any:
         """Load a required cached artifact or raise an actionable error."""
