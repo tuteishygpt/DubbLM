@@ -21,6 +21,8 @@ class MediaStore(Protocol):
 
     def delete(self, *args: object, **kwargs: object) -> object: ...
 
+    def register(self, *args: object, **kwargs: object) -> object: ...
+
 
 class JobRepository(Protocol):
     """Persisted jobs boundary."""
