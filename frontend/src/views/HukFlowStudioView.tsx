@@ -582,7 +582,8 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
               visibleSegments.map((seg, idx) => {
                 const isActive = seg.segment_id === (currentActive?.segment_id ?? '')
                 const hasAudio = seg.audio !== null
-                const speakerSlot = SPEAKER_COLOURS[idx % 4]
+                const speakerIdx = displaySpeakers.indexOf(seg.speaker)
+                const speakerSlot = SPEAKER_COLOURS[speakerIdx % 4]
                 const isSourceExpanded = Boolean(expandedSources[seg.segment_id])
                 // Calculate dynamic row count based on text length and newlines
                 const explicitLines = seg.translation.split('\n').length
@@ -604,7 +605,7 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
 
                     <div className="card-header">
                       <div className="speaker-info">
-                        <span className={`speaker-dot speaker-dot-${idx % 4}`}></span>
+                        <span className={`speaker-dot speaker-dot-${speakerIdx % 4}`}></span>
                         <span className="speaker-name">{seg.speaker}</span>
                         <span className="time-badge">
                           {formatTime(seg.start)} – {formatTime(seg.end)}
