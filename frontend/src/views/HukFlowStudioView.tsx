@@ -81,7 +81,9 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
   const [zoomLevel, setZoomLevel] = useState(50)
   const [mutedTracks, setMutedTracks] = useState<Record<string, boolean>>({ a1: true })
   const [searchQuery, setSearchQuery] = useState('')
-  const [isRegenerating, setIsRegenerating] = useState(false)
+  const [regeneratingId, setRegeneratingId] = useState<string | null>(null)
+  const [playingAudioSegmentId, setPlayingAudioSegmentId] = useState<string | null>(null)
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null)
   const [statusMessage, setStatusMessage] = useState('')
   const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({})
   const scrollAreaRef = useRef<HTMLDivElement>(null)
@@ -281,7 +283,7 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
   const handleRegenerateAudio = async (segmentId: string) => {
     const seg = segments.find((s) => s.segment_id === segmentId)
     if (!seg || !client || !selectedJobId) return
-    setIsRegenerating(true)
+    setRegeneratingId(segmentId)
     setStatusMessage('Regenerating audio…')
     try {
       const result = await client.post<{ revision: string; segment: Segment }>(
@@ -300,8 +302,43 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
     } catch (err) {
       setStatusMessage(err instanceof Error ? err.message : 'Regeneration failed.')
     } finally {
-      setIsRegenerating(false)
+      setRegeneratingId(null)
       setTimeout(() => setStatusMessage(''), 3000)
+    }
+  }
+
+  // ── audio preview for one segment ───────────────────────────────────────
+  const handlePlaySegmentAudio = (segmentId: string, audioUrl: string) => {
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause()
+      previewAudioRef.current = null
+    }
+    if (playingAudioSegmentId === segmentId) {
+      setPlayingAudioSegmentId(null)
+      return
+    }
+    try {
+      const audio = new Audio(audioUrl)
+      previewAudioRef.current = audio
+      setPlayingAudioSegmentId(segmentId)
+      audio.onended = () => {
+        setPlayingAudioSegmentId(null)
+        previewAudioRef.current = null
+      }
+      audio.onerror = () => {
+        setPlayingAudioSegmentId(null)
+        previewAudioRef.current = null
+      }
+      const playPromise = audio.play()
+      if (playPromise !== undefined) {
+        playPromise.catch(() => {
+          setPlayingAudioSegmentId(null)
+          previewAudioRef.current = null
+        })
+      }
+    } catch {
+      setPlayingAudioSegmentId(null)
+      previewAudioRef.current = null
     }
   }
 
@@ -532,8 +569,10 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
                 const hasAudio = seg.audio !== null
                 const speakerSlot = SPEAKER_COLOURS[idx % 4]
                 const isSourceExpanded = Boolean(expandedSources[seg.segment_id])
-                // Calculate dynamic row count based on text length
-                const dynamicRows = Math.max(3, Math.min(8, Math.ceil((seg.translation.length || 1) / 45)))
+                // Calculate dynamic row count based on text length and newlines
+                const explicitLines = seg.translation.split('\n').length
+                const estimatedLines = Math.ceil((seg.translation.length || 1) / 75)
+                const dynamicRows = Math.max(1, Math.min(8, Math.max(explicitLines, estimatedLines)))
 
                 return (
                   <div
@@ -560,6 +599,8 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
                             ({idx + 1}/{visibleSegments.length})
                           </span>
                         )}
+                        <span className="dubbed-tag">DUBBED (BE)</span>
+                        <span className="text-count-badge">{seg.translation.length} chars</span>
                       </div>
 
                       <div className="card-status-row">
@@ -585,15 +626,37 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
                         )}
 
                         {seg.audio && (
-                          <a
-                            href={seg.audio.url}
-                            className="audio-play-link"
-                            title={`Play ${seg.audio.name}`}
-                            onClick={(e) => e.stopPropagation()}
+                          <button
+                            type="button"
+                            className={`audio-play-btn ${playingAudioSegmentId === seg.segment_id ? 'playing' : ''}`}
+                            title={playingAudioSegmentId === seg.segment_id ? `Stop ${seg.audio.name}` : `Play ${seg.audio.name}`}
+                            data-testid={`play-btn-${seg.segment_id}`}
+                            aria-label={playingAudioSegmentId === seg.segment_id ? `Stop audio for ${seg.speaker}` : `Play audio for ${seg.speaker}`}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handlePlaySegmentAudio(seg.segment_id, seg.audio!.url)
+                            }}
                           >
-                            <span className="material-symbols-outlined">play_circle</span>
-                          </a>
+                            <span className="material-symbols-outlined">
+                              {playingAudioSegmentId === seg.segment_id ? 'pause_circle' : 'play_circle'}
+                            </span>
+                          </button>
                         )}
+
+                        <button
+                          type="button"
+                          className={`regenerate-btn ${regeneratingId === seg.segment_id ? 'spinning' : ''}`}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            void handleRegenerateAudio(seg.segment_id)
+                          }}
+                          title={`Regenerate Audio for ${seg.speaker}`}
+                          data-testid={`regenerate-btn-${seg.segment_id}`}
+                          aria-label={`Regenerate Audio for ${seg.speaker}`}
+                          disabled={Boolean(regeneratingId)}
+                        >
+                          <span className="material-symbols-outlined">autorenew</span>
+                        </button>
                       </div>
                     </div>
 
@@ -618,40 +681,20 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
                     )}
 
                     {/* Dubbed Editor — full width with dynamic height */}
-                    <div className="active-dubbed-area">
-                      <div className="dubbed-area-header">
-                        <span className="col-label">Dubbed (BE)</span>
-                        <span className="text-count-badge">{seg.translation.length} chars</span>
-                      </div>
-                      <div className="editable-dubbed-wrapper">
-                        <textarea
-                          className="dubbed-textarea"
-                          value={seg.translation}
-                          onChange={(e) => handleTranslationChange(seg.segment_id, e.target.value)}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleSelectSegment(seg)
-                          }}
-                          onFocus={() => handleSelectSegment(seg)}
-                          rows={dynamicRows}
-                          aria-label={`Dubbed text ${seg.speaker}`}
-                          placeholder="Dubbed text in Belarusian..."
-                        />
-                        {isActive && (
-                          <button
-                            type="button"
-                            className={`regenerate-btn ${isRegenerating ? 'spinning' : ''}`}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              void handleRegenerateAudio(seg.segment_id)
-                            }}
-                            title="Regenerate Audio"
-                            disabled={isRegenerating}
-                          >
-                            <span className="material-symbols-outlined">autorenew</span>
-                          </button>
-                        )}
-                      </div>
+                    <div className="editable-dubbed-wrapper">
+                      <textarea
+                        className="dubbed-textarea"
+                        value={seg.translation}
+                        onChange={(e) => handleTranslationChange(seg.segment_id, e.target.value)}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          handleSelectSegment(seg)
+                        }}
+                        onFocus={() => handleSelectSegment(seg)}
+                        rows={dynamicRows}
+                        aria-label={`Dubbed text ${seg.speaker}`}
+                        placeholder="Dubbed text in Belarusian..."
+                      />
                     </div>
                   </div>
                 )

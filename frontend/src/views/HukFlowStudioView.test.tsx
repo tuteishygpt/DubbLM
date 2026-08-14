@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../api/types'
 import { HukFlowStudioView } from './HukFlowStudioView'
 
@@ -46,6 +46,11 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
 }
 
 describe('HukFlowStudioView', () => {
+  beforeEach(() => {
+    vi.spyOn(window.HTMLMediaElement.prototype, 'play').mockImplementation(() => Promise.resolve())
+    vi.spyOn(window.HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined)
+  })
+
   it('loads real dubbing-texts, renders segment cards, edits text, and saves', async () => {
     const user = userEvent.setup()
     const client = makeClient()
@@ -104,14 +109,15 @@ describe('HukFlowStudioView', () => {
     // Wait for segments
     await screen.findByText('SPEAKER_00')
 
-    // Audio play link present for segment1
-    const playLink = screen.getByTitle('Play seg-a1.wav')
-    expect(playLink).toHaveAttribute('href', '/api/jobs/job-1/files/aud-1')
+    // Audio play button present for segment1
+    const playBtn = screen.getByTitle('Play seg-a1.wav')
+    expect(playBtn).toBeInTheDocument()
+    await user.click(playBtn)
 
     // Activate second segment
     await user.click(screen.getByTestId('transcript-card-seg-a2'))
 
-    const regenBtn = await screen.findByTitle('Regenerate Audio')
+    const regenBtn = await screen.findByTestId('regenerate-btn-seg-a2')
     await user.click(regenBtn)
 
     await waitFor(() =>
