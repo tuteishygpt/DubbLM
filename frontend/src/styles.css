@@ -318,6 +318,7 @@ nav button {
   text-align: left;
 }
 
+nav button[data-view="HukFlow Studio"]::before { content: "video_camera_front"; font-family: 'Material Symbols Outlined'; font-size: 18px; }
 nav button[data-view="Workflow"]::before { content: "movie_edit"; font-family: 'Material Symbols Outlined'; font-size: 18px; }
 nav button[data-view="Jobs"]::before { content: "analytics"; font-family: 'Material Symbols Outlined'; font-size: 18px; }
 nav button[data-view="Settings"]::before { content: "settings"; font-family: 'Material Symbols Outlined'; font-size: 18px; }
@@ -1004,8 +1005,14 @@ ol {
   border-bottom-right-radius: 2px;
 }
 
+/* 4-slot speaker colour palette (index 0-3) */
+.card-accent-line.speaker-0 { background-color: var(--secondary); }
+.card-accent-line.speaker-1 { background-color: var(--primary); }
+.card-accent-line.speaker-2 { background-color: #ffb2b7; }
+.card-accent-line.speaker-3 { background-color: #aef0b7; }
+/* Legacy aliases kept for backward compat */
 .card-accent-line.secondary { background-color: var(--secondary); }
-.card-accent-line.tertiary { background-color: var(--primary); }
+.card-accent-line.tertiary  { background-color: var(--primary); }
 
 .card-header {
   display: flex;
@@ -1025,8 +1032,13 @@ ol {
   height: 0.5rem;
   border-radius: 50%;
 }
+.speaker-dot-0 { background-color: var(--secondary); }
+.speaker-dot-1 { background-color: var(--primary); }
+.speaker-dot-2 { background-color: #ffb2b7; }
+.speaker-dot-3 { background-color: #aef0b7; }
+/* Legacy */
 .speaker-dot.secondary { background-color: var(--secondary); }
-.speaker-dot.tertiary { background-color: var(--tertiary-container); }
+.speaker-dot.tertiary  { background-color: var(--tertiary-container); }
 
 .speaker-name {
   font-size: 0.8125rem;
@@ -1047,6 +1059,140 @@ ol {
   color: var(--secondary);
   font-size: 16px;
 }
+
+/* Card status row (icon + play link) */
+.card-status-row {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.audio-play-link {
+  color: var(--secondary);
+  display: flex;
+  align-items: center;
+  text-decoration: none;
+  transition: opacity 0.15s ease;
+}
+
+.audio-play-link:hover {
+  opacity: 0.75;
+}
+
+.audio-play-link .material-symbols-outlined {
+  font-size: 18px;
+}
+
+/* Pane header left group */
+.pane-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+/* Inline save badge button */
+.save-badge-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  background: rgba(208, 188, 255, 0.2);
+  color: var(--primary);
+  border: 1px solid rgba(208, 188, 255, 0.4);
+  border-radius: var(--radius-sm);
+  padding: 0.125rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.save-badge-btn:hover {
+  background: rgba(208, 188, 255, 0.35);
+}
+
+.save-badge-btn .material-symbols-outlined {
+  font-size: 14px;
+}
+
+/* Empty / error / loading states */
+.transcript-empty,
+.transcript-loading {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 3rem 1rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.transcript-empty .material-symbols-outlined,
+.transcript-loading .material-symbols-outlined {
+  font-size: 48px;
+  opacity: 0.4;
+}
+
+.transcript-empty p {
+  font-size: 0.875rem;
+  max-width: 22rem;
+  margin: 0;
+}
+
+.spin-anim {
+  animation: spin 1.2s linear infinite;
+}
+
+.studio-error-banner {
+  padding: 0.5rem 1rem;
+  background: rgba(255, 180, 171, 0.15);
+  color: var(--danger-text);
+  border-bottom: 1px solid rgba(255, 180, 171, 0.3);
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.empty-translation {
+  color: var(--text-light);
+  font-style: italic;
+  font-size: 0.8125rem;
+}
+
+/* Source text colour variants */
+.source-text-secondary { color: var(--secondary); }
+.source-text-tertiary  { color: var(--primary); }
+.source-text-quaternary { color: #ffb2b7; }
+.source-text-quinary   { color: #aef0b7; }
+
+/* Timeline speaker clip colour variants */
+.speaker-clip-0 {
+  background-color: rgba(76, 215, 246, 0.15);
+  border: 1px solid var(--secondary);
+  color: var(--secondary);
+}
+.speaker-clip-1 {
+  background-color: rgba(208, 188, 255, 0.15);
+  border: 1px solid var(--primary);
+  color: var(--primary);
+}
+.speaker-clip-2 {
+  background-color: rgba(255, 178, 183, 0.15);
+  border: 1px solid #ffb2b7;
+  color: #ffb2b7;
+}
+.speaker-clip-3 {
+  background-color: rgba(174, 240, 183, 0.15);
+  border: 1px solid #aef0b7;
+  color: #aef0b7;
+}
+
+/* Track header border per speaker slot */
+.border-speaker-0 { border-left-color: var(--secondary); }
+.border-speaker-1 { border-left-color: var(--primary); }
+.border-speaker-2 { border-left-color: #ffb2b7; }
+.border-speaker-3 { border-left-color: #aef0b7; }
 
 .status-pending {
   color: var(--text-light);

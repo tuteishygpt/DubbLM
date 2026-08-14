@@ -1,122 +1,187 @@
 import { useEffect, useState } from 'react'
 import type { ApiClient } from '../api/types'
 
-interface Job {
-  id: string
-  status: string
-}
+// ── API types (mirrors DubbingTextsView) ─────────────────────────────────────
+interface Job { id: string; status: string }
 
-interface TranscriptItem {
-  id: string
+interface SegmentAudio { id: string; name: string; url: string }
+
+interface Segment {
+  segment_id: string
   speaker: string
-  speakerColor: 'secondary' | 'tertiary'
-  timeRange: string
-  status: 'completed' | 'pending'
-  sourceEn: string
-  dubbedBe: string
-  isEditable?: boolean
+  start: number
+  end: number
+  text: string
+  translation: string
+  synthesized_text: string
+  style_prompt: string
+  audio: SegmentAudio | null
 }
 
-const DEFAULT_TRANSCRIPT: TranscriptItem[] = [
-  {
-    id: 'seg-1',
-    speaker: 'Speaker 1',
-    speakerColor: 'secondary',
-    timeRange: '00:12 - 00:18',
-    status: 'completed',
-    sourceEn: 'The rapid advancement of these models has completely shifted our paradigm.',
-    dubbedBe: 'Хуткае развіццё гэтых мадэляў цалкам змяніла нашу парадыгму.',
-    isEditable: false,
-  },
-  {
-    id: 'seg-2',
-    speaker: 'Speaker 2',
-    speakerColor: 'tertiary',
-    timeRange: '18:15 - 20:15',
-    status: 'pending',
-    sourceEn: 'We need to consider the ethical implications before deployment.',
-    dubbedBe: 'Мы павінны ўлічваць этычныя наступствы перад разгортваннем.',
-    isEditable: true,
-  },
-]
+interface TextDocument { revision: string; source: string; segments: Segment[] }
+
+// ── Speaker colour palette (cycles over speakers) ────────────────────────────
+const SPEAKER_COLOURS = ['secondary', 'tertiary', 'quaternary', 'quinary'] as const
+type SpeakerColour = typeof SPEAKER_COLOURS[number]
+
+function speakerColour(speaker: string, allSpeakers: string[]): SpeakerColour {
+  const idx = allSpeakers.indexOf(speaker)
+  return SPEAKER_COLOURS[idx % SPEAKER_COLOURS.length]
+}
+
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60)
+  const s = Math.floor(seconds % 60)
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function HukFlowStudioView({ client }: { client?: ApiClient }) {
+  // ── jobs / document state ─────────────────────────────────────────────────
   const [jobs, setJobs] = useState<Job[]>([])
   const [selectedJobId, setSelectedJobId] = useState<string>('')
-  const [transcript, setTranscript] = useState<TranscriptItem[]>(DEFAULT_TRANSCRIPT)
-  const [isPlaying, setIsPlaying] = useState<boolean>(false)
-  const [activeTool, setActiveTool] = useState<'razor' | 'sync' | 'clone' | null>(null)
-  const [zoomLevel, setZoomLevel] = useState<number>(50)
-  const [mutedTracks, setMutedTracks] = useState<Record<string, boolean>>({ v1: false, v2: false, a1: true })
-  const [searchQuery, setSearchQuery] = useState<string>('')
-  const [isRegenerating, setIsRegenerating] = useState<boolean>(false)
-  const [statusMessage, setStatusMessage] = useState<string>('')
+  const [document, setDocument] = useState<TextDocument | null>(null)
+  const [segments, setSegments] = useState<Segment[]>([])
+  const [revision, setRevision] = useState<string>('')
+  const [dirty, setDirty] = useState(false)
+  const [loadError, setLoadError] = useState<string>('')
+  const [isLoading, setIsLoading] = useState(false)
 
+  // ── active segment (selected card) ───────────────────────────────────────
+  const [activeSegmentId, setActiveSegmentId] = useState<string>('')
+
+  // ── player / studio state ─────────────────────────────────────────────────
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [activeTool, setActiveTool] = useState<'razor' | 'sync' | 'clone' | null>(null)
+  const [zoomLevel, setZoomLevel] = useState(50)
+  const [mutedTracks, setMutedTracks] = useState<Record<string, boolean>>({ a1: true })
+  const [searchQuery, setSearchQuery] = useState('')
+  const [isRegenerating, setIsRegenerating] = useState(false)
+  const [statusMessage, setStatusMessage] = useState('')
+
+  // ── derived ───────────────────────────────────────────────────────────────
+  const allSpeakers = [...new Set(segments.map((s) => s.speaker))]
+  const activeSegment = segments.find((s) => s.segment_id === activeSegmentId) ?? segments[0]
+
+  // ── load jobs ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!client) return
     client.get<{ jobs: Job[] }>('/api/jobs')
       .then((res) => {
-        if (Array.isArray(res.jobs)) {
-          setJobs(res.jobs)
-          if (res.jobs.length > 0 && !selectedJobId) {
-            setSelectedJobId(res.jobs[0].id)
-          }
-        }
+        const list = Array.isArray(res.jobs) ? res.jobs : []
+        setJobs(list)
+        if (list.length > 0) setSelectedJobId((prev) => prev || list[0].id)
       })
-      .catch(() => {
-        // Fallback to default demo mode
+      .catch(() => {/* demo mode */})
+  }, [client])
+
+  // ── load dubbing-texts when job changes ───────────────────────────────────
+  useEffect(() => {
+    if (!client || !selectedJobId) return
+    setIsLoading(true)
+    setLoadError('')
+    client
+      .get<TextDocument>(`/api/jobs/${encodeURIComponent(selectedJobId)}/dubbing-texts`)
+      .then((doc) => {
+        setDocument(doc)
+        setSegments(doc.segments)
+        setRevision(doc.revision)
+        setDirty(false)
+        // select first segment by default
+        if (doc.segments.length > 0) setActiveSegmentId(doc.segments[0].segment_id)
       })
+      .catch((err: unknown) => {
+        setLoadError(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => setIsLoading(false))
   }, [client, selectedJobId])
 
-  const activeSegment = transcript.find((item) => item.isEditable) ?? transcript[0]
-
-  const handleDubbedChange = (id: string, text: string) => {
-    setTranscript((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, dubbedBe: text } : item))
-    )
+  // ── edit translation ───────────────────────────────────────────────────────
+  const handleTranslationChange = (id: string, value: string) => {
+    setSegments((prev) => prev.map((s) => s.segment_id === id ? { ...s, translation: value } : s))
+    setDirty(true)
   }
 
-  const handleRegenerateAudio = async (id: string) => {
-    setIsRegenerating(true)
-    setStatusMessage('Regenerating audio model inference...')
+  // ── save all changes ───────────────────────────────────────────────────────
+  const handleSave = async () => {
+    if (!client || !selectedJobId || !document) return
+    setStatusMessage('Saving changes…')
     try {
-      if (client && selectedJobId) {
-        await client.post(`/api/jobs/${encodeURIComponent(selectedJobId)}/dubbing-texts/${encodeURIComponent(id)}/regenerate`, {
-          synthesized_text: activeSegment.dubbedBe,
-        })
-      } else {
-        await new Promise((resolve) => setTimeout(resolve, 800))
-      }
-      setStatusMessage('Audio synthesized successfully.')
+      const updated = await client.put<TextDocument>(
+        `/api/jobs/${encodeURIComponent(selectedJobId)}/dubbing-texts`,
+        { revision, segments: segments.map(({ audio: _a, ...s }) => s) },
+      )
+      setDocument(updated)
+      setSegments(updated.segments)
+      setRevision(updated.revision)
+      setDirty(false)
+      setStatusMessage('Saved successfully.')
     } catch (err) {
-      setStatusMessage(err instanceof Error ? err.message : 'Audio synthesis complete.')
+      setStatusMessage(err instanceof Error ? err.message : 'Save failed.')
+    } finally {
+      setTimeout(() => setStatusMessage(''), 3000)
+    }
+  }
+
+  // ── regenerate audio for one segment ─────────────────────────────────────
+  const handleRegenerateAudio = async (segmentId: string) => {
+    const seg = segments.find((s) => s.segment_id === segmentId)
+    if (!seg || !client || !selectedJobId) return
+    setIsRegenerating(true)
+    setStatusMessage('Regenerating audio…')
+    try {
+      const result = await client.post<{ revision: string; segment: Segment }>(
+        `/api/jobs/${encodeURIComponent(selectedJobId)}/dubbing-texts/${encodeURIComponent(segmentId)}/regenerate`,
+        { revision, synthesized_text: seg.synthesized_text || seg.translation },
+      )
+      setRevision(result.revision)
+      setSegments((prev) =>
+        prev.map((s) =>
+          s.segment_id === segmentId
+            ? { ...s, synthesized_text: result.segment.synthesized_text, audio: result.segment.audio }
+            : s,
+        ),
+      )
+      setStatusMessage('Audio ready.')
+    } catch (err) {
+      setStatusMessage(err instanceof Error ? err.message : 'Regeneration failed.')
     } finally {
       setIsRegenerating(false)
       setTimeout(() => setStatusMessage(''), 3000)
     }
   }
 
-  const toggleTrackMute = (trackId: string) => {
+  // ── mute toggle per speaker track ─────────────────────────────────────────
+  const toggleTrackMute = (trackId: string) =>
     setMutedTracks((prev) => ({ ...prev, [trackId]: !prev[trackId] }))
-  }
 
-  const filteredTranscript = transcript.filter(
-    (item) =>
-      item.sourceEn.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.dubbedBe.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.speaker.toLowerCase().includes(searchQuery.toLowerCase())
+  // ── search filter ─────────────────────────────────────────────────────────
+  const filtered = segments.filter(
+    (s) =>
+      s.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      s.translation.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      s.speaker.toLowerCase().includes(searchQuery.toLowerCase()),
   )
+
+  // ── timeline clip positions (proportional, capped to video duration) ───────
+  const duration = segments.length > 0 ? Math.max(...segments.map((s) => s.end)) : 60
+  const clipStyle = (s: Segment) => ({
+    left: `${(s.start / duration) * 100}%`,
+    width: `${Math.max(2, ((s.end - s.start) / duration) * 100)}%`,
+  })
 
   return (
     <section className="studio-view-container">
       <h1 className="sr-only">HukFlow Studio</h1>
 
-      {/* Main Content Workspace: Split Screen */}
+      {/* ── Main Split Workspace ─────────────────────────────────────────── */}
       <div className="studio-workspace">
-        {/* Left Pane: Localization Transcript */}
+
+        {/* LEFT PANE: Transcript ───────────────────────────────────────────── */}
         <div className="studio-left-pane">
           <div className="pane-header">
-            <div className="flex items-center gap-2">
+            <div className="pane-header-left">
               <h3 className="pane-title">Localization Transcript</h3>
               {jobs.length > 0 && (
                 <select
@@ -132,7 +197,14 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
                   ))}
                 </select>
               )}
+              {dirty && (
+                <button type="button" className="save-badge-btn" onClick={handleSave}>
+                  <span className="material-symbols-outlined">save</span>
+                  Save
+                </button>
+              )}
             </div>
+
             <div className="pane-actions">
               <div className="search-input-wrapper">
                 <span className="material-symbols-outlined search-icon">search</span>
@@ -145,82 +217,135 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
                   aria-label="Search transcript"
                 />
               </div>
-              <button className="icon-btn" title="Filter list" type="button">
+              <button className="icon-btn" title="Filter" type="button">
                 <span className="material-symbols-outlined">filter_list</span>
               </button>
             </div>
           </div>
 
-          {statusMessage && <div className="studio-status-banner" role="status">{statusMessage}</div>}
+          {/* Status / errors */}
+          {statusMessage && (
+            <div className="studio-status-banner" role="status">{statusMessage}</div>
+          )}
+          {loadError && (
+            <div className="studio-error-banner" role="alert">{loadError}</div>
+          )}
 
           <div className="transcript-scroll-area">
-            {filteredTranscript.map((item) => (
-              <div
-                key={item.id}
-                className={`transcript-card ${item.isEditable ? 'active-card' : ''}`}
-                data-testid={`transcript-card-${item.id}`}
-              >
-                <div className={`card-accent-line ${item.speakerColor}`}></div>
-                <div className="card-header">
-                  <div className="speaker-info">
-                    <span className={`speaker-dot ${item.speakerColor}`}></span>
-                    <span className="speaker-name">{item.speaker}</span>
-                    <span className="time-badge">{item.timeRange}</span>
-                  </div>
-                  <div className="card-status">
-                    {item.status === 'completed' ? (
-                      <span className="material-symbols-outlined status-completed" title="Completed">
-                        check_circle
-                      </span>
-                    ) : (
-                      <span className="material-symbols-outlined status-pending" title="Pending">
-                        pending
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="card-grid">
-                  <div className="source-col">
-                    <p className="col-label">Source (EN)</p>
-                    <p className="source-text">{item.sourceEn}</p>
-                  </div>
-                  <div className="dubbed-col">
-                    <p className="col-label">Dubbed (BE)</p>
-                    {item.isEditable ? (
-                      <div className="editable-dubbed-wrapper">
-                        <textarea
-                          className="dubbed-textarea"
-                          value={item.dubbedBe}
-                          onChange={(e) => handleDubbedChange(item.id, e.target.value)}
-                          rows={3}
-                          aria-label={`Dubbed text ${item.speaker}`}
-                        />
-                        <button
-                          type="button"
-                          className={`regenerate-btn ${isRegenerating ? 'spinning' : ''}`}
-                          onClick={() => handleRegenerateAudio(item.id)}
-                          title="Regenerate Audio"
-                          disabled={isRegenerating}
-                        >
-                          <span className="material-symbols-outlined">autorenew</span>
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="dubbed-read-only">{item.dubbedBe}</div>
-                    )}
-                  </div>
-                </div>
+            {/* Loading skeleton */}
+            {isLoading && (
+              <div className="transcript-loading">
+                <span className="material-symbols-outlined spin-anim">sync</span>
+                <span>Loading dubbing texts…</span>
               </div>
-            ))}
+            )}
+
+            {/* Empty state */}
+            {!isLoading && !loadError && segments.length === 0 && (
+              <div className="transcript-empty">
+                <span className="material-symbols-outlined">subtitles_off</span>
+                <p>No segments yet. Select a completed job to load dubbing texts.</p>
+              </div>
+            )}
+
+            {/* Segment cards */}
+            {filtered.map((seg, idx) => {
+              const colour = speakerColour(seg.speaker, allSpeakers)
+              const isActive = seg.segment_id === activeSegmentId
+              const hasAudio = seg.audio !== null
+
+              return (
+                <div
+                  key={seg.segment_id}
+                  className={`transcript-card ${isActive ? 'active-card' : ''}`}
+                  data-testid={`transcript-card-${seg.segment_id}`}
+                  onClick={() => setActiveSegmentId(seg.segment_id)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => e.key === 'Enter' && setActiveSegmentId(seg.segment_id)}
+                >
+                  <div className={`card-accent-line speaker-${idx % 4}`}></div>
+
+                  <div className="card-header">
+                    <div className="speaker-info">
+                      <span className={`speaker-dot speaker-dot-${idx % 4}`}></span>
+                      <span className="speaker-name">{seg.speaker}</span>
+                      <span className="time-badge">
+                        {formatTime(seg.start)} – {formatTime(seg.end)}
+                      </span>
+                    </div>
+                    <div className="card-status-row">
+                      {hasAudio ? (
+                        <span className="material-symbols-outlined status-completed" title="Audio ready">
+                          check_circle
+                        </span>
+                      ) : (
+                        <span className="material-symbols-outlined status-pending" title="Audio missing">
+                          pending
+                        </span>
+                      )}
+                      {seg.audio && (
+                        <a
+                          href={seg.audio.url}
+                          className="audio-play-link"
+                          title={`Play ${seg.audio.name}`}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <span className="material-symbols-outlined">play_circle</span>
+                        </a>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="card-grid">
+                    {/* Source */}
+                    <div className="source-col">
+                      <p className="col-label">Source</p>
+                      <p className={`source-text source-text-${colour}`}>{seg.text}</p>
+                    </div>
+
+                    {/* Translation / dubbed */}
+                    <div className="dubbed-col">
+                      <p className="col-label">Dubbed</p>
+                      {isActive ? (
+                        <div className="editable-dubbed-wrapper">
+                          <textarea
+                            className="dubbed-textarea"
+                            value={seg.translation}
+                            onChange={(e) => handleTranslationChange(seg.segment_id, e.target.value)}
+                            rows={3}
+                            aria-label={`Dubbed text ${seg.speaker}`}
+                          />
+                          <button
+                            type="button"
+                            className={`regenerate-btn ${isRegenerating ? 'spinning' : ''}`}
+                            onClick={(e) => { e.stopPropagation(); void handleRegenerateAudio(seg.segment_id) }}
+                            title="Regenerate Audio"
+                            disabled={isRegenerating}
+                          >
+                            <span className="material-symbols-outlined">autorenew</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="dubbed-read-only">{seg.translation || <em className="empty-translation">No translation</em>}</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
           </div>
         </div>
 
-        {/* Right Pane: Video Preview & Player Controls */}
+        {/* RIGHT PANE: Video player ─────────────────────────────────────────── */}
         <div className="studio-right-pane">
           <div className="player-top-bar">
-            <span className="program-title">Program: Main_Edit_v2</span>
-            <span className="video-specs">1080p | 23.976 fps</span>
+            <span className="program-title">
+              {document ? `Source: ${document.source}` : 'Program: Main_Edit_v2'}
+            </span>
+            <span className="video-specs">
+              {selectedJobId ? `Job: ${selectedJobId}` : '1080p | 23.976 fps'}
+            </span>
           </div>
 
           <div className="video-preview-wrapper">
@@ -231,27 +356,49 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
                 className="video-poster"
               />
               <div className="subtitle-overlay">
-                <span>{activeSegment.dubbedBe}</span>
+                <span>
+                  {activeSegment
+                    ? (activeSegment.translation || activeSegment.synthesized_text || activeSegment.text)
+                    : 'No segment selected'}
+                </span>
               </div>
             </div>
           </div>
 
-          {/* Player Transport Controls */}
+          {/* Transport controls */}
           <div className="player-controls-bar">
             <div className="timecode-display">
-              <span>00:00:18:15</span>
-              <span>00:04:32:00</span>
+              <span>{activeSegment ? formatTime(activeSegment.start) : '00:00'}</span>
+              <span>{activeSegment ? formatTime(activeSegment.end) : '00:00'}</span>
             </div>
 
             <div className="player-scrubber">
               <div className="scrubber-track">
-                <div className="scrubber-progress" style={{ width: '15%' }}></div>
-                <div className="scrubber-handle" style={{ left: '15%' }}></div>
+                <div
+                  className="scrubber-progress"
+                  style={{
+                    width: activeSegment && duration > 0
+                      ? `${(activeSegment.start / duration) * 100}%`
+                      : '0%',
+                  }}
+                ></div>
+                <div
+                  className="scrubber-handle"
+                  style={{
+                    left: activeSegment && duration > 0
+                      ? `${(activeSegment.start / duration) * 100}%`
+                      : '0%',
+                  }}
+                ></div>
               </div>
             </div>
 
             <div className="transport-buttons">
-              <button type="button" className="transport-btn" title="Skip Previous">
+              <button type="button" className="transport-btn" title="Skip Previous"
+                onClick={() => {
+                  const idx = segments.findIndex((s) => s.segment_id === activeSegmentId)
+                  if (idx > 0) setActiveSegmentId(segments[idx - 1].segment_id)
+                }}>
                 <span className="material-symbols-outlined">skip_previous</span>
               </button>
               <button type="button" className="transport-btn" title="Fast Rewind">
@@ -270,7 +417,11 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
               <button type="button" className="transport-btn" title="Fast Forward">
                 <span className="material-symbols-outlined">fast_forward</span>
               </button>
-              <button type="button" className="transport-btn" title="Skip Next">
+              <button type="button" className="transport-btn" title="Skip Next"
+                onClick={() => {
+                  const idx = segments.findIndex((s) => s.segment_id === activeSegmentId)
+                  if (idx < segments.length - 1) setActiveSegmentId(segments[idx + 1].segment_id)
+                }}>
                 <span className="material-symbols-outlined">skip_next</span>
               </button>
             </div>
@@ -278,44 +429,31 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
         </div>
       </div>
 
-      {/* Docked Bottom Timeline */}
+      {/* ── Docked Bottom Timeline ─────────────────────────────────────────── */}
       <div className="studio-bottom-timeline">
-        {/* Timeline Header Toolbar */}
+
+        {/* Timeline toolbar */}
         <div className="timeline-toolbar">
           <div className="toolbar-tools">
-            <button
-              type="button"
-              className={`tool-btn ${activeTool === 'razor' ? 'active' : ''}`}
-              title="Razor Cut"
-              onClick={() => setActiveTool(activeTool === 'razor' ? null : 'razor')}
-            >
-              <span className="material-symbols-outlined">content_cut</span>
-            </button>
-            <button
-              type="button"
-              className={`tool-btn ${activeTool === 'sync' ? 'active' : ''}`}
-              title="Sync Audio"
-              onClick={() => setActiveTool(activeTool === 'sync' ? null : 'sync')}
-            >
-              <span className="material-symbols-outlined">sync_alt</span>
-            </button>
-            <button
-              type="button"
-              className={`tool-btn ${activeTool === 'clone' ? 'active' : ''}`}
-              title="Voice Clone"
-              onClick={() => setActiveTool(activeTool === 'clone' ? null : 'clone')}
-            >
-              <span className="material-symbols-outlined">record_voice_over</span>
-            </button>
+            {(['razor', 'sync', 'clone'] as const).map((tool) => (
+              <button
+                key={tool}
+                type="button"
+                className={`tool-btn ${activeTool === tool ? 'active' : ''}`}
+                title={tool === 'razor' ? 'Razor Cut' : tool === 'sync' ? 'Sync Audio' : 'Voice Clone'}
+                onClick={() => setActiveTool(activeTool === tool ? null : tool)}
+              >
+                <span className="material-symbols-outlined">
+                  {tool === 'razor' ? 'content_cut' : tool === 'sync' ? 'sync_alt' : 'record_voice_over'}
+                </span>
+              </button>
+            ))}
           </div>
 
           <div className="toolbar-zoom">
             <span className="material-symbols-outlined zoom-icon">zoom_out</span>
             <input
-              type="range"
-              min="10"
-              max="100"
-              value={zoomLevel}
+              type="range" min="10" max="100" value={zoomLevel}
               onChange={(e) => setZoomLevel(Number(e.target.value))}
               className="zoom-slider"
               aria-label="Zoom timeline"
@@ -324,94 +462,103 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
           </div>
         </div>
 
-        {/* Timeline Track Rows */}
+        {/* Timeline body */}
         <div className="timeline-body">
-          {/* Left Track Headers */}
+          {/* Track header column */}
           <div className="track-headers-column">
             <div className="ruler-corner"></div>
-            <div className="track-header border-secondary">
-              <span className="track-name">V1: Spk 1</span>
-              <button
-                type="button"
-                className="mute-btn"
-                onClick={() => toggleTrackMute('v1')}
-                title="Toggle Mute"
-              >
-                <span className="material-symbols-outlined">
-                  {mutedTracks.v1 ? 'volume_off' : 'volume_up'}
+            {allSpeakers.map((speaker, idx) => (
+              <div key={speaker} className={`track-header border-speaker-${idx % 4}`}>
+                <span className="track-name" title={speaker}>
+                  V{idx + 1}: {speaker.replace('SPEAKER_', 'Spk ')}
                 </span>
-              </button>
-            </div>
-            <div className="track-header border-tertiary">
-              <span className="track-name">V2: Spk 2</span>
-              <button
-                type="button"
-                className="mute-btn"
-                onClick={() => toggleTrackMute('v2')}
-                title="Toggle Mute"
-              >
-                <span className="material-symbols-outlined">
-                  {mutedTracks.v2 ? 'volume_off' : 'volume_up'}
-                </span>
-              </button>
-            </div>
+                <button
+                  type="button"
+                  className="mute-btn"
+                  onClick={() => toggleTrackMute(speaker)}
+                  title="Toggle Mute"
+                >
+                  <span className="material-symbols-outlined">
+                    {mutedTracks[speaker] ? 'volume_off' : 'volume_up'}
+                  </span>
+                </button>
+              </div>
+            ))}
+            {/* Music track */}
             <div className="track-header border-music">
               <span className="track-name">A1: Music</span>
-              <button
-                type="button"
-                className="mute-btn"
-                onClick={() => toggleTrackMute('a1')}
-                title="Toggle Mute"
-              >
-                <span className="material-symbols-outlined">
-                  {mutedTracks.a1 ? 'volume_off' : 'volume_up'}
-                </span>
+              <button type="button" className="mute-btn" onClick={() => toggleTrackMute('a1')} title="Toggle Mute">
+                <span className="material-symbols-outlined">{mutedTracks.a1 ? 'volume_off' : 'volume_up'}</span>
               </button>
             </div>
           </div>
 
-          {/* Timeline Grid & Clips */}
+          {/* Timeline canvas */}
           <div className="timeline-tracks-canvas">
-            {/* Time Ruler */}
+            {/* Time ruler */}
             <div className="time-ruler">
-              <span>00:00:00</span>
-              <span>00:00:10</span>
-              <span>00:00:20</span>
-              <span>00:00:30</span>
-              <span>00:00:40</span>
+              {Array.from({ length: 5 }, (_, i) => (
+                <span key={i}>{formatTime((duration / 4) * i)}</span>
+              ))}
             </div>
 
-            {/* Playhead */}
-            <div className="timeline-playhead" style={{ left: '35%' }}>
+            {/* Playhead at active segment */}
+            <div
+              className="timeline-playhead"
+              style={{
+                left: activeSegment && duration > 0
+                  ? `${(activeSegment.start / duration) * 100}%`
+                  : '0%',
+              }}
+            >
               <div className="playhead-head"></div>
             </div>
 
-            {/* Track 1 Row */}
-            <div className="track-row">
-              <div className="clip-block secondary-clip" style={{ left: '5%', width: '25%' }}>
-                <svg className="waveform-svg" viewBox="0 0 100 20" preserveAspectRatio="none">
-                  <path d="M0,10 L5,2 L10,18 L15,5 L20,15 L25,8 L30,12 L35,4 L40,16 L45,10 L50,6 L55,14 L60,3 L65,17 L70,9 L75,11 L80,5 L85,15 L90,8 L95,12 L100,10" fill="none" stroke="currentColor" strokeWidth="1.5" />
-                </svg>
-              </div>
-            </div>
+            {/* Speaker track rows from real segments */}
+            {allSpeakers.map((speaker, idx) => {
+              const speakerSegs = segments.filter((s) => s.speaker === speaker)
+              return (
+                <div key={speaker} className="track-row">
+                  {speakerSegs.map((seg) => {
+                    const isActiveClip = seg.segment_id === activeSegmentId
+                    const clipClass = isActiveClip
+                      ? `clip-block primary-clip${seg.audio === null ? ' ai-shimmer' : ''}`
+                      : `clip-block speaker-clip-${idx % 4}`
+                    return (
+                      <div
+                        key={seg.segment_id}
+                        className={clipClass}
+                        style={clipStyle(seg)}
+                        title={seg.translation || seg.text}
+                        onClick={() => setActiveSegmentId(seg.segment_id)}
+                        role="button"
+                        tabIndex={-1}
+                      >
+                        <svg className="waveform-svg" viewBox="0 0 100 20" preserveAspectRatio="none">
+                          <path
+                            d="M0,10 L5,4 L10,16 L15,6 L20,14 L25,8 L30,12 L35,5 L40,15 L45,10 L50,7 L55,13 L60,4 L65,16 L70,9 L75,11 L80,6 L85,14 L90,8 L95,12 L100,10"
+                            fill="none" stroke="currentColor" strokeWidth="1.5"
+                          />
+                        </svg>
+                        {isActiveClip && (
+                          <span className="clip-subtitle">
+                            {seg.translation || seg.text}
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )
+            })}
 
-            {/* Track 2 Row (Active AI Shimmer) */}
+            {/* Music track row */}
             <div className="track-row">
-              <div className="clip-block primary-clip ai-shimmer" style={{ left: '32%', width: '22%' }}>
-                <svg className="waveform-svg" viewBox="0 0 100 20" preserveAspectRatio="none">
-                  <path d="M0,10 L3,14 L6,6 L9,18 L12,10 L15,12 L18,8 L21,15 L24,5 L27,10 L30,14 L33,6 L36,18 L39,10 L42,12 L45,8 L48,15 L51,5 L54,10 L57,14 L60,6 L63,18 L66,10 L69,12 L72,8 L75,15 L78,5 L81,10 L84,14 L87,6 L90,18 L93,10 L96,12 L100,10" fill="none" stroke="currentColor" strokeWidth="1" />
-                </svg>
-                <span className="clip-subtitle">{activeSegment.dubbedBe}</span>
-              </div>
-            </div>
-
-            {/* Track 3 Row (Music) */}
-            <div className="track-row">
-              <div className="clip-block music-clip" style={{ left: '0%', width: '95%' }}>
-                <svg className="waveform-svg opacity-50" viewBox="0 0 200 20" preserveAspectRatio="none">
+              <div className="clip-block music-clip" style={{ left: '0%', width: '98%' }}>
+                <svg className="waveform-svg" viewBox="0 0 200 20" preserveAspectRatio="none">
                   <path d="M0,10 Q10,5 20,10 T40,10 T60,10 T80,10 T100,10 T120,10 T140,10 T160,10 T180,10 T200,10" fill="none" stroke="currentColor" strokeWidth="1" />
                 </svg>
-                <span className="clip-label">Corporate_Bed_01.wav</span>
+                <span className="clip-label">Background.wav</span>
               </div>
             </div>
           </div>
