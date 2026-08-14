@@ -25,12 +25,12 @@ function stubClient(overrides: Partial<ApiClient> = {}): ApiClient {
 }
 
 describe('application shell', () => {
-  it('navigates among all five views with accessible controls', async () => {
+  it('navigates among all six views with accessible controls', async () => {
     const user = userEvent.setup()
     render(<App client={stubClient()} />)
-    await screen.findByRole('heading', { name: 'Workflow' })
+    await screen.findByRole('heading', { name: 'HukFlow Studio' })
 
-    for (const view of ['Jobs', 'Settings', 'Voice Profiles', 'Dubbing Texts', 'Workflow']) {
+    for (const view of ['Workflow', 'Jobs', 'Settings', 'Voice Profiles', 'Dubbing Texts', 'HukFlow Studio']) {
       await user.click(screen.getByRole('button', { name: view }))
       expect(screen.getByRole('heading', { name: view })).toBeInTheDocument()
     }

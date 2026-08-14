@@ -6,12 +6,13 @@ import { WorkflowView } from './views/WorkflowView'
 import { SettingsView } from './views/SettingsView'
 import { VoicesView } from './views/VoicesView'
 import { DubbingTextsView } from './views/DubbingTextsView'
+import { HukFlowStudioView } from './views/HukFlowStudioView'
 
-const views = ['Workflow', 'Jobs', 'Settings', 'Voice Profiles', 'Dubbing Texts'] as const
+const views = ['HukFlow Studio', 'Workflow', 'Jobs', 'Settings', 'Voice Profiles', 'Dubbing Texts'] as const
 type View = (typeof views)[number]
 
 export default function App({ client = apiClient }: { client?: ApiClient }) {
-  const [view, setView] = useState<View>('Workflow')
+  const [view, setView] = useState<View>('HukFlow Studio')
   const [config, setConfig] = useState<ConfigResponse>()
   const [error, setError] = useState('')
 
@@ -89,6 +90,7 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
         <main>
           {!config && !error && <p role="status">Loading application…</p>}
           {error && <p role="alert">{error}</p>}
+          {config && view === 'HukFlow Studio' && <HukFlowStudioView client={client} />}
           {config && view === 'Workflow' && <WorkflowView client={client} config={config} />}
           {config && view === 'Jobs' && <JobsView client={client} />}
           {config && view === 'Settings' && <SettingsView client={client} config={config} />}
