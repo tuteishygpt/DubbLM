@@ -3,6 +3,9 @@ import type { ApiClient, ConfigResponse, JsonValue, OptionsResponse, SchemaField
 
 export function WorkflowView({ client, config }: { client: ApiClient; config: ConfigResponse }) {
   const fields = config.schema.fields.filter((field) => field.workflow || field.scope === 'workflow')
+  const regularFields = fields.filter((f) => f.type !== 'boolean')
+  const booleanFields = fields.filter((f) => f.type === 'boolean')
+
   const [options, setOptions] = useState<OptionsResponse>({})
   const [values, setValues] = useState<Record<string, JsonValue>>(() => Object.fromEntries(fields.map((field) => [field.name, config.values[field.name] ?? ''])))
   const [video, setVideo] = useState<File>()
@@ -44,28 +47,158 @@ export function WorkflowView({ client, config }: { client: ApiClient; config: Co
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
   }
 
-  return <section>
-    <h1>Workflow</h1>
-    {error && <p role="alert">{error}</p>}
-    {message && <p role="status">{message}</p>}
-    <form onSubmit={submit}>
-      <label>Video<input type="file" accept="video/*" onChange={(e) => setVideo(e.target.files?.[0])} /></label>
-      <label>Isolated audio track<input type="file" accept="audio/*" multiple onChange={(e) => setTracks(Array.from(e.target.files ?? []))} /></label>
-      <label>Speaker-label mapping<textarea value={mapping} onChange={(e) => setMapping(e.target.value)} /></label>
-      {fields.map((field) => <WorkflowField key={field.name} field={field} value={values[field.name]} options={options} onChange={(value) => setValues((current) => ({ ...current, [field.name]: value }))} />)}
-      <button type="submit">Queue job</button>
-    </form>
-  </section>
+  return (
+    <section>
+      <div className="setup-wizard-card">
+        {/* Wizard Header */}
+        <div className="wizard-header">
+          <div>
+            <h1>Workflow</h1>
+            <p>Configure source media and target languages for AI processing.</p>
+          </div>
+          <button className="header-icon-btn" type="button" title="Close">
+            <span className="material-symbols-outlined" aria-hidden="true">close</span>
+          </button>
+        </div>
+
+        {/* Wizard Stepper Progress Bar */}
+        <div className="wizard-stepper">
+          <div className="step-item active">
+            <div className="step-badge">1</div>
+            <span>Setup</span>
+          </div>
+          <div className="step-divider"></div>
+          <div className="step-item">
+            <div className="step-badge">2</div>
+            <span>Extraction</span>
+          </div>
+          <div className="step-divider"></div>
+          <div className="step-item">
+            <div className="step-badge">3</div>
+            <span>Diarization</span>
+          </div>
+          <div className="step-divider"></div>
+          <div className="step-item">
+            <div className="step-badge">4</div>
+            <span>Translation</span>
+          </div>
+        </div>
+
+        {/* Wizard Form Body */}
+        <div className="wizard-body">
+          {error && <p role="alert">{error}</p>}
+          {message && <p role="status">{message}</p>}
+
+          <form onSubmit={submit}>
+            {/* Project Details Section */}
+            <div className="form-section">
+              <div className="form-section-title">
+                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>folder</span>
+                Project Details
+              </div>
+              <div className="field-grid">
+                <label>
+                  Project Name
+                  <input type="text" placeholder="e.g., Q3 Marketing Video" defaultValue="Project Alpha" />
+                </label>
+                <label>
+                  Workspace
+                  <select defaultValue="Personal Workspace">
+                    <option value="Personal Workspace">Personal Workspace</option>
+                    <option value="Team Alpha">Team Alpha</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+
+            {/* Media & Tracks Section */}
+            <div className="form-section">
+              <div className="form-section-title">
+                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>movie</span>
+                Source Media & Isolated Tracks
+              </div>
+
+              <div className="stitch-dropzone">
+                <div className="dropzone-icon">
+                  <span className="material-symbols-outlined" style={{ fontSize: '28px' }}>upload_file</span>
+                </div>
+                <div className="dropzone-title">Drag and drop media files here</div>
+                <div className="dropzone-desc">Supports MP4, MOV, WAV up to 5GB</div>
+                <div className="field-grid" style={{ width: '100%' }}>
+                  <label className="field-file">
+                    Video
+                    <input type="file" accept="video/*" onChange={(e) => setVideo(e.target.files?.[0])} />
+                  </label>
+                  <label className="field-file">
+                    Isolated audio track
+                    <input type="file" accept="audio/*" multiple onChange={(e) => setTracks(Array.from(e.target.files ?? []))} />
+                  </label>
+                </div>
+              </div>
+
+              <label className="field-code">
+                Speaker-label mapping
+                <textarea value={mapping} onChange={(e) => setMapping(e.target.value)} />
+              </label>
+            </div>
+
+            {/* Job Parameters / Options */}
+            {regularFields.length > 0 && (
+              <div className="form-section">
+                <div className="form-section-title">
+                  <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>tune</span>
+                  Language & Pipeline Parameters
+                </div>
+                <div className="field-grid">
+                  {regularFields.map((field) => (
+                    <WorkflowField key={field.name} field={field} value={values[field.name]} options={options} onChange={(value) => setValues((current) => ({ ...current, [field.name]: value }))} />
+                  ))}
+                </div>
+                <div className="auto-detect-tag">
+                  <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>smart_toy</span>
+                  Auto-detect source language available
+                </div>
+              </div>
+            )}
+
+            {/* Options & Flags */}
+            {booleanFields.length > 0 && (
+              <div className="form-section">
+                <div className="form-section-title">
+                  <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>toggle_on</span>
+                  Pipeline Options & Flags
+                </div>
+                <div className="field-grid-toggles">
+                  {booleanFields.map((field) => (
+                    <WorkflowField key={field.name} field={field} value={values[field.name]} options={options} onChange={(value) => setValues((current) => ({ ...current, [field.name]: value }))} />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Wizard Footer Action Bar */}
+            <div className="wizard-footer">
+              <button className="cancel-btn" type="button">Cancel</button>
+              <button type="submit" className="next-step-btn">
+                Queue job
+                <span className="material-symbols-outlined" aria-hidden="true" style={{ fontSize: '18px' }}>arrow_forward</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
+  )
 }
 
 function WorkflowField({ field, value, options, onChange }: { field: SchemaFieldDefinition; value: JsonValue; options: OptionsResponse; onChange(value: JsonValue): void }) {
   const label = field.label ?? field.name
-  if (field.type === 'boolean') return <label><input type="checkbox" checked={Boolean(value)} onChange={(e) => onChange(e.target.checked)} />{label}</label>
+  if (field.type === 'boolean') return <label className="field-boolean"><input type="checkbox" checked={Boolean(value)} onChange={(e) => onChange(e.target.checked)} />{label}</label>
   if (field.type === 'select') {
     const choices = normalizeOptions(field.options ?? options[field.options_key ?? field.name])
-    return <label>{label}<select value={String(value ?? '')} onChange={(e) => onChange(e.target.value)}>{choices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}</select></label>
+    return <label className="field-select">{label}<select value={String(value ?? '')} onChange={(e) => onChange(e.target.value)}>{choices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}</select></label>
   }
-  return <label>{label}<input type={field.type === 'number' ? 'number' : 'text'} value={String(value ?? '')} onChange={(e) => onChange(field.type === 'number' ? Number(e.target.value) : e.target.value)} /></label>
+  return <label className="field-input">{label}<input type={field.type === 'number' ? 'number' : 'text'} value={String(value ?? '')} onChange={(e) => onChange(field.type === 'number' ? Number(e.target.value) : e.target.value)} /></label>
 }
 
 function normalizeOptions(value: JsonValue | Array<SelectOption | string> | undefined): SelectOption[] {
