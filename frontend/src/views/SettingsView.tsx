@@ -4,6 +4,10 @@ import { SchemaField } from '../components/SchemaField'
 
 export function SettingsView({ client, config }: { client: ApiClient; config: ConfigResponse }) {
   const fields = config.schema.fields.filter((field) => !field.workflow && field.scope !== 'workflow')
+  const regularFields = fields.filter((f) => f.type !== 'boolean' && !['list', 'object', 'structured'].includes(f.type))
+  const booleanFields = fields.filter((f) => f.type === 'boolean')
+  const codeFields = fields.filter((f) => ['list', 'object', 'structured'].includes(f.type))
+
   const [values, setValues] = useState<Record<string, JsonValue>>(() => ({ ...config.values }))
   const [options, setOptions] = useState<OptionsResponse>({})
   const [error, setError] = useState('')
@@ -19,10 +23,47 @@ export function SettingsView({ client, config }: { client: ApiClient; config: Co
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
   }
 
-  return <section><h1>Settings</h1>{error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}<form onSubmit={save}>
-    {fields.map((field) => <SchemaField key={field.name} field={field} value={values[field.name]} options={normalizeOptions(field.options ?? options[field.options_key ?? field.name])} onChange={(value) => setValues((current) => ({ ...current, [field.name]: value }))} />)}
-    <button type="submit">Save settings</button>
-  </form></section>
+  return <section>
+    <h1>Settings</h1>
+    {error && <p role="alert">{error}</p>}
+    {message && <p role="status">{message}</p>}
+    <form onSubmit={save}>
+      {regularFields.length > 0 && (
+        <div className="form-section">
+          <div className="form-section-title">⚙️ General Parameters</div>
+          <div className="field-grid">
+            {regularFields.map((field) => (
+              <SchemaField key={field.name} field={field} value={values[field.name]} options={normalizeOptions(field.options ?? options[field.options_key ?? field.name])} onChange={(value) => setValues((current) => ({ ...current, [field.name]: value }))} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {booleanFields.length > 0 && (
+        <div className="form-section">
+          <div className="form-section-title">🎛️ Feature Flags & Toggles</div>
+          <div className="field-grid-toggles">
+            {booleanFields.map((field) => (
+              <SchemaField key={field.name} field={field} value={values[field.name]} options={normalizeOptions(field.options ?? options[field.options_key ?? field.name])} onChange={(value) => setValues((current) => ({ ...current, [field.name]: value }))} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {codeFields.length > 0 && (
+        <div className="form-section">
+          <div className="form-section-title">📋 Data & Structured Models</div>
+          <div className="field-grid-full">
+            {codeFields.map((field) => (
+              <SchemaField key={field.name} field={field} value={values[field.name]} options={normalizeOptions(field.options ?? options[field.options_key ?? field.name])} onChange={(value) => setValues((current) => ({ ...current, [field.name]: value }))} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      <button type="submit">Save settings</button>
+    </form>
+  </section>
 }
 
 function normalizeOptions(value: unknown): SelectOption[] {

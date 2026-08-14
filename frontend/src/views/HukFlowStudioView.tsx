@@ -22,6 +22,8 @@ interface Segment {
 
 interface TextDocument { revision: string; source: string; segments: Segment[] }
 
+const SPEAKER_COLOURS = ['speaker-0', 'speaker-1', 'speaker-2', 'speaker-3'] as const
+
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60)
   const s = Math.floor(seconds % 60)
@@ -262,87 +264,52 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
   })
 
   return (
-    <div className="bg-background text-on-background font-body-md text-body-md overflow-hidden selection:bg-primary-container selection:text-on-primary-container min-h-screen flex flex-col relative">
+    <section className="studio-view-container">
       <h1 className="sr-only">HukFlow Studio</h1>
 
-      {/* TopNavBar */}
-      <nav className="flex justify-between items-center h-12 px-gutter w-full z-50 bg-background dark:bg-background bg-surface-container-low border-b border-outline-variant fixed top-0 left-0 right-0">
-        <div className="flex items-center gap-stack-md">
-          <button className="text-on-surface-variant hover:bg-surface-container-highest transition-colors duration-150 rounded p-1 flex items-center justify-center" title="Back to Home">
-            <span className="material-symbols-outlined">arrow_back</span>
-          </button>
-          <span className="font-headline-md text-headline-md font-bold text-primary dark:text-primary tracking-tighter">HukFlow</span>
-          <div className="h-6 w-px bg-outline-variant mx-1"></div>
-          <div className="flex items-center gap-2">
-            <img
-              alt="Project Thumbnail"
-              className="w-8 h-8 rounded object-cover"
-              src="https://lh3.googleusercontent.com/aida-public/AB6AXuBNYiL9TzjyYVVg9MeFaymgODiw6PGlfTptbTGqUpcDY8tHKwrT32x5f3qco7G30Vh-mOYFiZpvyQ2SeBaKbNY9mA0cfonYXgz2KAUf5R41LFdiMH0wkCGfPTCy81cTjnd4-pJNJh9i1dTmWQuC7Ziet4AlSEbJsbzNEJcQf7Xtgsy2DR5f-n3FviPp6z6ORJW6b_cgSelo7o3GgQY99uCFzOQP8uyb9av6-YsZp2qwxEK5Xrh3Y3m0mQ"
-            />
-            <div className="flex flex-col justify-center">
-              <span className="font-label-md text-label-md text-primary font-bold leading-tight">
-                {selectedJobId ? `Job: ${selectedJobId}` : 'Project Alpha'}
-              </span>
-              <span className="font-label-sm text-[10px] text-on-surface-variant leading-tight">Localizing: EN to BE</span>
+      {/* ── Main Split Workspace ─────────────────────────────────────────── */}
+      <div className="studio-workspace">
+
+        {/* LEFT PANE: Transcript ───────────────────────────────────────────── */}
+        <div className="studio-left-pane">
+          <div className="pane-header">
+            <div className="pane-header-left">
+              <h3 className="pane-title">Localization Transcript</h3>
+              {jobs.length > 0 && (
+                <select
+                  aria-label="Job selector"
+                  className="studio-job-select"
+                  value={selectedJobId}
+                  onChange={(e) => setSelectedJobId(e.target.value)}
+                >
+                  {jobs.map((j) => (
+                    <option key={j.id} value={j.id}>
+                      {j.id} ({j.status})
+                    </option>
+                  ))}
+                </select>
+              )}
+              {dirty && (
+                <button type="button" className="save-badge-btn" onClick={handleSave}>
+                  <span className="material-symbols-outlined">save</span>
+                  Save
+                </button>
+              )}
             </div>
-          </div>
-          {jobs.length > 0 && (
-            <select
-              aria-label="Job selector"
-              className="bg-surface-container-highest text-on-surface-variant border border-outline-variant rounded px-2 py-0.5 text-xs ml-2"
-              value={selectedJobId}
-              onChange={(e) => setSelectedJobId(e.target.value)}
-            >
-              {jobs.map((j) => (
-                <option key={j.id} value={j.id}>
-                  {j.id} ({j.status})
-                </option>
-              ))}
-            </select>
-          )}
-          {dirty && (
-            <button type="button" className="bg-primary-container text-on-primary-container px-2 py-0.5 rounded text-xs flex items-center gap-1 font-bold hover:opacity-90" onClick={handleSave}>
-              <span className="material-symbols-outlined text-[14px]">save</span>
-              Save
-            </button>
-          )}
-        </div>
 
-        <div className="flex items-center gap-stack-md">
-          <button className="text-on-surface-variant hover:bg-surface-container-highest transition-colors duration-150 rounded p-1" title="Sync Status">
-            <span className="material-symbols-outlined">cloud_done</span>
-          </button>
-          <button className="text-on-surface-variant hover:bg-surface-container-highest transition-colors duration-150 rounded p-1" title="Settings">
-            <span className="material-symbols-outlined">settings</span>
-          </button>
-          <button className="text-on-surface-variant hover:bg-surface-container-highest transition-colors duration-150 rounded px-3 py-1 font-label-md text-label-md">Share</button>
-          <button className="bg-primary text-on-primary hover:bg-primary-fixed transition-colors duration-150 rounded px-4 py-1 font-label-md text-label-md font-bold">Export</button>
-          <img
-            alt="User profile"
-            className="w-8 h-8 rounded-full ml-stack-sm object-cover border border-outline-variant"
-            src="https://lh3.googleusercontent.com/aida-public/AB6AXuDJ8qlfIxbrXVkWD4yhJAd8e2NA4CR2DyzfH4SvtY8CRmx5GhpASNvrrf9Lq2Sxazp6z8x6Hbm681tCoPTEDKG2CZnFv0U5CFd8pnycAsFwmuQx0DBOWQETwxYVqF0LxN3q7GVbqslCgS4KPK3xVK4G4RmG5oA85IqDMFsS32C8Kp2j4FCXaEyK1yhLcY0hJ-oJdc5DEDZVBKcBt2LOpL_Xj-RHMPxW_Jv_3K0KseO1z4CAsV2pkOxf2Q"
-          />
-        </div>
-      </nav>
-
-      {/* Main Content Area */}
-      <main className="w-full mt-12 h-[calc(100vh-48px-240px)] flex bg-surface">
-        {/* Left Pane: Transcript/Speaker Cards */}
-        <div className="w-1/2 h-full border-r border-outline-variant flex flex-col">
-          <div className="p-stack-md border-b border-outline-variant bg-surface-container-lowest flex justify-between items-center">
-            <h3 className="font-headline-sm text-headline-sm text-on-surface">Localization Transcript</h3>
-            <div className="flex items-center gap-2">
-              <div className="relative flex items-center">
-                <span className="material-symbols-outlined absolute left-2 text-[16px] text-on-surface-variant pointer-events-none">search</span>
+            <div className="pane-actions">
+              <div className="search-input-wrapper">
+                <span className="material-symbols-outlined search-icon">search</span>
                 <input
                   type="text"
                   placeholder="Search transcript..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="bg-surface-dim border border-outline-variant rounded pl-7 pr-2 py-1 text-xs text-on-surface focus:outline-none focus:border-primary w-36"
+                  className="search-input"
+                  aria-label="Search transcript"
                 />
               </div>
-              <button className="p-1 rounded text-on-surface-variant hover:text-primary transition-colors" title="Filter">
+              <button className="icon-btn" title="Filter" type="button">
                 <span className="material-symbols-outlined">filter_list</span>
               </button>
             </div>
@@ -350,16 +317,16 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
 
           {/* Status & Error Banners */}
           {statusMessage && (
-            <div className="bg-primary-container/20 border-b border-primary/30 text-primary text-xs px-4 py-1.5 font-medium">{statusMessage}</div>
+            <div className="studio-status-banner" role="status">{statusMessage}</div>
           )}
           {loadError && (
-            <div className="bg-error-container/20 border-b border-error/30 text-error text-xs px-4 py-1.5 font-medium">{loadError}</div>
+            <div className="studio-error-banner" role="alert">{loadError}</div>
           )}
 
-          <div className="flex-1 overflow-y-auto p-stack-md space-y-stack-md bg-surface-dim px-gutter">
+          <div className="transcript-scroll-area">
             {isLoading && (
-              <div className="flex items-center justify-center p-8 gap-2 text-on-surface-variant">
-                <span className="material-symbols-outlined animate-spin">sync</span>
+              <div className="transcript-loading">
+                <span className="material-symbols-outlined spin-anim">sync</span>
                 <span>Loading dubbing texts…</span>
               </div>
             )}
@@ -367,64 +334,68 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
             {filtered.map((seg, idx) => {
               const isActive = seg.segment_id === (currentActive?.segment_id ?? '')
               const hasAudio = seg.audio !== null
-              const isSpeaker1 = idx % 2 === 0
+              const speakerSlot = SPEAKER_COLOURS[idx % 4]
 
               return (
                 <div
                   key={seg.segment_id}
                   onClick={() => handleSelectSegment(seg)}
-                  className={`rounded-lg border relative transition-colors p-2 w-full cursor-pointer ${
-                    isActive
-                      ? 'bg-surface-container border-primary/50 shadow-[inset_0_0_10px_rgba(208,188,255,0.05)]'
-                      : 'bg-surface-container border-outline-variant hover:border-secondary/50'
-                  }`}
+                  className={`transcript-card ${isActive ? 'active-card' : ''}`}
                   data-testid={`transcript-card-${seg.segment_id}`}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSelectSegment(seg)}
                 >
-                  <div
-                    className={`absolute -left-[1px] top-4 bottom-4 w-[2px] rounded-r ${
-                      isSpeaker1 ? 'bg-secondary' : 'bg-primary'
-                    }`}
-                  ></div>
+                  <div className={`card-accent-line ${speakerSlot}`}></div>
 
-                  <div className="flex justify-between items-start mb-stack-sm">
-                    <div className="flex items-center gap-2">
-                      <span className={`w-2 h-2 rounded-full ${isSpeaker1 ? 'bg-secondary' : 'bg-tertiary-container'}`}></span>
-                      <span className="font-label-md text-label-md text-on-surface-variant">{seg.speaker}</span>
-                      <span className="bg-surface-container-highest text-on-surface-variant px-2 py-0.5 rounded font-mono-ui text-mono-ui">
-                        {formatTime(seg.start)} - {formatTime(seg.end)}
+                  <div className="card-header">
+                    <div className="speaker-info">
+                      <span className={`speaker-dot speaker-dot-${idx % 4}`}></span>
+                      <span className="speaker-name">{seg.speaker}</span>
+                      <span className="time-badge">
+                        {formatTime(seg.start)} – {formatTime(seg.end)}
                       </span>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="card-status-row">
                       {hasAudio ? (
-                        <span className="material-symbols-outlined text-secondary text-[16px]" title="Audio ready">check_circle</span>
+                        <span className="material-symbols-outlined status-completed" title="Audio ready">check_circle</span>
                       ) : (
-                        <span className="material-symbols-outlined text-outline text-[16px]" title="Audio pending">pending</span>
+                        <span className="material-symbols-outlined status-pending" title="Audio missing">pending</span>
+                      )}
+                      {seg.audio && (
+                        <a
+                          href={seg.audio.url}
+                          className="audio-play-link"
+                          title={`Play ${seg.audio.name}`}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <span className="material-symbols-outlined">play_circle</span>
+                        </a>
                       )}
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-[1fr_2fr] gap-stack-md gap-gutter">
-                    <div>
-                      <p className="font-label-sm text-label-sm text-outline mb-1 uppercase tracking-wider">Source (EN)</p>
-                      <p className="font-body-md text-body-md text-secondary">
-                        <span className="text-headline-sm font-headline-sm">{seg.text}</span>
-                      </p>
+                  <div className="card-grid">
+                    <div className="source-col">
+                      <p className="col-label">Source (EN)</p>
+                      <p className={`source-text source-text-${speakerSlot.replace('speaker-', '')}`}>{seg.text}</p>
                     </div>
-                    <div className="relative">
-                      <p className="font-label-sm text-label-sm text-outline mb-1 uppercase tracking-wider">Dubbed (BE)</p>
+
+                    <div className="dubbed-col">
+                      <p className="col-label">Dubbed (BE)</p>
                       {isActive ? (
-                        <div className="relative">
+                        <div className="editable-dubbed-wrapper">
                           <textarea
+                            className="dubbed-textarea"
                             value={seg.translation}
                             onChange={(e) => handleTranslationChange(seg.segment_id, e.target.value)}
                             onClick={(e) => e.stopPropagation()}
-                            className="w-full bg-surface-dim border border-primary rounded p-2 font-body-md text-body-md text-primary focus:border-primary focus:ring-0 resize-none text-headline-sm font-headline-sm h-32"
+                            rows={3}
+                            aria-label={`Dubbed text ${seg.speaker}`}
                           />
                           <button
                             type="button"
-                            className={`absolute bottom-2 right-2 text-on-surface-variant hover:text-primary bg-surface-container-highest p-1 rounded transition-colors ${
-                              isRegenerating ? 'animate-spin' : ''
-                            }`}
+                            className={`regenerate-btn ${isRegenerating ? 'spinning' : ''}`}
                             onClick={(e) => {
                               e.stopPropagation()
                               void handleRegenerateAudio(seg.segment_id)
@@ -432,12 +403,12 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
                             title="Regenerate Audio"
                             disabled={isRegenerating}
                           >
-                            <span className="material-symbols-outlined text-[16px]">autorenew</span>
+                            <span className="material-symbols-outlined">autorenew</span>
                           </button>
                         </div>
                       ) : (
-                        <div className="w-full bg-surface-dim border border-outline-variant rounded p-2 font-body-md text-body-md text-on-surface text-headline-sm font-headline-sm">
-                          {seg.translation || <em className="text-outline text-xs">No translation</em>}
+                        <div className="dubbed-read-only">
+                          {seg.translation || <em className="empty-translation">No translation</em>}
                         </div>
                       )}
                     </div>
@@ -448,24 +419,23 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
           </div>
         </div>
 
-        {/* Right Pane: Video Player */}
-        <div className="w-1/2 h-full bg-surface-container-lowest flex flex-col">
-          <div className="p-stack-sm flex justify-between items-center bg-surface-container-low border-b border-outline-variant">
-            <span className="font-label-md text-label-md text-on-surface">
+        {/* RIGHT PANE: Video Player ─────────────────────────────────────────── */}
+        <div className="studio-right-pane">
+          <div className="player-top-bar">
+            <span className="program-title">
               {document ? `Source: ${document.source}` : 'Program: Main_Edit_v2'}
             </span>
-            <span className="font-mono-ui text-mono-ui text-primary">
+            <span className="video-specs">
               {selectedJobId ? `Job: ${selectedJobId}` : '1080p | 23.976 fps'}
             </span>
           </div>
 
-          <div className="flex-1 p-stack-lg flex items-center justify-center relative">
-            {/* HTML5 Video Element for current open job */}
-            <div className="w-full aspect-video bg-black rounded-lg overflow-hidden border border-outline-variant relative flex items-center justify-center">
+          <div className="video-preview-wrapper">
+            <div className="video-canvas">
               <video
                 ref={videoRef}
                 src={videoSrc}
-                className="w-full h-full object-contain"
+                className="video-poster"
                 onTimeUpdate={() => {
                   if (videoRef.current) setCurrentTime(videoRef.current.currentTime)
                 }}
@@ -479,41 +449,42 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
                 onClick={togglePlayPause}
               />
 
-              {/* Subtitles Overlay */}
-              <div className="absolute bottom-6 left-0 right-0 text-center px-4 pointer-events-none">
-                <span className="bg-black/80 text-white font-headline-sm text-headline-sm px-4 py-1.5 rounded backdrop-blur-md shadow-xl inline-block max-w-[90%] transition-all duration-200 border border-white/10">
+              <div className="subtitle-overlay">
+                <span>
                   {liveSubSegment ? liveSubSegment.translation || liveSubSegment.text : 'Select or play video segment'}
                 </span>
               </div>
             </div>
           </div>
 
-          {/* Player Controls */}
-          <div className="p-stack-md bg-surface-container-low border-t border-outline-variant flex flex-col gap-stack-sm">
-            <div className="flex justify-between items-center font-mono-ui text-mono-ui text-on-surface-variant">
+          {/* Transport controls */}
+          <div className="player-controls-bar">
+            <div className="timecode-display">
               <span>{formatTimecode(currentTime)}</span>
               <span>{formatTimecode(duration)}</span>
             </div>
 
-            <div className="h-1.5 bg-surface-container-highest rounded-full w-full relative cursor-pointer" onClick={handleScrubberClick}>
-              <div
-                className="absolute top-0 left-0 h-full bg-primary rounded-full transition-all duration-75"
-                style={{
-                  width: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
-                }}
-              ></div>
-              <div
-                className="absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-primary rounded-full shadow-[0_0_8px_rgba(208,188,255,0.8)] transition-all duration-75 -ml-1.5"
-                style={{
-                  left: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
-                }}
-              ></div>
+            <div className="player-scrubber" onClick={handleScrubberClick}>
+              <div className="scrubber-track">
+                <div
+                  className="scrubber-progress"
+                  style={{
+                    width: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
+                  }}
+                ></div>
+                <div
+                  className="scrubber-handle"
+                  style={{
+                    left: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
+                  }}
+                ></div>
+              </div>
             </div>
 
-            <div className="flex justify-center items-center gap-stack-lg mt-2">
+            <div className="transport-buttons">
               <button
                 type="button"
-                className="text-on-surface-variant hover:text-on-surface transition-colors"
+                className="transport-btn"
                 title="Skip Previous"
                 onClick={() => {
                   const idx = displaySegments.findIndex((s) => s.segment_id === currentActive?.segment_id)
@@ -524,7 +495,7 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
               </button>
               <button
                 type="button"
-                className="text-on-surface-variant hover:text-on-surface transition-colors"
+                className="transport-btn"
                 title="Fast Rewind -5s"
                 onClick={() => {
                   if (videoRef.current) {
@@ -538,17 +509,17 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
               </button>
               <button
                 type="button"
-                className="w-10 h-10 rounded-full bg-primary text-on-primary flex items-center justify-center hover:bg-primary-fixed transition-colors shadow-lg"
-                onClick={togglePlayPause}
+                className="play-pause-btn"
                 title={isPlaying ? 'Pause' : 'Play'}
+                onClick={togglePlayPause}
               >
-                <span className="material-symbols-outlined" style={{ fontVariationSettings: '"FILL" 1' }}>
+                <span className="material-symbols-outlined">
                   {isPlaying ? 'pause' : 'play_arrow'}
                 </span>
               </button>
               <button
                 type="button"
-                className="text-on-surface-variant hover:text-on-surface transition-colors"
+                className="transport-btn"
                 title="Fast Forward +5s"
                 onClick={() => {
                   if (videoRef.current) {
@@ -562,7 +533,7 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
               </button>
               <button
                 type="button"
-                className="text-on-surface-variant hover:text-on-surface transition-colors"
+                className="transport-btn"
                 title="Skip Next"
                 onClick={() => {
                   const idx = displaySegments.findIndex((s) => s.segment_id === currentActive?.segment_id)
@@ -574,196 +545,141 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
             </div>
           </div>
         </div>
-      </main>
+      </div>
 
-      {/* BottomNavBar (Timeline) */}
-      <div className="fixed bottom-0 right-0 left-0 z-30 h-[240px] bg-surface-container dark:bg-surface-container border-t border-outline-variant flex flex-col">
-        {/* Timeline Toolbar */}
-        <div className="flex items-center justify-between px-stack-md h-10 border-b border-surface-container-highest bg-surface-container-low">
-          <div className="flex items-center gap-stack-lg">
-            <div className="flex bg-surface-container-highest rounded p-0.5 gap-1">
-              {(['razor', 'sync', 'clone'] as const).map((tool) => (
-                <button
-                  key={tool}
-                  type="button"
-                  onClick={() => setActiveTool(activeTool === tool ? null : tool)}
-                  className={`p-1 rounded transition-colors ${
-                    activeTool === tool ? 'text-primary bg-surface-container' : 'text-outline hover:text-primary hover:bg-surface-container-highest'
-                  }`}
-                  title={tool === 'razor' ? 'Razor' : tool === 'sync' ? 'Sync' : 'Voice Clone'}
-                >
-                  <span className="material-symbols-outlined text-[18px]">
-                    {tool === 'razor' ? 'content_cut' : tool === 'sync' ? 'sync_alt' : 'record_voice_over'}
-                  </span>
-                </button>
-              ))}
-            </div>
+      {/* ── Docked Bottom Timeline ─────────────────────────────────────────── */}
+      <div className="studio-bottom-timeline">
+
+        {/* Timeline toolbar */}
+        <div className="timeline-toolbar">
+          <div className="toolbar-tools">
+            {(['razor', 'sync', 'clone'] as const).map((tool) => (
+              <button
+                key={tool}
+                type="button"
+                className={`tool-btn ${activeTool === tool ? 'active' : ''}`}
+                title={tool === 'razor' ? 'Razor Cut' : tool === 'sync' ? 'Sync Audio' : 'Voice Clone'}
+                onClick={() => setActiveTool(activeTool === tool ? null : tool)}
+              >
+                <span className="material-symbols-outlined">
+                  {tool === 'razor' ? 'content_cut' : tool === 'sync' ? 'sync_alt' : 'record_voice_over'}
+                </span>
+              </button>
+            ))}
           </div>
 
-          <div className="flex items-center gap-4">
-            <div className="h-4 w-px bg-outline-variant"></div>
-            <div className="flex items-center gap-2 text-outline">
-              <span className="material-symbols-outlined text-[16px]">zoom_out</span>
-              <input
-                type="range"
-                min="10"
-                max="100"
-                value={zoomLevel}
-                onChange={(e) => setZoomLevel(Number(e.target.value))}
-                className="w-24 h-1 bg-surface-container-highest rounded-full accent-primary cursor-pointer"
-                aria-label="Zoom timeline"
-              />
-              <span className="material-symbols-outlined text-[16px]">zoom_in</span>
-            </div>
+          <div className="toolbar-zoom">
+            <span className="material-symbols-outlined zoom-icon">zoom_out</span>
+            <input
+              type="range" min="10" max="100" value={zoomLevel}
+              onChange={(e) => setZoomLevel(Number(e.target.value))}
+              className="zoom-slider"
+              aria-label="Zoom timeline"
+            />
+            <span className="material-symbols-outlined zoom-icon">zoom_in</span>
           </div>
         </div>
 
-        {/* Timeline Tracks Area */}
-        <div className="flex-1 overflow-y-auto overflow-x-hidden relative flex">
-          {/* Track Headers (Left fixed column) */}
-          <div className="w-32 flex-shrink-0 bg-surface-container-low border-r border-surface-container-highest sticky left-0 z-10 flex flex-col gap-[2px] p-2">
-            {/* Time Ruler Header */}
-            <div className="h-6 bg-surface-container-lowest border-b border-surface-container-highest"></div>
-            
+        {/* Timeline body */}
+        <div className="timeline-body">
+          {/* Track header column */}
+          <div className="track-headers-column">
+            <div className="ruler-corner"></div>
             {displaySpeakers.map((speaker, idx) => (
-              <div
-                key={speaker}
-                className={`h-16 bg-surface-container flex flex-col justify-center px-2 border-l-2 relative group hover:bg-surface-container-highest transition-colors ${
-                  idx % 2 === 0 ? 'border-secondary' : 'border-tertiary-container'
-                }`}
-              >
-                <div className="flex justify-between items-center w-full">
-                  <span className="font-label-sm text-label-sm text-on-surface">
-                    V{idx + 1}: {speaker.replace('SPEAKER_', 'Spk ')}
+              <div key={speaker} className={`track-header border-speaker-${idx % 4}`}>
+                <span className="track-name" title={speaker}>
+                  V{idx + 1}: {speaker.replace('SPEAKER_', 'Spk ')}
+                </span>
+                <button
+                  type="button"
+                  className="mute-btn"
+                  onClick={() => toggleTrackMute(speaker)}
+                  title="Toggle Mute"
+                >
+                  <span className="material-symbols-outlined">
+                    {mutedTracks[speaker] ? 'volume_off' : 'volume_up'}
                   </span>
-                  <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
-                      type="button"
-                      onClick={() => toggleTrackMute(speaker)}
-                      className="text-outline hover:text-on-surface cursor-pointer"
-                    >
-                      <span className="material-symbols-outlined text-[14px]">
-                        {mutedTracks[speaker] ? 'volume_off' : 'volume_up'}
-                      </span>
-                    </button>
-                  </div>
-                </div>
+                </button>
               </div>
             ))}
-
-            <div className="h-16 bg-surface-container flex flex-col justify-center px-2 border-l-2 border-outline-variant relative group hover:bg-surface-container-highest transition-colors">
-              <div className="flex justify-between items-center w-full">
-                <span className="font-label-sm text-label-sm text-outline">A1: Music</span>
-                <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button
-                    type="button"
-                    onClick={() => toggleTrackMute('a1')}
-                    className="text-outline hover:text-on-surface cursor-pointer"
-                  >
-                    <span className="material-symbols-outlined text-[14px]">
-                      {mutedTracks.a1 ? 'volume_off' : 'volume_up'}
-                    </span>
-                  </button>
-                </div>
-              </div>
+            {/* Music track */}
+            <div className="track-header border-music">
+              <span className="track-name">A1: Music</span>
+              <button type="button" className="mute-btn" onClick={() => toggleTrackMute('a1')} title="Toggle Mute">
+                <span className="material-symbols-outlined">{mutedTracks.a1 ? 'volume_off' : 'volume_up'}</span>
+              </button>
             </div>
           </div>
 
-          {/* Timeline Grid/Content */}
-          <div className="flex-1 relative min-w-[800px] bg-[#1a1a1a] p-2">
-            {/* Time Ruler */}
-            <div className="h-6 bg-surface-container-lowest border-b border-surface-container-highest sticky top-0 z-0 flex items-end px-4 font-mono-ui text-[10px] text-outline-variant select-none">
-              <div className="flex-1 flex justify-between">
-                <span>00:00:00</span>
-                <span>00:00:10</span>
-                <span>00:00:20</span>
-                <span>00:00:30</span>
-                <span>00:00:40</span>
-              </div>
+          {/* Timeline canvas */}
+          <div className="timeline-tracks-canvas">
+            {/* Time ruler */}
+            <div className="time-ruler">
+              {Array.from({ length: 5 }, (_, i) => (
+                <span key={i}>{formatTime((duration / 4) * i)}</span>
+              ))}
             </div>
 
-            {/* Playhead synchronized with HTML5 video player */}
+            {/* Playhead at video currentTime */}
             <div
-              className="absolute top-0 bottom-0 z-20 pointer-events-none bg-primary w-[2px] transition-all duration-75"
+              className="timeline-playhead"
               style={{
                 left: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
               }}
             >
-              <div className="absolute -top-[5px] -left-[4px] w-0 h-0 border-l-[5px] border-r-[5px] border-t-[8px] border-l-transparent border-r-transparent border-t-primary"></div>
+              <div className="playhead-head"></div>
             </div>
 
-            {/* Tracks Container */}
-            <div className="flex flex-col gap-[2px] py-[2px] relative z-0">
-              {/* Grid Lines */}
-              <div
-                className="absolute inset-0 pointer-events-none opacity-10"
-                style={{
-                  backgroundImage: 'linear-gradient(90deg, #958ea0 1px, transparent 1px)',
-                  backgroundSize: '50px 100%',
-                }}
-              ></div>
-
-              {displaySpeakers.map((speaker, idx) => {
-                const speakerSegs = displaySegments.filter((s) => s.speaker === speaker)
-                const isSpeaker1 = idx % 2 === 0
-
-                return (
-                  <div key={speaker} className={`h-16 w-full relative ${!isSpeaker1 ? 'bg-primary/5' : ''}`}>
-                    {speakerSegs.map((seg) => {
-                      const isActiveClip = seg.segment_id === (currentActive?.segment_id ?? '')
-                      return (
-                        <div
-                          key={seg.segment_id}
-                          onClick={() => handleSelectSegment(seg)}
-                          style={clipStyle(seg)}
-                          className={`absolute h-12 top-2 rounded-sm overflow-hidden group cursor-pointer border ${
-                            isActiveClip
-                              ? 'bg-primary/20 border-primary ai-shimmer shadow-[0_0_10px_rgba(208,188,255,0.15)]'
-                              : isSpeaker1
-                              ? 'bg-secondary/10 border-secondary'
-                              : 'bg-primary/10 border-primary/60'
-                          }`}
-                        >
-                          <div className="absolute inset-0 flex items-center px-1">
-                            <svg
-                              className={`w-full h-8 ${isSpeaker1 ? 'text-secondary' : 'text-primary'}`}
-                              fill="none"
-                              preserveAspectRatio="none"
-                              stroke="currentColor"
-                              strokeLinecap="round"
-                              strokeWidth="1.5"
-                              viewBox="0 0 100 20"
-                            >
-                              <path d="M0,10 L5,2 L10,18 L15,5 L20,15 L25,8 L30,12 L35,4 L40,16 L45,10 L50,6 L55,14 L60,3 L65,17 L70,9 L75,11 L80,5 L85,15 L90,8 L95,12 L100,10"></path>
-                            </svg>
-                          </div>
-                          <div className="absolute top-1 left-2 flex flex-col gap-0">
-                            <span className="font-label-sm text-[8px] text-primary/80 truncate">
-                              {seg.translation || seg.text}
-                            </span>
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )
-              })}
-
-              {/* Track 3: Background Music */}
-              <div className="h-16 w-full relative">
-                <div className="absolute left-0 w-full h-12 top-2 bg-surface-container-highest/50 border border-outline-variant rounded-sm overflow-hidden opacity-50">
-                  <div className="absolute inset-0 flex items-center px-1">
-                    <svg className="w-full h-6 text-outline" fill="none" preserveAspectRatio="none" stroke="currentColor" strokeWidth="1" viewBox="0 0 200 20">
-                      <path d="M0,10 Q10,5 20,10 T40,10 T60,10 T80,10 T100,10 T120,10 T140,10 T160,10 T180,10 T200,10"></path>
-                    </svg>
-                  </div>
-                  <span className="absolute top-1 left-2 font-label-sm text-[8px] text-outline">Corporate_Bed_01.wav</span>
+            {/* Speaker track rows from real segments */}
+            {displaySpeakers.map((speaker, idx) => {
+              const speakerSegs = displaySegments.filter((s) => s.speaker === speaker)
+              return (
+                <div key={speaker} className="track-row">
+                  {speakerSegs.map((seg) => {
+                    const isActiveClip = seg.segment_id === (currentActive?.segment_id ?? '')
+                    const clipClass = isActiveClip
+                      ? `clip-block primary-clip${seg.audio === null ? ' ai-shimmer' : ''}`
+                      : `clip-block speaker-clip-${idx % 4}`
+                    return (
+                      <div
+                        key={seg.segment_id}
+                        className={clipClass}
+                        style={clipStyle(seg)}
+                        title={seg.translation || seg.text}
+                        onClick={() => handleSelectSegment(seg)}
+                        role="button"
+                        tabIndex={-1}
+                      >
+                        <svg className="waveform-svg" viewBox="0 0 100 20" preserveAspectRatio="none">
+                          <path
+                            d="M0,10 L5,4 L10,16 L15,6 L20,14 L25,8 L30,12 L35,4 L40,16 L45,10 L50,7 L55,13 L60,4 L65,16 L70,9 L75,11 L80,6 L85,14 L90,8 L95,12 L100,10"
+                            fill="none" stroke="currentColor" strokeWidth="1.5"
+                          />
+                        </svg>
+                        {isActiveClip && (
+                          <span className="clip-subtitle">
+                            {seg.translation || seg.text}
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
+              )
+            })}
+
+            {/* Music track row */}
+            <div className="track-row">
+              <div className="clip-block music-clip" style={{ left: '0%', width: '98%' }}>
+                <svg className="waveform-svg" viewBox="0 0 200 20" preserveAspectRatio="none">
+                  <path d="M0,10 Q10,5 20,10 T40,10 T60,10 T80,10 T100,10 T120,10 T140,10 T160,10 T180,10 T200,10" fill="none" stroke="currentColor" strokeWidth="1" />
+                </svg>
+                <span className="clip-label">Background.wav</span>
               </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
+    </section>
   )
 }

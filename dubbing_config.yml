@@ -57,7 +57,7 @@ voices:
   SPEAKER_09:
     tts_system: higgs
     reference_mode: segment
-duration: 600
+duration: 29
 transcription_model: best
 inner_transcription_system: assemblyai
 emotion_provider: gemini
@@ -68,9 +68,9 @@ timing_max_speed: 1.15
 timing_max_stretch: 1.15
 timing_max_overflow: 0.25
 semantic_split_enabled: true
-tts_preferred_segment_duration: 15.0
-tts_hard_segment_duration: 35.0
-semantic_split_search_window: 10.0
+tts_preferred_segment_duration: 15
+tts_hard_segment_duration: 35
+semantic_split_search_window: 10
 reference_audio_mapping:
   SPEAKER_07: D:\CodexPRJ\DubbLM\.worktrees\higgs-reference-modes\speaker_reference_library\SPEAKER_07\reference.mp3
 reference_text_mapping:

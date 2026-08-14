@@ -83,19 +83,45 @@ export function VoicesView({ client }: { client: ApiClient }) {
 
   const models = options.tts_models?.[profile.tts_system] ?? []
   const voices = options.tts_voices?.[profile.tts_system] ?? []
-  return <section><h1>Voice Profiles</h1>{error && <p role="alert">{error}</p>}<form onSubmit={save}>
-    <label>Profile<select value={profileId} onChange={(e) => selectProfile(e.target.value)}>{Object.keys(profiles).map((id) => <option key={id} value={id}>{id}</option>)}</select></label>
-    <label>Name<input value={profileId} onChange={(e) => setProfileId(e.target.value)} /></label>
-    <label>Provider<select value={profile.tts_system} onChange={(e) => setProfile({ tts_system: e.target.value })}>{options.tts_providers?.map(option)}</select></label>
-    <label>Model<select value={profile.model ?? ''} onChange={(e) => setProfile({ ...profile, model: e.target.value })}><option value="">None</option>{models.map(option)}</select></label>
-    <label>Voice<select value={profile.voice_name ?? ''} onChange={(e) => setProfile({ ...profile, voice_name: e.target.value })}><option value="">None</option>{voices.map(option)}</select></label>
-    <label>Reference<select value={selectedReference} onChange={(e) => setSelectedReference(e.target.value)}><option value="">None</option>{references.map((item) => <option key={item.speaker_id} value={item.speaker_id}>{item.audio.name}</option>)}</select></label>
-    <div className="actions"><button type="submit">Save profile</button><button type="button" onClick={removeProfile}>Delete profile</button></div>
-  </form>
-  <h2>References</h2><label>Speaker label<input value={speaker} onChange={(e) => setSpeaker(e.target.value)} /></label>
-  <form onSubmit={uploadReference}><label>Reference audio<input type="file" accept="audio/*" onChange={(e) => setReferenceFile(e.target.files?.[0])} /></label><label>Reference text<input value={referenceText} onChange={(e) => setReferenceText(e.target.value)} /></label><button type="submit">Upload reference</button></form>
-  <ul>{references.map((item) => <li key={item.speaker_id}><a href={item.audio.url}>{item.audio.name}</a> <button type="button" onClick={() => removeReference(item.speaker_id)}>Delete {item.audio.name}</button></li>)}</ul>
-  <h2>Assignment</h2><button type="button" onClick={assignReference}>Assign profile</button>
+  return <section>
+    <h1>Voice Profiles</h1>
+    {error && <p role="alert">{error}</p>}
+    <form onSubmit={save}>
+      <div className="form-section">
+        <div className="form-section-title">🎤 Voice Profile Configuration</div>
+        <div className="field-grid">
+          <label>Profile<select value={profileId} onChange={(e) => selectProfile(e.target.value)}>{Object.keys(profiles).map((id) => <option key={id} value={id}>{id}</option>)}</select></label>
+          <label>Name<input value={profileId} onChange={(e) => setProfileId(e.target.value)} /></label>
+          <label>Provider<select value={profile.tts_system} onChange={(e) => setProfile({ tts_system: e.target.value })}>{options.tts_providers?.map(option)}</select></label>
+          <label>Model<select value={profile.model ?? ''} onChange={(e) => setProfile({ ...profile, model: e.target.value })}><option value="">None</option>{models.map(option)}</select></label>
+          <label>Voice<select value={profile.voice_name ?? ''} onChange={(e) => setProfile({ ...profile, voice_name: e.target.value })}><option value="">None</option>{voices.map(option)}</select></label>
+          <label>Reference<select value={selectedReference} onChange={(e) => setSelectedReference(e.target.value)}><option value="">None</option>{references.map((item) => <option key={item.speaker_id} value={item.speaker_id}>{item.audio.name}</option>)}</select></label>
+        </div>
+        <div className="actions"><button type="submit">Save profile</button><button type="button" onClick={removeProfile}>Delete profile</button></div>
+      </div>
+    </form>
+
+    <h2>References</h2>
+    <div className="form-section">
+      <div className="form-section-title">🎧 Reference Library</div>
+      <label>Speaker label<input value={speaker} onChange={(e) => setSpeaker(e.target.value)} /></label>
+      <form onSubmit={uploadReference}>
+        <div className="field-grid">
+          <label className="field-file">Reference audio<input type="file" accept="audio/*" onChange={(e) => setReferenceFile(e.target.files?.[0])} /></label>
+          <label>Reference text<input value={referenceText} onChange={(e) => setReferenceText(e.target.value)} /></label>
+        </div>
+        <button type="submit">Upload reference</button>
+      </form>
+      {references.length > 0 && (
+        <ul>{references.map((item) => <li key={item.speaker_id}><a href={item.audio.url}>{item.audio.name}</a> <button type="button" onClick={() => removeReference(item.speaker_id)}>Delete {item.audio.name}</button></li>)}</ul>
+      )}
+    </div>
+
+    <h2>Assignment</h2>
+    <div className="form-section">
+      <div className="form-section-title">🔗 Assign Speaker Reference</div>
+      <button type="button" onClick={assignReference}>Assign profile</button>
+    </div>
   </section>
 }
 
