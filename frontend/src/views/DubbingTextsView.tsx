@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ApiClient } from '../api/types'
 
 interface Job { id: string; status: string }
+interface ProjectSummary { name: string; segment_count: number; job_id: string | null }
 interface SegmentAudio { id: string; name: string; url: string }
 interface Segment {
   segment_id: string; speaker: string; start: number; end: number; text: string; translation: string
@@ -11,10 +12,27 @@ interface TextDocument { revision: string; source: string; segments: Segment[] }
 type EditableText = 'speaker' | 'text' | 'translation' | 'synthesized_text' | 'style_prompt'
 
 export function DubbingTextsView({ client }: { client: ApiClient }) {
-  const [jobs, setJobs] = useState<Job[]>([]); const [jobId, setJobId] = useState(''); const [document, setDocument] = useState<TextDocument>()
+  const [jobs, setJobs] = useState<Job[]>([])
+  const [projects, setProjects] = useState<ProjectSummary[]>([])
+  const [jobId, setJobId] = useState('')
+  const [document, setDocument] = useState<TextDocument>()
   const [dirty, setDirty] = useState(false); const [selected, setSelected] = useState(''); const [error, setError] = useState('')
-  useEffect(() => { client.get<{ jobs: Job[] }>('/api/jobs').then((value) => setJobs(Array.isArray(value.jobs) ? value.jobs : [])).catch(showError) }, [client])
+  useEffect(() => {
+    client.get<{ jobs: Job[] }>('/api/jobs').then((value) => setJobs(Array.isArray(value.jobs) ? value.jobs : [])).catch(showError)
+    client.get<{ projects?: ProjectSummary[] }>('/api/projects').then((value) => setProjects(Array.isArray(value.projects) ? value.projects : [])).catch(() => {})
+  }, [client])
   useEffect(() => { if (!jobId) return; setError(''); client.get<TextDocument>(`/api/jobs/${encodeURIComponent(jobId)}/dubbing-texts`).then((value) => { setDocument(value); setDirty(false); setSelected('') }).catch(showError) }, [client, jobId])
+
+  async function openProject(projectName: string) {
+    if (!projectName) return
+    try {
+      const res = await client.post<{ project_name: string; job: Job }>(`/api/projects/${encodeURIComponent(projectName)}/open`)
+      if (res?.job?.id) {
+        setJobs((prev) => prev.some((j) => j.id === res.job.id) ? prev : [res.job, ...prev])
+        setJobId(res.job.id)
+      }
+    } catch (reason) { showError(reason) }
+  }
 
   function showError(reason: unknown) { setError(reason instanceof Error ? reason.message : String(reason)) }
   function edit(id: string, key: EditableText, value: string) {
@@ -45,7 +63,17 @@ export function DubbingTextsView({ client }: { client: ApiClient }) {
   }
 
   return <section><h1>Dubbing Texts</h1>{error && <p role="alert">{error}</p>}
-    <label>Job<select value={jobId} onChange={(e) => setJobId(e.target.value)}><option value="">Select a job</option>{jobs.map((job) => <option key={job.id} value={job.id}>{job.id} · {job.status}</option>)}</select></label>
+    <div style={{ display: 'flex', gap: '12px', marginBottom: '16px', alignItems: 'center' }}>
+      {projects.length > 0 && (
+        <label>Ready Project (prj/)
+          <select style={{ marginLeft: '8px' }} onChange={(e) => { if (e.target.value) openProject(e.target.value) }} defaultValue="">
+            <option value="">📁 Select a project from prj/...</option>
+            {projects.map((p) => <option key={p.name} value={p.name}>📁 {p.name} {p.segment_count > 0 ? `(${p.segment_count} segments)` : ''}</option>)}
+          </select>
+        </label>
+      )}
+      <label>Job<select style={{ marginLeft: '8px' }} value={jobId} onChange={(e) => setJobId(e.target.value)}><option value="">Select a job</option>{jobs.map((job) => <option key={job.id} value={job.id}>{job.id} · {job.status}</option>)}</select></label>
+    </div>
     {document && <><p>{capitalize(document.source)}</p>{dirty && <p role="status">Unsaved changes</p>}
       <div className="actions"><button type="button" disabled={!dirty} onClick={save}>Save changes</button><button type="button" disabled={!selected} onClick={regenerate}>Regenerate selected</button></div>
       <table><thead><tr><th>Select</th><th>Timing</th><th>Speaker</th><th>Original</th><th>Translated</th><th>Synthesized</th><th>Style instructions</th><th>Audio</th></tr></thead><tbody>{document.segments.map((segment) => <tr key={segment.segment_id} data-testid={`segment-${segment.segment_id}`}>

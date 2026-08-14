@@ -46,4 +46,47 @@ describe('JobsView', () => {
     expect(screen.getByText('Recovered log')).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent('Bad input')
   })
+
+  it('renders ready projects and opens them on click', async () => {
+    const client: ApiClient = {
+      get: vi.fn(async (path: string) => {
+        if (path === '/api/jobs') return { jobs: [] }
+        if (path === '/api/projects') {
+          return {
+            projects: [
+              {
+                name: 'videoplayback7',
+                relative_path: 'prj/videoplayback7',
+                segment_count: 8,
+                video_files: ['videoplayback7_ru.mp4'],
+                audio_files: [],
+                has_video: true,
+                has_subtitles: true,
+                has_artifacts: true,
+                has_transcription: true,
+                job_id: null,
+              },
+            ],
+          }
+        }
+        return {}
+      }) as ApiClient['get'],
+      post: vi.fn().mockResolvedValue({
+        project_name: 'videoplayback7',
+        job: { id: 'prj-job-7', status: 'succeeded', files: [] },
+      }),
+      put: vi.fn(), delete: vi.fn(), upload: vi.fn(),
+      subscribeJobEvents: vi.fn(() => () => undefined),
+    }
+
+    render(<JobsView client={client} />)
+
+    expect(await screen.findByText('Ready Projects in prj/')).toBeInTheDocument()
+    expect(screen.getByText('videoplayback7')).toBeInTheDocument()
+
+    const openBtn = screen.getByRole('button', { name: 'Open as Job' })
+    openBtn.click()
+
+    expect(client.post).toHaveBeenCalledWith('/api/projects/videoplayback7/open')
+  })
 })

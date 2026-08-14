@@ -3,9 +3,22 @@ import type { ApiClient, ConnectionState, JsonValue, SseEvent } from '../api/typ
 
 interface JobFile { id: string; name: string; kind: string; size: number }
 interface Job { id: string; status: string; files: JobFile[] }
+interface ProjectSummary {
+  name: string
+  relative_path: string
+  has_video: boolean
+  has_subtitles: boolean
+  has_artifacts: boolean
+  has_transcription: boolean
+  segment_count: number
+  video_files: string[]
+  audio_files: string[]
+  job_id: string | null
+}
 
 export function JobsView({ client }: { client: ApiClient }) {
   const [jobs, setJobs] = useState<Job[]>([])
+  const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [logs, setLogs] = useState<string[]>([])
   const [connection, setConnection] = useState<ConnectionState>('connected')
   const [error, setError] = useState('')
@@ -17,6 +30,11 @@ export function JobsView({ client }: { client: ApiClient }) {
       setJobs(loadedJobs)
       subscriptions = loadedJobs.filter((job) => job.status === 'queued' || job.status === 'running').map((job) => client.subscribeJobEvents(job.id, receive, { onState: setConnection, onError: (reason) => setError(reason.message) }))
     }).catch(showError)
+
+    client.get<{ projects?: ProjectSummary[] }>('/api/projects').then((res) => {
+      setProjects(Array.isArray(res?.projects) ? res.projects : [])
+    }).catch(() => {})
+
     return () => subscriptions.forEach((close) => close())
 
     function showError(reason: unknown) { setError(reason instanceof Error ? reason.message : String(reason)) }
@@ -50,10 +68,48 @@ export function JobsView({ client }: { client: ApiClient }) {
     }
   }, [client])
 
+  async function openProject(projectName: string) {
+    try {
+      const res = await client.post<{ project_name: string; job: Job }>(`/api/projects/${encodeURIComponent(projectName)}/open`)
+      if (res?.job) {
+        setJobs((prev) => prev.some((j) => j.id === res.job.id) ? prev : [res.job, ...prev])
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }
+
   return <section>
     <h1>Jobs</h1>
     {error && <p role="alert">{error}</p>}
     <p role="status">{connection === 'reconnecting' ? 'Reconnecting…' : 'Live updates connected'}</p>
+
+    {projects.length > 0 && (
+      <>
+        <h2>Ready Projects in prj/</h2>
+        <table>
+          <thead>
+            <tr><th>Project</th><th>Segments</th><th>Video</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            {projects.map((p) => (
+              <tr key={p.name}>
+                <td>📁 <strong>{p.name}</strong> ({p.relative_path})</td>
+                <td>{p.segment_count > 0 ? `${p.segment_count} segments` : '—'}</td>
+                <td>{p.video_files.join(', ') || 'No video'}</td>
+                <td>
+                  <button type="button" onClick={() => openProject(p.name)}>
+                    Open as Job
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </>
+    )}
+
+    <h2>All Active Jobs</h2>
     <table><thead><tr><th>Job</th><th>Status</th><th>Outputs</th></tr></thead><tbody>{jobs.map((job) => <tr key={job.id} data-job-id={job.id}><td>{job.id}</td><td>{job.status}</td><td>
       {job.files.map((file) => <a key={file.id} href={`/api/jobs/${encodeURIComponent(job.id)}/files/${encodeURIComponent(file.id)}`}>{file.name}</a>)}
     </td></tr>)}</tbody></table>

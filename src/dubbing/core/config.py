@@ -206,8 +206,22 @@ class DubbingConfig:
             sys.exit(1)
 
         input_path = Path(input_file)
-        project_dir = DEFAULT_PROJECTS_ROOT / input_path.stem
-        artifacts_dir = project_dir / "artifacts"
+        if self.config.get("project_dir"):
+            project_dir = Path(self.config["project_dir"])
+        elif input_path.parent != Path(".") and (input_path.parent / "artifacts").is_dir():
+            project_dir = input_path.parent
+        else:
+            projects_root = (
+                Path(os.environ["DUBBLM_PROJECTS_ROOT"])
+                if os.environ.get("DUBBLM_PROJECTS_ROOT")
+                else DEFAULT_PROJECTS_ROOT
+            )
+            project_dir = projects_root / input_path.stem
+
+        if self.config.get("artifacts_dir"):
+            artifacts_dir = Path(self.config["artifacts_dir"])
+        else:
+            artifacts_dir = project_dir / "artifacts"
         project_dir.mkdir(parents=True, exist_ok=True)
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 

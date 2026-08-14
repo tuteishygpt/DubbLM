@@ -280,8 +280,21 @@ class DubbingTextService:
             source = "translation"
             reusable = True
             active_cache = context.cache_path
+        elif context.artifact_path.is_file():
+            segments = self._seed_from_dubbing_texts_tsv(context.artifact_path)
+            self._attach_audio_chunks(segments, context.config)
+            source = "dubbing_texts_tsv"
+            reusable = True
+            active_cache = context.cache_path
+        elif self._has_debug_translations(context.config):
+            segments = self._seed_from_translations_and_transcription(context.config)
+            self._attach_audio_chunks(segments, context.config)
+            source = "translations_tsv"
+            reusable = True
+            active_cache = context.cache_path
         else:
             segments = self._seed_from_transcription(context.config)
+            self._attach_audio_chunks(segments, context.config)
             source = "transcription"
             reusable = not (
                 self._config_get(context.config, "isolated_tracks")
@@ -319,23 +332,27 @@ class DubbingTextService:
         audio: SegmentAudio | None = None
         media_id = str(segment.get("synthesized_audio_ref") or "").strip()
         if media_id:
-            record = self._media_store.get(owner_id=owner, media_id=media_id)
-            media_id = self._record_value(record, "id", "media_id")
-            url = self._record_value(record, "url")
-            if not url:
-                if self._job_repository is None:
-                    raise DubbingTextValidationError(
-                        "A job repository is required to authorize synthesized audio."
+            try:
+                record = self._media_store.get(owner_id=owner, media_id=media_id)
+            except Exception:
+                record = None
+            if record is not None:
+                media_id = self._record_value(record, "id", "media_id")
+                url = self._record_value(record, "url")
+                if not url:
+                    if self._job_repository is None:
+                        raise DubbingTextValidationError(
+                            "A job repository is required to authorize synthesized audio."
+                        )
+                    url = (
+                        f"/api/jobs/{quote(job_id, safe='')}/files/"
+                        f"{quote(media_id, safe='')}"
                     )
-                url = (
-                    f"/api/jobs/{quote(job_id, safe='')}/files/"
-                    f"{quote(media_id, safe='')}"
+                audio = SegmentAudio(
+                    id=media_id,
+                    name=self._record_value(record, "name") or "segment audio",
+                    url=url,
                 )
-            audio = SegmentAudio(
-                id=media_id,
-                name=self._record_value(record, "name") or "segment audio",
-                url=url,
-            )
         return DubbingTextSegment(
             segment_id=str(segment.get("segment_id") or ""),
             speaker=str(segment.get("speaker") or ""),
@@ -351,6 +368,7 @@ class DubbingTextService:
     def _ensure_audio_refs(
         self, owner: str, job_id: str, state: _LoadedState
     ) -> None:
+        self._attach_audio_chunks(state.segments, state.context.config)
         changed = False
         records: list[object] = []
         for segment in state.segments:
@@ -358,9 +376,13 @@ class DubbingTextService:
             if not audio_path or not Path(audio_path).is_file():
                 continue
             media_id = str(segment.get("synthesized_audio_ref") or "").strip()
+            record = None
             if media_id:
-                record = self._media_store.get(owner_id=owner, media_id=media_id)
-            else:
+                try:
+                    record = self._media_store.get(owner_id=owner, media_id=media_id)
+                except Exception:
+                    record = None
+            if record is None:
                 record = self._media_store.register(
                     owner_id=owner,
                     path=audio_path,
@@ -587,6 +609,103 @@ class DubbingTextService:
         return None
 
     @staticmethod
+    def _seed_from_dubbing_texts_tsv(path: Path) -> list[dict[str, Any]]:
+        segments: list[dict[str, Any]] = []
+        if not path.is_file():
+            raise DubbingTextNotFoundError(f"Dubbing texts TSV not found: {path}.")
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            reader = csv.DictReader(f, delimiter="\t")
+            for row in reader:
+                speaker = (row.get("speaker") or "SPEAKER_00").strip()
+                start = DubbingTextService._parse_seconds(row.get("start", 0))
+                end = DubbingTextService._parse_seconds(row.get("end", 0))
+                orig = (row.get("original") or row.get("text") or "").strip()
+                trans = (row.get("translation") or orig).strip()
+                synth = (row.get("synthesized_text") or trans).strip()
+                style = (row.get("style_prompt") or "").strip()
+                audio_file = (row.get("audio_file") or "").strip()
+                seg: dict[str, Any] = {
+                    "speaker": speaker,
+                    "start": start,
+                    "end": end,
+                    "text": orig,
+                    "translation": trans,
+                    "short_translation": trans,
+                    "very_short_translation": trans,
+                    "long_translation": trans,
+                    "synthesized_text": synth,
+                    "style_prompt": style,
+                    "emotion": "Neutral",
+                }
+                if row.get("segment_id"):
+                    seg["segment_id"] = str(row["segment_id"]).strip()
+                if audio_file:
+                    audio_path = Path(audio_file)
+                    if not audio_path.is_file():
+                        cand = path.parent / "audio_chunks" / audio_path.name
+                        if cand.is_file():
+                            audio_path = cand
+                        else:
+                            cand2 = path.parent / "su_audio_chunks" / audio_path.name
+                            if cand2.is_file():
+                                audio_path = cand2
+                    if audio_path.is_file():
+                        seg["synthesized_speech_file"] = str(audio_path)
+                segments.append(seg)
+        if not segments:
+            raise DubbingTextValidationError(f"Dubbing texts TSV is empty: {path}.")
+        return segments
+
+    @staticmethod
+    def _has_debug_translations(config: object) -> bool:
+        debug_dir = DubbingTextService._config_get(config, "debug_dir", "")
+        translations_file = Path(str(debug_dir or "")) / "translations.tsv"
+        transcription_file = Path(str(DubbingTextService._config_get(config, "transcription_path", "") or ""))
+        return translations_file.is_file() and transcription_file.is_file()
+
+    @staticmethod
+    def _seed_from_translations_and_transcription(config: object) -> list[dict[str, Any]]:
+        debug_dir = DubbingTextService._config_get(config, "debug_dir", "")
+        translations_file = Path(str(debug_dir or "")) / "translations.tsv"
+        raw_segments = DubbingTextService._seed_from_transcription(config)
+        translations: list[str] = []
+        if translations_file.is_file():
+            with translations_file.open("r", encoding="utf-8", errors="ignore") as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                for row in reader:
+                    tr = row.get("translation") or row.get("translated") or ""
+                    if tr:
+                        translations.append(tr.strip())
+        for idx, seg in enumerate(raw_segments):
+            if idx < len(translations):
+                tr = translations[idx]
+                seg["translation"] = tr
+                seg["short_translation"] = tr
+                seg["very_short_translation"] = tr
+                seg["long_translation"] = tr
+                seg["synthesized_text"] = tr
+        return raw_segments
+
+    @staticmethod
+    def _attach_audio_chunks(segments: list[dict[str, Any]], config: object) -> None:
+        su_chunks_dir = Path(str(DubbingTextService._config_get(config, "su_audio_chunks_dir", "") or ""))
+        chunks_dir = Path(str(DubbingTextService._config_get(config, "audio_chunks_dir", "") or ""))
+
+        for idx, seg in enumerate(segments):
+            if seg.get("synthesized_speech_file") and Path(str(seg["synthesized_speech_file"])).is_file():
+                continue
+            candidates = [
+                su_chunks_dir / f"timed_{idx}.wav",
+                su_chunks_dir / f"measure_{idx}.wav",
+                su_chunks_dir / f"tempo_{idx}.wav",
+                chunks_dir / f"{idx}.wav",
+            ]
+            for cand in candidates:
+                if cand.is_file():
+                    seg["synthesized_speech_file"] = str(cand)
+                    break
+
+    @staticmethod
     def _seed_from_transcription(config: object) -> list[dict[str, Any]]:
         path_value = DubbingTextService._config_get(config, "transcription_path", "")
         path = Path(str(path_value or ""))
@@ -759,11 +878,19 @@ class DubbingTextService:
         if not isinstance(overrides, Mapping):
             raise DubbingTextValidationError("Dubbing text configuration must be a mapping.")
         config = build_config_from_overrides(dict(overrides))
-        audio_path = Path(str(config.get("audio_artifacts_dir"))) / "source.wav"
+        audio_artifacts_dir = Path(str(config.get("audio_artifacts_dir", "")))
+        audio_path = audio_artifacts_dir / "source.wav"
         if not audio_path.is_file():
-            raise DubbingTextNotFoundError(
-                f"Expected extracted source audio at {audio_path}. Run transcribe_only first."
-            )
+            if (audio_artifacts_dir / "output.wav").is_file():
+                audio_path = audio_artifacts_dir / "output.wav"
+            elif (audio_artifacts_dir / "background.wav").is_file():
+                audio_path = audio_artifacts_dir / "background.wav"
+            elif Path(str(config.get("input", ""))).is_file():
+                audio_path = Path(str(config.get("input")))
+            else:
+                raise DubbingTextNotFoundError(
+                    f"Expected extracted source audio at {audio_path}. Run transcribe_only first."
+                )
         cache_manager = CacheManager(use_cache=True, input_file=config.get("input"))
         key_builder = SmartDubbing.__new__(SmartDubbing)
         key_builder.config = config

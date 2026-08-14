@@ -15,16 +15,17 @@ from fastapi.staticfiles import StaticFiles
 from .dependencies import AnonymousCurrentUser
 from .dubbing_texts import DubbingTextConflictError, DubbingTextError, DubbingTextNotFoundError, DubbingTextValidationError, DubbingTextWriteError, DubbingTextService
 from .jobs import FileJobRepository, JobNotFoundError, JobRepositoryError, JobService, JobValidationError, JobWriteError
+from .projects import ProjectError, ProjectNotFoundError, ProjectService, ProjectValidationError
 from .queue import InProcessJobQueue
 from .references import ReferenceConflictError, ReferenceError, ReferenceLibraryService, ReferenceNotFoundError, ReferenceValidationError, ReferenceWriteError
 from .settings import SettingsConflictError, SettingsError, SettingsService, SettingsValidationError, SettingsWriteError
 from .storage import DEFAULT_MAX_UPLOAD_BYTES, FileMediaStore, MediaConflictError, MediaNotFoundError, MediaStoreError, MediaValidationError, MediaWriteError
-from .routes import config, dubbing_texts, jobs, references, uploads, voices
+from .routes import config, dubbing_texts, jobs, projects, references, uploads, voices
 
 
-NOT_FOUND = (JobNotFoundError, MediaNotFoundError, ReferenceNotFoundError, DubbingTextNotFoundError)
+NOT_FOUND = (JobNotFoundError, MediaNotFoundError, ReferenceNotFoundError, DubbingTextNotFoundError, ProjectNotFoundError)
 CONFLICT = (SettingsConflictError, ReferenceConflictError, DubbingTextConflictError, MediaConflictError)
-VALIDATION = (SettingsValidationError, ReferenceValidationError, DubbingTextValidationError, JobValidationError, MediaValidationError)
+VALIDATION = (SettingsValidationError, ReferenceValidationError, DubbingTextValidationError, JobValidationError, MediaValidationError, ProjectValidationError)
 WRITE = (SettingsWriteError, ReferenceWriteError, DubbingTextWriteError, JobWriteError, MediaWriteError)
 
 
@@ -37,6 +38,7 @@ def create_app(
     *,
     root: str | Path | None = None,
     config_path: str | Path | None = None,
+    projects_root: str | Path | None = None,
     settings_service=None,
     media_store=None,
     job_repository=None,
@@ -44,6 +46,7 @@ def create_app(
     job_queue=None,
     reference_service=None,
     dubbing_text_service=None,
+    project_service=None,
     current_user=None,
     heartbeat_interval: float = 15.0,
     sse_poll_interval: float = 0.25,
@@ -68,6 +71,12 @@ def create_app(
     )
     reference_service = reference_service or ReferenceLibraryService(data_root / "references", media_store)
     dubbing_text_service = dubbing_text_service or DubbingTextService(media_store, job_repository=job_repository)
+    project_service = project_service or ProjectService(
+        projects_root,
+        job_repository=job_repository,
+        media_store=media_store,
+        config_path=config_path or "dubbing_config.yml",
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -86,6 +95,7 @@ def create_app(
     app.state.job_queue = job_queue
     app.state.reference_service = reference_service
     app.state.dubbing_text_service = dubbing_text_service
+    app.state.project_service = project_service
     app.state.heartbeat_interval = heartbeat_interval
     app.state.sse_poll_interval = sse_poll_interval
 
@@ -108,10 +118,10 @@ def create_app(
             return _error("write_error", str(exc), 500)
         return _error("internal_error", "Internal server error.", 500)
 
-    for error_type in (SettingsError, ReferenceError, DubbingTextError, JobRepositoryError, MediaStoreError):
+    for error_type in (SettingsError, ReferenceError, DubbingTextError, JobRepositoryError, MediaStoreError, ProjectError):
         app.add_exception_handler(error_type, domain_error)
 
-    for router in (config.router, uploads.router, jobs.router, voices.router, references.router, dubbing_texts.router):
+    for router in (config.router, uploads.router, jobs.router, voices.router, references.router, dubbing_texts.router, projects.router):
         app.include_router(router)
 
     if static_dir is not None:

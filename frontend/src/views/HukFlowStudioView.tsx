@@ -4,6 +4,19 @@ import type { ApiClient } from '../api/types'
 // ── API types ─────────────────────────────────────────────────────────────
 interface Job { id: string; status: string }
 
+interface ProjectSummary {
+  name: string
+  relative_path: string
+  has_video: boolean
+  has_subtitles: boolean
+  has_artifacts: boolean
+  has_transcription: boolean
+  segment_count: number
+  video_files: string[]
+  audio_files: string[]
+  job_id: string | null
+}
+
 interface JobFile { id: string; name: string; kind: string; size: number; url?: string }
 
 interface SegmentAudio { id: string; name: string; url: string }
@@ -41,6 +54,8 @@ function formatTimecode(seconds: number): string {
 export function HukFlowStudioView({ client }: { client?: ApiClient }) {
   // ── jobs / document state ─────────────────────────────────────────────────
   const [jobs, setJobs] = useState<Job[]>([])
+  const [projects, setProjects] = useState<ProjectSummary[]>([])
+  const [selectedProjectName, setSelectedProjectName] = useState<string>('')
   const [selectedJobId, setSelectedJobId] = useState<string>('')
   const [document, setDocument] = useState<TextDocument | null>(null)
   const [segments, setSegments] = useState<Segment[]>([])
@@ -68,6 +83,15 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [statusMessage, setStatusMessage] = useState('')
+  const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({})
+  const scrollAreaRef = useRef<HTMLDivElement>(null)
+
+  const toggleSource = (segmentId: string) => {
+    setExpandedSources((prev) => ({
+      ...prev,
+      [segmentId]: !prev[segmentId],
+    }))
+  }
 
   // Fallback demo segments ONLY when running in standalone preview mode without API client
   const isStandaloneDemo = !client && !selectedJobId
@@ -98,7 +122,7 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
 
   const displaySpeakers = [...new Set(displaySegments.map((s) => s.speaker))]
 
-  // ── load jobs ─────────────────────────────────────────────────────────────
+  // ── load jobs and ready projects ──────────────────────────────────────────
   useEffect(() => {
     if (!client) return
     client.get<{ jobs: Job[] }>('/api/jobs')
@@ -108,6 +132,13 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
         if (list.length > 0) setSelectedJobId((prev) => prev || list[0].id)
       })
       .catch(() => {/* demo mode */})
+
+    client.get<{ projects?: ProjectSummary[] }>('/api/projects')
+      .then((res) => {
+        const list = Array.isArray(res?.projects) ? res.projects : []
+        setProjects(list)
+      })
+      .catch(() => {/* ignore if endpoint not present */})
   }, [client])
 
   // ── load dubbing-texts and files when open job changes ────────────────────
@@ -199,6 +230,32 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
     setDirty(true)
   }
 
+  // ── open ready project from prj/ ───────────────────────────────────────────
+  const handleOpenProject = async (projectName: string) => {
+    if (!client || !projectName) return
+    setSelectedProjectName(projectName)
+    setIsLoading(true)
+    setStatusMessage(`Opening project ${projectName}…`)
+    try {
+      const res = await client.post<{ project_name: string; job: Job }>(
+        `/api/projects/${encodeURIComponent(projectName)}/open`,
+      )
+      if (res?.job?.id) {
+        setJobs((prev) => {
+          const exists = prev.some((j) => j.id === res.job.id)
+          return exists ? prev : [res.job, ...prev]
+        })
+        setSelectedJobId(res.job.id)
+        setStatusMessage(`Opened project ${projectName}`)
+      }
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setIsLoading(false)
+      setTimeout(() => setStatusMessage(''), 3000)
+    }
+  }
+
   // ── save all changes ───────────────────────────────────────────────────────
   const handleSave = async () => {
     if (!client || !selectedJobId || !document) return
@@ -252,7 +309,7 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
   const toggleTrackMute = (trackId: string) =>
     setMutedTracks((prev) => ({ ...prev, [trackId]: !prev[trackId] }))
 
-  // ── search filter ─────────────────────────────────────────────────────────
+  // ── search filter & active segment ───────────────────────────────────────
   const filtered = displaySegments.filter(
     (s) =>
       s.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -260,11 +317,16 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
       s.speaker.toLowerCase().includes(searchQuery.toLowerCase()),
   )
 
-  // Find segment corresponding to current playback time (if currentTime falls within segment bounds)
-  const liveSubSegment = displaySegments.find((s) => currentTime >= s.start && currentTime <= s.end)
+  const visibleSegments = searchQuery.trim() ? filtered : displaySegments
 
-  // Current active segment: live segment during playback/scrubbing, otherwise selected segment, fallback to first segment
-  const currentActive = liveSubSegment ?? displaySegments.find((s) => s.segment_id === activeSegmentId) ?? displaySegments[0]
+  // Find segment corresponding to current playback time (if currentTime falls within segment bounds)
+  const liveSubSegment = visibleSegments.find((s) => currentTime >= s.start && currentTime <= s.end)
+
+  // Current active segment: live segment during playback/scrubbing, otherwise selected segment, fallback to first visible segment
+  const currentActive =
+    liveSubSegment ??
+    visibleSegments.find((s) => s.segment_id === activeSegmentId) ??
+    (visibleSegments.length > 0 ? visibleSegments[0] : null)
 
   // ── timeline clip positions (mastered to video duration when present) ───────────
   const maxTime = displaySegments.length > 0 ? Math.max(...displaySegments.map((s) => s.end)) : 0
@@ -313,6 +375,15 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
     setActiveSegmentId(seg.segment_id)
     seekToTime(seg.start)
   }
+
+  // Auto-scroll active card into view when currentActive changes
+  useEffect(() => {
+    if (!currentActive?.segment_id || !scrollAreaRef.current) return
+    const el = scrollAreaRef.current.querySelector<HTMLElement>(`[data-testid="transcript-card-${currentActive.segment_id}"]`)
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }, [currentActive?.segment_id])
 
   const handleScrubberClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect()
@@ -371,12 +442,33 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
           <div className="pane-header">
             <div className="pane-header-left">
               <h3 className="pane-title">Localization Transcript</h3>
+              {projects.length > 0 && (
+                <select
+                  aria-label="Ready project selector"
+                  className="studio-job-select studio-project-select"
+                  value={selectedProjectName}
+                  onChange={(e) => {
+                    const val = e.target.value
+                    if (val) handleOpenProject(val)
+                  }}
+                >
+                  <option value="">📁 Open Project (prj/)...</option>
+                  {projects.map((p) => (
+                    <option key={p.name} value={p.name}>
+                      📁 {p.name} {p.segment_count > 0 ? `(${p.segment_count} segments)` : ''}
+                    </option>
+                  ))}
+                </select>
+              )}
               {jobs.length > 0 && (
                 <select
                   aria-label="Job selector"
                   className="studio-job-select"
                   value={selectedJobId}
-                  onChange={(e) => setSelectedJobId(e.target.value)}
+                  onChange={(e) => {
+                    setSelectedJobId(e.target.value)
+                    setSelectedProjectName('')
+                  }}
                 >
                   {jobs.map((j) => (
                     <option key={j.id} value={j.id}>
@@ -419,7 +511,7 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
             <div className="studio-error-banner" role="alert">{loadError}</div>
           )}
 
-          <div className="transcript-scroll-area">
+          <div className="transcript-scroll-area" ref={scrollAreaRef}>
             {isLoading && (
               <div className="transcript-loading">
                 <span className="material-symbols-outlined spin-anim">sync</span>
@@ -427,75 +519,125 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
               </div>
             )}
 
-            {!isLoading && filtered.length === 0 && (
+            {!isLoading && visibleSegments.length === 0 && (
               <div className="transcript-empty" style={{ padding: '24px', textAlign: 'center', color: '#938f99' }}>
                 <span className="material-symbols-outlined" style={{ fontSize: '36px', marginBottom: '8px', display: 'block' }}>subtitles_off</span>
                 <p>{searchQuery ? 'No matching segments found' : 'No dubbing texts available for this job'}</p>
               </div>
             )}
 
-            {filtered.map((seg, idx) => {
-              const isActive = seg.segment_id === (currentActive?.segment_id ?? '')
-              const hasAudio = seg.audio !== null
-              const speakerSlot = SPEAKER_COLOURS[idx % 4]
+            {!isLoading &&
+              visibleSegments.map((seg, idx) => {
+                const isActive = seg.segment_id === (currentActive?.segment_id ?? '')
+                const hasAudio = seg.audio !== null
+                const speakerSlot = SPEAKER_COLOURS[idx % 4]
+                const isSourceExpanded = Boolean(expandedSources[seg.segment_id])
+                // Calculate dynamic row count based on text length
+                const dynamicRows = Math.max(3, Math.min(8, Math.ceil((seg.translation.length || 1) / 45)))
 
-              return (
-                <div
-                  key={seg.segment_id}
-                  onClick={() => handleSelectSegment(seg)}
-                  className={`transcript-card ${isActive ? 'active-card' : ''}`}
-                  data-testid={`transcript-card-${seg.segment_id}`}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSelectSegment(seg)}
-                >
-                  <div className={`card-accent-line ${speakerSlot}`}></div>
+                return (
+                  <div
+                    key={seg.segment_id}
+                    id={`transcript-card-${seg.segment_id}`}
+                    onClick={() => handleSelectSegment(seg)}
+                    className={`transcript-card ${isActive ? 'active-card' : 'inactive-card'}`}
+                    data-testid={`transcript-card-${seg.segment_id}`}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => e.key === 'Enter' && handleSelectSegment(seg)}
+                  >
+                    <div className={`card-accent-line ${speakerSlot}`}></div>
 
-                  <div className="card-header">
-                    <div className="speaker-info">
-                      <span className={`speaker-dot speaker-dot-${idx % 4}`}></span>
-                      <span className="speaker-name">{seg.speaker}</span>
-                      <span className="time-badge">
-                        {formatTime(seg.start)} – {formatTime(seg.end)}
-                      </span>
-                    </div>
-                    <div className="card-status-row">
-                      {hasAudio ? (
-                        <span className="material-symbols-outlined status-completed" title="Audio ready">check_circle</span>
-                      ) : (
-                        <span className="material-symbols-outlined status-pending" title="Audio missing">pending</span>
-                      )}
-                      {seg.audio && (
-                        <a
-                          href={seg.audio.url}
-                          className="audio-play-link"
-                          title={`Play ${seg.audio.name}`}
-                          onClick={(e) => e.stopPropagation()}
+                    <div className="card-header">
+                      <div className="speaker-info">
+                        <span className={`speaker-dot speaker-dot-${idx % 4}`}></span>
+                        <span className="speaker-name">{seg.speaker}</span>
+                        <span className="time-badge">
+                          {formatTime(seg.start)} – {formatTime(seg.end)}
+                        </span>
+                        {visibleSegments.length > 1 && (
+                          <span className="segment-stepper-label">
+                            ({idx + 1}/{visibleSegments.length})
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="card-status-row">
+                        {/* Source text toggle icon button */}
+                        <button
+                          type="button"
+                          className={`source-toggle-btn ${isSourceExpanded ? 'active' : ''}`}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            toggleSource(seg.segment_id)
+                          }}
+                          title={`Source: ${seg.text}`}
+                          aria-label={`View source text for ${seg.speaker}`}
                         >
-                          <span className="material-symbols-outlined">play_circle</span>
-                        </a>
-                      )}
-                    </div>
-                  </div>
+                          <span className="material-symbols-outlined source-icon">menu_book</span>
+                          <span className="source-toggle-label">EN</span>
+                        </button>
 
-                  <div className="card-grid">
-                    <div className="source-col">
-                      <p className="col-label">Source (EN)</p>
-                      <p className={`source-text source-text-${speakerSlot.replace('speaker-', '')}`}>{seg.text}</p>
-                    </div>
+                        {hasAudio ? (
+                          <span className="material-symbols-outlined status-completed" title="Audio ready">check_circle</span>
+                        ) : (
+                          <span className="material-symbols-outlined status-pending" title="Audio missing">pending</span>
+                        )}
 
-                    <div className="dubbed-col">
-                      <p className="col-label">Dubbed (BE)</p>
-                      {isActive ? (
-                        <div className="editable-dubbed-wrapper">
-                          <textarea
-                            className="dubbed-textarea"
-                            value={seg.translation}
-                            onChange={(e) => handleTranslationChange(seg.segment_id, e.target.value)}
+                        {seg.audio && (
+                          <a
+                            href={seg.audio.url}
+                            className="audio-play-link"
+                            title={`Play ${seg.audio.name}`}
                             onClick={(e) => e.stopPropagation()}
-                            rows={3}
-                            aria-label={`Dubbed text ${seg.speaker}`}
-                          />
+                          >
+                            <span className="material-symbols-outlined">play_circle</span>
+                          </a>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Expanded Source Text Drawer */}
+                    {isSourceExpanded && (
+                      <div className="source-drawer" onClick={(e) => e.stopPropagation()}>
+                        <div className="source-drawer-header">
+                          <span className="col-label">Source ({seg.speaker})</span>
+                          <button
+                            type="button"
+                            className="icon-btn close-source-btn"
+                            onClick={() => toggleSource(seg.segment_id)}
+                            title="Hide source text"
+                          >
+                            <span className="material-symbols-outlined">close</span>
+                          </button>
+                        </div>
+                        <p className={`source-text source-text-${speakerSlot.replace('speaker-', '')}`}>
+                          {seg.text}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Dubbed Editor — full width with dynamic height */}
+                    <div className="active-dubbed-area">
+                      <div className="dubbed-area-header">
+                        <span className="col-label">Dubbed (BE)</span>
+                        <span className="text-count-badge">{seg.translation.length} chars</span>
+                      </div>
+                      <div className="editable-dubbed-wrapper">
+                        <textarea
+                          className="dubbed-textarea"
+                          value={seg.translation}
+                          onChange={(e) => handleTranslationChange(seg.segment_id, e.target.value)}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            handleSelectSegment(seg)
+                          }}
+                          onFocus={() => handleSelectSegment(seg)}
+                          rows={dynamicRows}
+                          aria-label={`Dubbed text ${seg.speaker}`}
+                          placeholder="Dubbed text in Belarusian..."
+                        />
+                        {isActive && (
                           <button
                             type="button"
                             className={`regenerate-btn ${isRegenerating ? 'spinning' : ''}`}
@@ -508,17 +650,12 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
                           >
                             <span className="material-symbols-outlined">autorenew</span>
                           </button>
-                        </div>
-                      ) : (
-                        <div className="dubbed-read-only">
-                          {seg.translation || <em className="empty-translation">No translation</em>}
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-              )
-            })}
+                )
+              })}
           </div>
         </div>
 

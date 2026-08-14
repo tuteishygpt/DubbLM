@@ -54,9 +54,8 @@ describe('HukFlowStudioView', () => {
     // Heading exists for a11y
     expect(screen.getByRole('heading', { name: 'HukFlow Studio', level: 1 })).toBeInTheDocument()
 
-    // Waits for segments to load
+    // Waits for first segment to load
     expect(await screen.findByText('SPEAKER_00')).toBeInTheDocument()
-    expect(screen.getByText('SPEAKER_01')).toBeInTheDocument()
 
     // Jobs API called first
     expect(client.get).toHaveBeenCalledWith('/api/jobs')
@@ -66,18 +65,22 @@ describe('HukFlowStudioView', () => {
       expect(client.get).toHaveBeenCalledWith('/api/jobs/job-1/dubbing-texts')
     )
 
-    // First segment source text visible
+    // Both segments render their dubbed textarea so next segment fills remaining space
+    expect(screen.getByLabelText('Dubbed text SPEAKER_00')).toBeInTheDocument()
+    expect(screen.getByLabelText('Dubbed text SPEAKER_01')).toBeInTheDocument()
+
+    // Click the source toggle icon on segment 1 to view source text
+    const sourceToggle = screen.getByLabelText('View source text for SPEAKER_00')
+    expect(sourceToggle).toBeInTheDocument()
+    await user.click(sourceToggle)
     expect(screen.getByText(/rapid advancement/)).toBeInTheDocument()
 
-    // Clicking the second card makes it active (editable)
+    // Clicking the second card activates it
     const card2 = screen.getByTestId('transcript-card-seg-a2')
     await user.click(card2)
 
-    // Textarea now visible for the active segment
-    const textarea = await screen.findByLabelText('Dubbed text SPEAKER_01')
-    expect(textarea).toBeInTheDocument()
-
-    // Edit the translation
+    // Edit the translation in the second segment
+    const textarea = screen.getByLabelText('Dubbed text SPEAKER_01')
     await user.clear(textarea)
     await user.type(textarea, 'Новы пераклад')
 
@@ -105,8 +108,9 @@ describe('HukFlowStudioView', () => {
     const playLink = screen.getByTitle('Play seg-a1.wav')
     expect(playLink).toHaveAttribute('href', '/api/jobs/job-1/files/aud-1')
 
-    // Activate second card and regenerate
+    // Activate second segment
     await user.click(screen.getByTestId('transcript-card-seg-a2'))
+
     const regenBtn = await screen.findByTitle('Regenerate Audio')
     await user.click(regenBtn)
 
@@ -125,12 +129,14 @@ describe('HukFlowStudioView', () => {
     await screen.findByText('SPEAKER_00')
 
     const search = screen.getByLabelText('Search transcript')
-    await user.type(search, 'paradigm')
+    // Filter by text belonging to segment 2
+    await user.type(search, 'ethical')
 
-    expect(screen.getByText('SPEAKER_00')).toBeInTheDocument()
-    expect(screen.queryByText('SPEAKER_01')).not.toBeInTheDocument()
+    expect(screen.getByText('SPEAKER_01')).toBeInTheDocument()
+    expect(screen.queryByText('SPEAKER_00')).not.toBeInTheDocument()
 
     await user.clear(search)
+    expect(screen.getByText('SPEAKER_00')).toBeInTheDocument()
     expect(screen.getByText('SPEAKER_01')).toBeInTheDocument()
   })
 
@@ -191,5 +197,58 @@ describe('HukFlowStudioView', () => {
     expect(musicClip).toBeInTheDocument()
     expect(musicClip).toHaveTextContent('custom_background.wav')
     expect(musicClip).toHaveStyle({ width: '100%' })
+  })
+
+  it('lists ready projects and opens selected project from prj/ into HukFlow Studio', async () => {
+    const user = userEvent.setup()
+    const client = makeClient({
+      get: vi.fn(async (path: string) => {
+        if (path === '/api/jobs') return { jobs: [] }
+        if (path === '/api/projects') {
+          return {
+            projects: [
+              {
+                name: 'videoplayback6',
+                relative_path: 'prj/videoplayback6',
+                segment_count: 17,
+                video_files: ['videoplayback6_ru.mp4'],
+                audio_files: [],
+                has_video: true,
+                has_subtitles: true,
+                has_artifacts: true,
+                has_transcription: true,
+                job_id: null,
+              },
+            ],
+          }
+        }
+        if (path.includes('/dubbing-texts')) return textDocument
+        return {}
+      }) as ApiClient['get'],
+      post: vi.fn(async (path: string) => {
+        if (path === '/api/projects/videoplayback6/open') {
+          return {
+            project_name: 'videoplayback6',
+            job: { id: 'prj-job-6', status: 'succeeded' },
+          }
+        }
+        return {}
+      }) as ApiClient['post'],
+    })
+
+    render(<HukFlowStudioView client={client} />)
+
+    const projectSelect = await screen.findByLabelText('Ready project selector')
+    expect(projectSelect).toBeInTheDocument()
+    expect(screen.getByText(/videoplayback6/)).toBeInTheDocument()
+
+    await user.selectOptions(projectSelect, 'videoplayback6')
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/projects/videoplayback6/open')
+    })
+    await waitFor(() => {
+      expect(client.get).toHaveBeenCalledWith('/api/jobs/prj-job-6/dubbing-texts')
+    })
   })
 })
