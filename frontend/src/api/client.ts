@@ -62,7 +62,16 @@ export function createApiClient(dependencies: ClientDependencies = {}): ApiClien
     })
     if (!response.ok) throw await normalizeFailure(response)
     if (response.status === 204) return undefined as T
-    return await response.json() as T
+    const text = await response.text()
+    try {
+      return JSON.parse(text) as T
+    } catch {
+      throw new ApiRequestError(
+        `Invalid JSON response received from ${path}`,
+        'invalid_json',
+        response.status,
+      )
+    }
   }
 
   return {

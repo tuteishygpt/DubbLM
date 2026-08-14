@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../api/types'
@@ -132,5 +132,64 @@ describe('HukFlowStudioView', () => {
 
     await user.clear(search)
     expect(screen.getByText('SPEAKER_01')).toBeInTheDocument()
+  })
+
+  it('correctly updates subtitle overlay during video playback based on segment time bounds', async () => {
+    const client = makeClient()
+    const { container } = render(<HukFlowStudioView client={client} />)
+
+    await screen.findByText('SPEAKER_00')
+
+    const videoEl = container.querySelector('video') as HTMLVideoElement
+    expect(videoEl).toBeInTheDocument()
+
+    const setTimeAndTrigger = (time: number) => {
+      act(() => {
+        Object.defineProperty(videoEl, 'currentTime', {
+          get: () => time,
+          configurable: true,
+        })
+        fireEvent.timeUpdate(videoEl)
+      })
+    }
+
+    // Simulate playback at time 2.0 (inside segment1: 1.5s - 4.0s)
+    setTimeAndTrigger(2.0)
+
+    const subtitleOverlay = container.querySelector('.subtitle-overlay')
+    expect(subtitleOverlay).toBeInTheDocument()
+    expect(subtitleOverlay).toHaveTextContent(segment1.translation)
+
+    // Simulate playback at time 10.0 (in gap between segment1 [1.5-4.0] and segment2 [18.0-20.5])
+    setTimeAndTrigger(10.0)
+    expect(subtitleOverlay).toHaveTextContent('')
+
+    // Simulate playback at time 19.0 (inside segment2: 18.0s - 20.5s)
+    setTimeAndTrigger(19.0)
+    expect(subtitleOverlay).toHaveTextContent(segment2.translation)
+  })
+
+  it('calculates timeline duration dynamically from segment bounds and renders 100% width music track', async () => {
+    const client = makeClient({
+      get: vi.fn(async (path: string) => {
+        if (path === '/api/jobs') return { jobs: [{ id: 'job-1', status: 'succeeded' }] }
+        if (path.includes('/dubbing-texts')) return textDocument
+        if (path.includes('/files')) return { files: [{ id: 'f1', name: 'custom_background.wav', kind: 'background_audio' }] }
+        return {}
+      }) as ApiClient['get'],
+    })
+    const { container } = render(<HukFlowStudioView client={client} />)
+
+    await screen.findByText('SPEAKER_00')
+
+    // Duration should be based on segment max end (20.5s) formatted as 00:00:20:12 instead of hardcoded 60s (00:01:00:00)
+    const timecodeDisplay = container.querySelector('.timecode-display')
+    expect(timecodeDisplay).toHaveTextContent('00:00:20:12')
+
+    // Music clip should reflect custom_background.wav and have 100% width
+    const musicClip = container.querySelector('.music-clip')
+    expect(musicClip).toBeInTheDocument()
+    expect(musicClip).toHaveTextContent('custom_background.wav')
+    expect(musicClip).toHaveStyle({ width: '100%' })
   })
 })

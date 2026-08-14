@@ -1553,9 +1553,8 @@ ol {
   height: 24px;
   background-color: var(--bg-lowest);
   border-bottom: 1px solid var(--border-color);
-  display: flex;
-  justify-content: space-between;
-  padding: 0 1rem;
+  position: relative;
+  padding: 0;
   align-items: flex-end;
   font-family: 'Geist', monospace;
   font-size: 0.625rem;

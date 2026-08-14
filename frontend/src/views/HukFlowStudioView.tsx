@@ -25,8 +25,9 @@ interface TextDocument { revision: string; source: string; segments: Segment[] }
 const SPEAKER_COLOURS = ['speaker-0', 'speaker-1', 'speaker-2', 'speaker-3'] as const
 
 function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
+  const rounded = Math.round(seconds)
+  const m = Math.floor(rounded / 60)
+  const s = Math.floor(rounded % 60)
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
@@ -56,7 +57,9 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
   const [videoSrc, setVideoSrc] = useState<string>('/video.mp4')
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
-  const [videoDuration, setVideoDuration] = useState(60)
+  const [videoDuration, setVideoDuration] = useState(0)
+  const [musicFiles, setMusicFiles] = useState<JobFile[]>([])
+  const [backgroundDurations, setBackgroundDurations] = useState<Record<string, number>>({})
 
   // ── studio tools state ───────────────────────────────────────────────────
   const [activeTool, setActiveTool] = useState<'razor' | 'sync' | 'clone' | null>(null)
@@ -66,8 +69,9 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [statusMessage, setStatusMessage] = useState('')
 
-  // Fallback demo segments if backend is empty
-  const displaySegments = segments.length > 0 ? segments : [
+  // Fallback demo segments ONLY when running in standalone preview mode without API client
+  const isStandaloneDemo = !client && !selectedJobId
+  const displaySegments = isStandaloneDemo && segments.length === 0 ? [
     {
       segment_id: 'demo-1',
       speaker: 'Speaker 1',
@@ -90,7 +94,7 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
       style_prompt: '',
       audio: null
     }
-  ]
+  ] : segments
 
   const displaySpeakers = [...new Set(displaySegments.map((s) => s.speaker))]
 
@@ -111,23 +115,27 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
     if (!client || !selectedJobId) return
     setIsLoading(true)
     setLoadError('')
+    setDocument(null)
+    setSegments([])
+    setActiveSegmentId('')
 
     // 1. Fetch dubbing texts for the selected job
     client
       .get<TextDocument>(`/api/jobs/${encodeURIComponent(selectedJobId)}/dubbing-texts`)
       .then((doc) => {
+        const loadedSegments = Array.isArray(doc?.segments) ? doc.segments : []
         setDocument(doc)
-        setSegments(doc.segments)
-        setRevision(doc.revision)
+        setSegments(loadedSegments)
+        setRevision(doc?.revision || '')
         setDirty(false)
-        if (doc.segments.length > 0) setActiveSegmentId(doc.segments[0].segment_id)
+        if (loadedSegments.length > 0) setActiveSegmentId(loadedSegments[0].segment_id)
       })
       .catch((err: unknown) => {
         setLoadError(err instanceof Error ? err.message : String(err))
       })
       .finally(() => setIsLoading(false))
 
-    // 2. Fetch specific video file associated with the selected job
+    // 2. Fetch specific video and audio files associated with the selected job
     client
       .get<{ files?: JobFile[] }>(`/api/jobs/${encodeURIComponent(selectedJobId)}/files`)
       .then((res) => {
@@ -146,11 +154,44 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
         } else {
           setVideoSrc('/video.mp4')
         }
+
+        const audioFiles = fileList.filter(
+          (f) =>
+            f.kind === 'music' ||
+            f.kind === 'background_audio' ||
+            f.kind === 'audio' ||
+            /background|music/i.test(f.name) ||
+            /\.(mp3|wav|m4a|aac|flac)$/i.test(f.name),
+        )
+        setMusicFiles(audioFiles)
       })
       .catch(() => {
         setVideoSrc('/video.mp4')
+        setMusicFiles([])
       })
   }, [client, selectedJobId])
+
+  // ── fetch duration for background audio files ─────────────────────────────
+  useEffect(() => {
+    if (musicFiles.length === 0) {
+      setBackgroundDurations({})
+      return
+    }
+
+    musicFiles.forEach((file) => {
+      const url =
+        file.url ||
+        (selectedJobId ? `/api/jobs/${encodeURIComponent(selectedJobId)}/files/${encodeURIComponent(file.id)}` : '')
+      if (!url) return
+      const tempAudio = new Audio(url)
+      const onLoaded = () => {
+        if (Number.isFinite(tempAudio.duration) && tempAudio.duration > 0) {
+          setBackgroundDurations((prev) => ({ ...prev, [file.id]: tempAudio.duration }))
+        }
+      }
+      tempAudio.addEventListener('loadedmetadata', onLoaded)
+    })
+  }, [musicFiles, selectedJobId])
 
   // ── edit translation ───────────────────────────────────────────────────────
   const handleTranslationChange = (id: string, value: string) => {
@@ -219,49 +260,104 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
       s.speaker.toLowerCase().includes(searchQuery.toLowerCase()),
   )
 
-  const currentActive = displaySegments.find((s) => s.segment_id === activeSegmentId) ?? displaySegments[0]
+  // Find segment corresponding to current playback time (if currentTime falls within segment bounds)
+  const liveSubSegment = displaySegments.find((s) => currentTime >= s.start && currentTime <= s.end)
 
-  // Find segment corresponding to current playback time or active selection
-  const liveSubSegment = displaySegments.find((s) => currentTime >= s.start && currentTime <= s.end) ?? currentActive
+  // Current active segment: live segment during playback/scrubbing, otherwise selected segment, fallback to first segment
+  const currentActive = liveSubSegment ?? displaySegments.find((s) => s.segment_id === activeSegmentId) ?? displaySegments[0]
+
+  // ── timeline clip positions (mastered to video duration when present) ───────────
+  const maxTime = displaySegments.length > 0 ? Math.max(...displaySegments.map((s) => s.end)) : 0
+  const rawDuration = videoDuration > 0 ? videoDuration : maxTime > 0 ? maxTime : 60
+  const duration = Math.max(0.1, rawDuration)
+
+  const clipStyle = (s: Segment) => {
+    const start = Math.min(Math.max(0, s.start), duration)
+    const end = Math.min(Math.max(start, s.end), duration)
+    const clipLen = end - start
+    return {
+      left: `${(start / duration) * 100}%`,
+      width: `${Math.max(0.5, (clipLen / duration) * 100)}%`,
+    }
+  }
+
+  const seekToTime = (targetTime: number) => {
+    const newTime = Math.max(0, Math.min(duration, targetTime))
+    setCurrentTime(newTime)
+    if (videoRef.current) {
+      const vidTime = videoDuration > 0 ? Math.min(newTime, videoDuration) : newTime
+      videoRef.current.currentTime = vidTime
+    }
+  }
 
   // ── video controls handlers ───────────────────────────────────────────────
   const togglePlayPause = () => {
-    if (!videoRef.current) return
     if (isPlaying) {
-      videoRef.current.pause()
+      if (videoRef.current) videoRef.current.pause()
       setIsPlaying(false)
     } else {
-      void videoRef.current.play()
+      const startFrom = currentTime >= duration - 0.1 ? 0 : currentTime
+      setCurrentTime(startFrom)
+      if (videoRef.current) {
+        const vidTime = videoDuration > 0 ? Math.min(startFrom, videoDuration) : startFrom
+        videoRef.current.currentTime = vidTime
+        if (startFrom < (videoDuration || duration)) {
+          void videoRef.current.play().catch(() => {/* ignore autoplay restrictions */})
+        }
+      }
       setIsPlaying(true)
     }
   }
 
   const handleSelectSegment = (seg: Segment) => {
     setActiveSegmentId(seg.segment_id)
-    if (videoRef.current) {
-      videoRef.current.currentTime = seg.start
-      setCurrentTime(seg.start)
-    }
+    seekToTime(seg.start)
   }
 
   const handleScrubberClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect()
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-    const newTime = pct * duration
-    if (videoRef.current) {
-      videoRef.current.currentTime = newTime
-      setCurrentTime(newTime)
-    }
+    seekToTime(pct * duration)
   }
 
-  // ── timeline clip positions ────────────────────────────────────────────────
-  const maxTime = displaySegments.length > 0 ? Math.max(...displaySegments.map((s) => s.end)) : 60
-  const duration = Math.max(videoDuration || 0, maxTime, 60)
+  // ── continuous playback timer ──────────────────────────────────────────────
+  useEffect(() => {
+    if (!isPlaying) return
 
-  const clipStyle = (s: Segment) => ({
-    left: `${(s.start / duration) * 100}%`,
-    width: `${Math.max(3, ((s.end - s.start) / duration) * 100)}%`,
-  })
+    let animationFrameId: number
+    let lastTime = performance.now()
+
+    const tick = (now: number) => {
+      const dt = (now - lastTime) / 1000
+      lastTime = now
+
+      setCurrentTime((prev) => {
+        let next: number
+        if (
+          videoRef.current &&
+          videoDuration > 0 &&
+          videoRef.current.currentTime < videoDuration - 0.1 &&
+          !videoRef.current.paused
+        ) {
+          next = videoRef.current.currentTime
+        } else {
+          next = prev + dt
+        }
+
+        if (next >= duration) {
+          setIsPlaying(false)
+          if (videoRef.current) videoRef.current.pause()
+          return duration
+        }
+        return next
+      })
+
+      animationFrameId = requestAnimationFrame(tick)
+    }
+
+    animationFrameId = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(animationFrameId)
+  }, [isPlaying, videoDuration, duration])
 
   return (
     <section className="studio-view-container">
@@ -328,6 +424,13 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
               <div className="transcript-loading">
                 <span className="material-symbols-outlined spin-anim">sync</span>
                 <span>Loading dubbing texts…</span>
+              </div>
+            )}
+
+            {!isLoading && filtered.length === 0 && (
+              <div className="transcript-empty" style={{ padding: '24px', textAlign: 'center', color: '#938f99' }}>
+                <span className="material-symbols-outlined" style={{ fontSize: '36px', marginBottom: '8px', display: 'block' }}>subtitles_off</span>
+                <p>{searchQuery ? 'No matching segments found' : 'No dubbing texts available for this job'}</p>
               </div>
             )}
 
@@ -439,20 +542,33 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
                 onTimeUpdate={() => {
                   if (videoRef.current) setCurrentTime(videoRef.current.currentTime)
                 }}
+                onSeeking={() => {
+                  if (videoRef.current) setCurrentTime(videoRef.current.currentTime)
+                }}
+                onSeeked={() => {
+                  if (videoRef.current) setCurrentTime(videoRef.current.currentTime)
+                }}
                 onLoadedMetadata={() => {
-                  if (videoRef.current && videoRef.current.duration) {
+                  if (videoRef.current && Number.isFinite(videoRef.current.duration) && videoRef.current.duration > 0) {
                     setVideoDuration(videoRef.current.duration)
                   }
                 }}
-                onPlay={() => setIsPlaying(true)}
-                onPause={() => setIsPlaying(false)}
+                onPause={() => {
+                  if (videoDuration > 0 && currentTime < videoDuration - 0.3) {
+                    setIsPlaying(false)
+                  } else if (videoDuration <= 0 && currentTime < duration - 0.3) {
+                    setIsPlaying(false)
+                  }
+                }}
                 onClick={togglePlayPause}
               />
 
               <div className="subtitle-overlay">
-                <span>
-                  {liveSubSegment ? liveSubSegment.translation || liveSubSegment.text : 'Select or play video segment'}
-                </span>
+                {liveSubSegment && (
+                  <span>
+                    {liveSubSegment.translation || liveSubSegment.text}
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -612,11 +728,28 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
           </div>
 
           {/* Timeline canvas */}
-          <div className="timeline-tracks-canvas">
+          <div
+            className="timeline-tracks-canvas"
+            onClick={(e) => {
+              if ((e.target as HTMLElement).closest('.clip-block')) return
+              const rect = e.currentTarget.getBoundingClientRect()
+              const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+              seekToTime(pct * duration)
+            }}
+          >
             {/* Time ruler */}
             <div className="time-ruler">
               {Array.from({ length: 5 }, (_, i) => (
-                <span key={i}>{formatTime((duration / 4) * i)}</span>
+                <span
+                  key={i}
+                  style={{
+                    position: 'absolute',
+                    left: `${(i / 4) * 100}%`,
+                    transform: i === 0 ? 'none' : i === 4 ? 'translateX(-100%)' : 'translateX(-50%)',
+                  }}
+                >
+                  {formatTime((duration / 4) * i)}
+                </span>
               ))}
             </div>
 
@@ -670,12 +803,32 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
 
             {/* Music track row */}
             <div className="track-row">
-              <div className="clip-block music-clip" style={{ left: '0%', width: '98%' }}>
-                <svg className="waveform-svg" viewBox="0 0 200 20" preserveAspectRatio="none">
-                  <path d="M0,10 Q10,5 20,10 T40,10 T60,10 T80,10 T100,10 T120,10 T140,10 T160,10 T180,10 T200,10" fill="none" stroke="currentColor" strokeWidth="1" />
-                </svg>
-                <span className="clip-label">Background.wav</span>
-              </div>
+              {musicFiles.length > 0 ? (
+                musicFiles.map((m) => {
+                  const audioDur = backgroundDurations[m.id]
+                  const widthPct = audioDur && duration > 0 ? Math.min(100, (audioDur / duration) * 100) : 100
+                  return (
+                    <div
+                      key={m.id}
+                      className="clip-block music-clip"
+                      style={{ left: '0%', width: `${widthPct}%` }}
+                      title={`${m.name}${audioDur ? ` (${formatTime(audioDur)})` : ''}`}
+                    >
+                      <svg className="waveform-svg" viewBox="0 0 200 20" preserveAspectRatio="none">
+                        <path d="M0,10 Q10,5 20,10 T40,10 T60,10 T80,10 T100,10 T120,10 T140,10 T160,10 T180,10 T200,10" fill="none" stroke="currentColor" strokeWidth="1" />
+                      </svg>
+                      <span className="clip-label">{m.name}</span>
+                    </div>
+                  )
+                })
+              ) : (
+                <div className="clip-block music-clip" style={{ left: '0%', width: '100%' }}>
+                  <svg className="waveform-svg" viewBox="0 0 200 20" preserveAspectRatio="none">
+                    <path d="M0,10 Q10,5 20,10 T40,10 T60,10 T80,10 T100,10 T120,10 T140,10 T160,10 T180,10 T200,10" fill="none" stroke="currentColor" strokeWidth="1" />
+                  </svg>
+                  <span className="clip-label">Background.wav</span>
+                </div>
+              )}
             </div>
           </div>
         </div>

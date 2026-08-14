@@ -37,11 +37,13 @@ describe('application shell', () => {
   })
 
   it('shows shared loading and error states', async () => {
+    const user = userEvent.setup()
     let reject!: (reason: unknown) => void
     const pending = new Promise<ConfigResponse>((_, rejectPromise) => {
       reject = rejectPromise
     })
     render(<App client={stubClient({ get: vi.fn(() => pending) as ApiClient['get'] })} />)
+    await user.click(screen.getByRole('button', { name: 'Workflow' }))
     expect(screen.getByRole('status')).toHaveTextContent('Loading application')
 
     reject(new Error('offline'))
