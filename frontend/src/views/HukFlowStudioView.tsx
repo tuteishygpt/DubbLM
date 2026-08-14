@@ -661,15 +661,6 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
 
         {/* RIGHT PANE: Video Player ─────────────────────────────────────────── */}
         <div className="studio-right-pane">
-          <div className="player-top-bar">
-            <span className="program-title">
-              {document ? `Source: ${document.source}` : 'Program: Main_Edit_v2'}
-            </span>
-            <span className="video-specs">
-              {selectedJobId ? `Job: ${selectedJobId}` : '1080p | 23.976 fps'}
-            </span>
-          </div>
-
           <div className="video-preview-wrapper">
             <div className="video-canvas">
               <video
@@ -707,94 +698,94 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
                   </span>
                 )}
               </div>
-            </div>
-          </div>
 
-          {/* Transport controls */}
-          <div className="player-controls-bar">
-            <div className="timecode-display">
-              <span>{formatTimecode(currentTime)}</span>
-              <span>{formatTimecode(duration)}</span>
-            </div>
+              {/* Overlay transport controls */}
+              <div className="player-controls-bar">
+                <div className="timecode-display">
+                  <span>{formatTimecode(currentTime)}</span>
+                  <span>{formatTimecode(duration)}</span>
+                </div>
 
-            <div className="player-scrubber" onClick={handleScrubberClick}>
-              <div className="scrubber-track">
-                <div
-                  className="scrubber-progress"
-                  style={{
-                    width: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
-                  }}
-                ></div>
-                <div
-                  className="scrubber-handle"
-                  style={{
-                    left: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
-                  }}
-                ></div>
+                <div className="player-scrubber" onClick={handleScrubberClick}>
+                  <div className="scrubber-track">
+                    <div
+                      className="scrubber-progress"
+                      style={{
+                        width: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
+                      }}
+                    ></div>
+                    <div
+                      className="scrubber-handle"
+                      style={{
+                        left: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
+                      }}
+                    ></div>
+                  </div>
+                </div>
+
+                <div className="transport-buttons">
+                  <button
+                    type="button"
+                    className="transport-btn"
+                    title="Skip Previous"
+                    onClick={() => {
+                      const idx = displaySegments.findIndex((s) => s.segment_id === currentActive?.segment_id)
+                      if (idx > 0) handleSelectSegment(displaySegments[idx - 1])
+                    }}
+                  >
+                    <span className="material-symbols-outlined">skip_previous</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="transport-btn"
+                    title="Fast Rewind -5s"
+                    onClick={() => {
+                      if (videoRef.current) {
+                        const newTime = Math.max(0, videoRef.current.currentTime - 5)
+                        videoRef.current.currentTime = newTime
+                        setCurrentTime(newTime)
+                      }
+                    }}
+                  >
+                    <span className="material-symbols-outlined">fast_rewind</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="play-pause-btn"
+                    title={isPlaying ? 'Pause' : 'Play'}
+                    onClick={togglePlayPause}
+                  >
+                    <span className="material-symbols-outlined">
+                      {isPlaying ? 'pause' : 'play_arrow'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="transport-btn"
+                    title="Fast Forward +5s"
+                    onClick={() => {
+                      if (videoRef.current) {
+                        const newTime = Math.min(duration, videoRef.current.currentTime + 5)
+                        videoRef.current.currentTime = newTime
+                        setCurrentTime(newTime)
+                      }
+                    }}
+                  >
+                    <span className="material-symbols-outlined">fast_forward</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="transport-btn"
+                    title="Skip Next"
+                    onClick={() => {
+                      const idx = displaySegments.findIndex((s) => s.segment_id === currentActive?.segment_id)
+                      if (idx < displaySegments.length - 1) handleSelectSegment(displaySegments[idx + 1])
+                    }}
+                  >
+                    <span className="material-symbols-outlined">skip_next</span>
+                  </button>
+                </div>
               </div>
-            </div>
-
-            <div className="transport-buttons">
-              <button
-                type="button"
-                className="transport-btn"
-                title="Skip Previous"
-                onClick={() => {
-                  const idx = displaySegments.findIndex((s) => s.segment_id === currentActive?.segment_id)
-                  if (idx > 0) handleSelectSegment(displaySegments[idx - 1])
-                }}
-              >
-                <span className="material-symbols-outlined">skip_previous</span>
-              </button>
-              <button
-                type="button"
-                className="transport-btn"
-                title="Fast Rewind -5s"
-                onClick={() => {
-                  if (videoRef.current) {
-                    const newTime = Math.max(0, videoRef.current.currentTime - 5)
-                    videoRef.current.currentTime = newTime
-                    setCurrentTime(newTime)
-                  }
-                }}
-              >
-                <span className="material-symbols-outlined">fast_rewind</span>
-              </button>
-              <button
-                type="button"
-                className="play-pause-btn"
-                title={isPlaying ? 'Pause' : 'Play'}
-                onClick={togglePlayPause}
-              >
-                <span className="material-symbols-outlined">
-                  {isPlaying ? 'pause' : 'play_arrow'}
-                </span>
-              </button>
-              <button
-                type="button"
-                className="transport-btn"
-                title="Fast Forward +5s"
-                onClick={() => {
-                  if (videoRef.current) {
-                    const newTime = Math.min(duration, videoRef.current.currentTime + 5)
-                    videoRef.current.currentTime = newTime
-                    setCurrentTime(newTime)
-                  }
-                }}
-              >
-                <span className="material-symbols-outlined">fast_forward</span>
-              </button>
-              <button
-                type="button"
-                className="transport-btn"
-                title="Skip Next"
-                onClick={() => {
-                  const idx = displaySegments.findIndex((s) => s.segment_id === currentActive?.segment_id)
-                  if (idx < displaySegments.length - 1) handleSelectSegment(displaySegments[idx + 1])
-                }}
-              >
-                <span className="material-symbols-outlined">skip_next</span>
-              </button>
             </div>
           </div>
         </div>
