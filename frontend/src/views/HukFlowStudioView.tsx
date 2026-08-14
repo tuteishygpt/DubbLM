@@ -77,7 +77,6 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
   const [backgroundDurations, setBackgroundDurations] = useState<Record<string, number>>({})
 
   // ── studio tools state ───────────────────────────────────────────────────
-  const [activeTool, setActiveTool] = useState<'razor' | 'sync' | 'clone' | null>(null)
   const [zoomLevel, setZoomLevel] = useState(50)
   const [mutedTracks, setMutedTracks] = useState<Record<string, boolean>>({ a1: true })
   const [searchQuery, setSearchQuery] = useState('')
@@ -87,6 +86,7 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
   const [statusMessage, setStatusMessage] = useState('')
   const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({})
   const scrollAreaRef = useRef<HTMLDivElement>(null)
+  const timelineCanvasRef = useRef<HTMLDivElement>(null)
 
   const toggleSource = (segmentId: string) => {
     setExpandedSources((prev) => ({
@@ -369,6 +369,21 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
   const maxTime = displaySegments.length > 0 ? Math.max(...displaySegments.map((s) => s.end)) : 0
   const rawDuration = videoDuration > 0 ? videoDuration : maxTime > 0 ? maxTime : 60
   const duration = Math.max(0.1, rawDuration)
+
+  // Zoom scale for voice and audio tracks (100% to 460% width)
+  const trackWidthPercent = Math.max(100, Math.round(100 + (zoomLevel - 10) * 4))
+  const rulerTicksCount = Math.max(5, Math.round(5 * (trackWidthPercent / 100)))
+
+  // Auto-scroll timeline to follow playhead during playback when zoomed
+  useEffect(() => {
+    if (!timelineCanvasRef.current || duration <= 0) return
+    const el = timelineCanvasRef.current
+    if (el.scrollWidth > el.clientWidth && isPlaying) {
+      const playheadX = (currentTime / duration) * el.scrollWidth
+      const target = playheadX - el.clientWidth / 2
+      el.scrollLeft = Math.max(0, target)
+    }
+  }, [currentTime, duration, isPlaying])
 
   const clipStyle = (s: Segment) => {
     const start = Math.min(Math.max(0, s.start), duration)
@@ -836,35 +851,35 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
 
       {/* ── Docked Bottom Timeline ─────────────────────────────────────────── */}
       <div className="studio-bottom-timeline">
-
-        {/* Timeline toolbar */}
-        <div className="timeline-toolbar">
-          <div className="toolbar-tools">
-            {(['razor', 'sync', 'clone'] as const).map((tool) => (
-              <button
-                key={tool}
-                type="button"
-                className={`tool-btn ${activeTool === tool ? 'active' : ''}`}
-                title={tool === 'razor' ? 'Razor Cut' : tool === 'sync' ? 'Sync Audio' : 'Voice Clone'}
-                onClick={() => setActiveTool(activeTool === tool ? null : tool)}
-              >
-                <span className="material-symbols-outlined">
-                  {tool === 'razor' ? 'content_cut' : tool === 'sync' ? 'sync_alt' : 'record_voice_over'}
-                </span>
-              </button>
-            ))}
-          </div>
-
-          <div className="toolbar-zoom">
-            <span className="material-symbols-outlined zoom-icon">zoom_out</span>
-            <input
-              type="range" min="10" max="100" value={zoomLevel}
-              onChange={(e) => setZoomLevel(Number(e.target.value))}
-              className="zoom-slider"
-              aria-label="Zoom timeline"
-            />
-            <span className="material-symbols-outlined zoom-icon">zoom_in</span>
-          </div>
+        {/* Floating semi-transparent zoom controls */}
+        <div className="timeline-floating-zoom" onClick={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            className="zoom-btn"
+            title="Zoom Out"
+            onClick={() => setZoomLevel((z) => Math.max(10, z - 10))}
+            aria-label="Zoom Out"
+          >
+            <span className="material-symbols-outlined">zoom_out</span>
+          </button>
+          <input
+            type="range"
+            min="10"
+            max="100"
+            value={zoomLevel}
+            onChange={(e) => setZoomLevel(Number(e.target.value))}
+            className="zoom-slider"
+            aria-label="Zoom timeline"
+          />
+          <button
+            type="button"
+            className="zoom-btn"
+            title="Zoom In"
+            onClick={() => setZoomLevel((z) => Math.min(100, z + 10))}
+            aria-label="Zoom In"
+          >
+            <span className="material-symbols-outlined">zoom_in</span>
+          </button>
         </div>
 
         {/* Timeline body */}
@@ -898,108 +913,117 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
             </div>
           </div>
 
-          {/* Timeline canvas */}
+          {/* Timeline canvas with horizontal scroll & zoom */}
           <div
+            ref={timelineCanvasRef}
             className="timeline-tracks-canvas"
-            onClick={(e) => {
-              if ((e.target as HTMLElement).closest('.clip-block')) return
-              const rect = e.currentTarget.getBoundingClientRect()
-              const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-              seekToTime(pct * duration)
-            }}
           >
-            {/* Time ruler */}
-            <div className="time-ruler">
-              {Array.from({ length: 5 }, (_, i) => (
-                <span
-                  key={i}
-                  style={{
-                    position: 'absolute',
-                    left: `${(i / 4) * 100}%`,
-                    transform: i === 0 ? 'none' : i === 4 ? 'translateX(-100%)' : 'translateX(-50%)',
-                  }}
-                >
-                  {formatTime((duration / 4) * i)}
-                </span>
-              ))}
-            </div>
-
-            {/* Playhead at video currentTime */}
             <div
-              className="timeline-playhead"
+              className="timeline-tracks-inner"
               style={{
-                left: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
+                width: `${trackWidthPercent}%`,
+                minWidth: `${trackWidthPercent}%`,
+              }}
+              onClick={(e) => {
+                if ((e.target as HTMLElement).closest('.clip-block')) return
+                const rect = e.currentTarget.getBoundingClientRect()
+                const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+                seekToTime(pct * duration)
               }}
             >
-              <div className="playhead-head"></div>
-            </div>
+              {/* Time ruler */}
+              <div className="time-ruler">
+                {Array.from({ length: rulerTicksCount }, (_, i) => (
+                  <span
+                    key={i}
+                    style={{
+                      position: 'absolute',
+                      left: `${(i / (rulerTicksCount - 1)) * 100}%`,
+                      transform: i === 0 ? 'none' : i === rulerTicksCount - 1 ? 'translateX(-100%)' : 'translateX(-50%)',
+                    }}
+                  >
+                    {formatTime((duration / (rulerTicksCount - 1)) * i)}
+                  </span>
+                ))}
+              </div>
 
-            {/* Speaker track rows from real segments */}
-            {displaySpeakers.map((speaker, idx) => {
-              const speakerSegs = displaySegments.filter((s) => s.speaker === speaker)
-              return (
-                <div key={speaker} className="track-row">
-                  {speakerSegs.map((seg) => {
-                    const isActiveClip = seg.segment_id === (currentActive?.segment_id ?? '')
-                    const clipClass = isActiveClip
-                      ? `clip-block primary-clip${seg.audio === null ? ' ai-shimmer' : ''}`
-                      : `clip-block speaker-clip-${idx % 4}`
+              {/* Playhead at video currentTime */}
+              <div
+                className="timeline-playhead"
+                style={{
+                  left: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
+                }}
+              >
+                <div className="playhead-head"></div>
+              </div>
+
+              {/* Speaker track rows from real segments */}
+              {displaySpeakers.map((speaker, idx) => {
+                const speakerSegs = displaySegments.filter((s) => s.speaker === speaker)
+                return (
+                  <div key={speaker} className="track-row">
+                    {speakerSegs.map((seg) => {
+                      const isActiveClip = seg.segment_id === (currentActive?.segment_id ?? '')
+                      const clipClass = isActiveClip
+                        ? `clip-block primary-clip${seg.audio === null ? ' ai-shimmer' : ''}`
+                        : `clip-block speaker-clip-${idx % 4}`
+                      return (
+                        <div
+                          key={seg.segment_id}
+                          className={clipClass}
+                          style={clipStyle(seg)}
+                          title={seg.translation || seg.text}
+                          onClick={() => handleSelectSegment(seg)}
+                          role="button"
+                          tabIndex={-1}
+                        >
+                          <svg className="waveform-svg" viewBox="0 0 100 20" preserveAspectRatio="none">
+                            <path
+                              d="M0,10 L5,4 L10,16 L15,6 L20,14 L25,8 L30,12 L35,4 L40,16 L45,10 L50,7 L55,13 L60,4 L65,16 L70,9 L75,11 L80,6 L85,14 L90,8 L95,12 L100,10"
+                              fill="none" stroke="currentColor" strokeWidth="1.5"
+                            />
+                          </svg>
+                          {isActiveClip && (
+                            <span className="clip-subtitle">
+                              {seg.translation || seg.text}
+                            </span>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )
+              })}
+
+              {/* Music track row */}
+              <div className="track-row">
+                {musicFiles.length > 0 ? (
+                  musicFiles.map((m) => {
+                    const audioDur = backgroundDurations[m.id]
+                    const widthPct = audioDur && duration > 0 ? Math.min(100, (audioDur / duration) * 100) : 100
                     return (
                       <div
-                        key={seg.segment_id}
-                        className={clipClass}
-                        style={clipStyle(seg)}
-                        title={seg.translation || seg.text}
-                        onClick={() => handleSelectSegment(seg)}
-                        role="button"
-                        tabIndex={-1}
+                        key={m.id}
+                        className="clip-block music-clip"
+                        style={{ left: '0%', width: `${widthPct}%` }}
+                        title={`${m.name}${audioDur ? ` (${formatTime(audioDur)})` : ''}`}
                       >
-                        <svg className="waveform-svg" viewBox="0 0 100 20" preserveAspectRatio="none">
-                          <path
-                            d="M0,10 L5,4 L10,16 L15,6 L20,14 L25,8 L30,12 L35,4 L40,16 L45,10 L50,7 L55,13 L60,4 L65,16 L70,9 L75,11 L80,6 L85,14 L90,8 L95,12 L100,10"
-                            fill="none" stroke="currentColor" strokeWidth="1.5"
-                          />
+                        <svg className="waveform-svg" viewBox="0 0 200 20" preserveAspectRatio="none">
+                          <path d="M0,10 Q10,5 20,10 T40,10 T60,10 T80,10 T100,10 T120,10 T140,10 T160,10 T180,10 T200,10" fill="none" stroke="currentColor" strokeWidth="1" />
                         </svg>
-                        {isActiveClip && (
-                          <span className="clip-subtitle">
-                            {seg.translation || seg.text}
-                          </span>
-                        )}
+                        <span className="clip-label">{m.name}</span>
                       </div>
                     )
-                  })}
-                </div>
-              )
-            })}
-
-            {/* Music track row */}
-            <div className="track-row">
-              {musicFiles.length > 0 ? (
-                musicFiles.map((m) => {
-                  const audioDur = backgroundDurations[m.id]
-                  const widthPct = audioDur && duration > 0 ? Math.min(100, (audioDur / duration) * 100) : 100
-                  return (
-                    <div
-                      key={m.id}
-                      className="clip-block music-clip"
-                      style={{ left: '0%', width: `${widthPct}%` }}
-                      title={`${m.name}${audioDur ? ` (${formatTime(audioDur)})` : ''}`}
-                    >
-                      <svg className="waveform-svg" viewBox="0 0 200 20" preserveAspectRatio="none">
-                        <path d="M0,10 Q10,5 20,10 T40,10 T60,10 T80,10 T100,10 T120,10 T140,10 T160,10 T180,10 T200,10" fill="none" stroke="currentColor" strokeWidth="1" />
-                      </svg>
-                      <span className="clip-label">{m.name}</span>
-                    </div>
-                  )
-                })
-              ) : (
-                <div className="clip-block music-clip" style={{ left: '0%', width: '100%' }}>
-                  <svg className="waveform-svg" viewBox="0 0 200 20" preserveAspectRatio="none">
-                    <path d="M0,10 Q10,5 20,10 T40,10 T60,10 T80,10 T100,10 T120,10 T140,10 T160,10 T180,10 T200,10" fill="none" stroke="currentColor" strokeWidth="1" />
-                  </svg>
-                  <span className="clip-label">Background.wav</span>
-                </div>
-              )}
+                  })
+                ) : (
+                  <div className="clip-block music-clip" style={{ left: '0%', width: '100%' }}>
+                    <svg className="waveform-svg" viewBox="0 0 200 20" preserveAspectRatio="none">
+                      <path d="M0,10 Q10,5 20,10 T40,10 T60,10 T80,10 T100,10 T120,10 T140,10 T160,10 T180,10 T200,10" fill="none" stroke="currentColor" strokeWidth="1" />
+                    </svg>
+                    <span className="clip-label">Background.wav</span>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
