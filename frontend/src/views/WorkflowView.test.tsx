@@ -73,7 +73,7 @@ describe('WorkflowView', () => {
     render(<WorkflowView client={api} config={config} />)
     await screen.findAllByRole('option', { name: 'Spanish' })
 
-    await user.click(screen.getByRole('button', { name: 'Queue job' }))
+    await user.click(screen.getByRole('button', { name: 'Start' }))
     expect(screen.getByRole('alert')).toHaveTextContent('Video is required')
 
     await user.upload(screen.getByLabelText('Video'), new File(['video'], 'movie.mp4', { type: 'video/mp4' }))
@@ -86,7 +86,7 @@ describe('WorkflowView', () => {
 
     // Disable voice overrides for standard submission
     await user.click(screen.getByLabelText('Configure Dubbing Voices'))
-    await user.click(screen.getByRole('button', { name: 'Queue job' }))
+    await user.click(screen.getByRole('button', { name: 'Start' }))
 
     await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/jobs', {
       input_upload_id: 'video-1',
@@ -126,7 +126,7 @@ describe('WorkflowView', () => {
     await user.selectOptions(screen.getByLabelText('TTS Provider'), 'openai')
     await user.type(screen.getByLabelText(/Style Prompt/i), 'warm voice')
 
-    await user.click(screen.getByRole('button', { name: 'Queue job' }))
+    await user.click(screen.getByRole('button', { name: 'Start' }))
 
     await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/jobs', expect.objectContaining({
       input_upload_id: 'video-1',
@@ -141,5 +141,25 @@ describe('WorkflowView', () => {
         }),
       }),
     })))
+  })
+
+  it('prevents duplicate submission while starting the selected dubbing job', async () => {
+    const user = userEvent.setup()
+    let finishUpload: ((value: { id: string }) => void) | undefined
+    const api = client()
+    api.upload = vi.fn((_path: string, _data: FormData) => new Promise<unknown>((resolve) => {
+      finishUpload = resolve
+    })) as unknown as ApiClient['upload']
+    render(<WorkflowView client={api} config={config} />)
+    await screen.findAllByRole('option', { name: 'Spanish' })
+
+    await user.upload(screen.getByLabelText('Video'), new File(['video'], 'movie.mp4', { type: 'video/mp4' }))
+    await user.click(screen.getByRole('button', { name: 'Start' }))
+
+    expect(screen.getByRole('button', { name: 'Starting…' })).toBeDisabled()
+    expect(api.upload).toHaveBeenCalledTimes(1)
+
+    finishUpload?.({ id: 'video-1' })
+    await waitFor(() => expect(api.post).toHaveBeenCalledTimes(1))
   })
 })

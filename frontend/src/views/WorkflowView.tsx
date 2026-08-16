@@ -62,6 +62,7 @@ export function WorkflowView({ client, config }: { client: ApiClient; config: Co
   const [mapping, setMapping] = useState('{}')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [isStarting, setIsStarting] = useState(false)
 
   // ── Voice settings state ──────────────────────────────────────────────────
   const [savedProfiles, setSavedProfiles] = useState<Record<string, VoiceProfile>>({})
@@ -214,10 +215,12 @@ export function WorkflowView({ client, config }: { client: ApiClient; config: Co
 
   async function submit(event: FormEvent) {
     event.preventDefault()
+    if (isStarting) return
     setError('')
     if (!video) { setError('Video is required'); return }
 
     let speakerLabelMapping: Record<string, string>
+    setIsStarting(true)
     try {
       const parsed: unknown = JSON.parse(mapping)
       if (!isStringRecord(parsed)) throw new Error()
@@ -274,6 +277,8 @@ export function WorkflowView({ client, config }: { client: ApiClient; config: Co
       setMessage(`Job ${job.id} ${job.status}`)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setIsStarting(false)
     }
   }
 
@@ -835,8 +840,8 @@ export function WorkflowView({ client, config }: { client: ApiClient; config: Co
             {/* Wizard Footer Action Bar */}
             <div className="wizard-footer">
               <button className="cancel-btn" type="button">Cancel</button>
-              <button type="submit" className="next-step-btn">
-                Queue job
+              <button type="submit" className="next-step-btn" disabled={isStarting}>
+                {isStarting ? 'Starting…' : 'Start'}
                 <span className="material-symbols-outlined" aria-hidden="true" style={{ fontSize: '18px' }}>arrow_forward</span>
               </button>
             </div>
