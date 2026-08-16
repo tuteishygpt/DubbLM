@@ -36,10 +36,10 @@ def test_schema_preserves_exact_legacy_field_inventory():
         "run_step", "generate_speaker_report", "save_original_subtitles",
         "save_translated_subtitles", "keep_background", "include_original_audio",
         "remove_pauses", "isolated_tracks_files", "isolated_tracks_labels",
-        "inner_transcription_system",
+        "inner_transcription_system", "start_time", "duration",
     ]
     assert schema.SETTINGS_FIELDS == [
-        "transcription_model", "transcription_system", "start_time", "duration",
+        "transcription_model", "transcription_system",
         "no_cache", "translator_type", "llm_provider", "llm_model_name",
         "llm_temperature", "translation_prompt_prefix", "glossary",
         "refinement_llm_provider", "refinement_model_name",
