@@ -156,6 +156,7 @@ class JobService:
                     default=self._config_json_default,
                 )
             )
+            self._persist_project_metadata(config_snapshot, job_id)
             job = self._repository.create(
                 owner_id,
                 config_snapshot,
@@ -169,6 +170,65 @@ class JobService:
         except Exception:
             self._rollback_submission(owner_id, job_id, media_ids, created)
             raise
+
+    @staticmethod
+    def _persist_project_metadata(config: dict[str, Any], job_id: str) -> None:
+        """Persist the user-visible project name and immutable run settings.
+
+        The job repository owns queue state, while this file stays with the
+        project artifacts so the settings remain available after restarts and
+        when the project is opened from disk.
+        """
+        artifacts_dir = Path(str(config["artifacts_dir"]))
+        project_dir = Path(str(config["project_dir"]))
+        requested_name = str(config.get("project_name") or project_dir.name).strip()
+        project_name = JobService._unique_project_name(project_dir.parent, requested_name)
+        config["project_name"] = project_name
+        payload = {
+            "project_name": project_name,
+            "job_id": job_id,
+            "config": config,
+        }
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        target = artifacts_dir / "project_metadata.json"
+        with NamedTemporaryFile(
+            "w", encoding="utf-8", dir=artifacts_dir, delete=False, suffix=".tmp"
+        ) as temporary:
+            json.dump(payload, temporary, ensure_ascii=False, separators=(",", ":"))
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        try:
+            os.replace(temporary_path, target)
+        except OSError as exc:
+            temporary_path.unlink(missing_ok=True)
+            raise JobWriteError(f"Could not persist project metadata: {exc}") from exc
+
+    @staticmethod
+    def _unique_project_name(projects_root: Path, requested_name: str) -> str:
+        """Append the current UTC date when a display name is already in use."""
+        base_name = requested_name or "Untitled project"
+        existing_names: set[str] = set()
+        if projects_root.is_dir():
+            for project_dir in projects_root.iterdir():
+                metadata_path = project_dir / "artifacts" / "project_metadata.json"
+                try:
+                    data = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    name = str(data.get("project_name") or "").strip()
+                    if name:
+                        existing_names.add(name)
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    continue
+        if base_name not in existing_names:
+            return base_name
+
+        dated_name = f"{base_name} — {datetime.now(timezone.utc).date().isoformat()}"
+        if dated_name not in existing_names:
+            return dated_name
+        suffix = 2
+        while f"{dated_name} ({suffix})" in existing_names:
+            suffix += 1
+        return f"{dated_name} ({suffix})"
 
     def _rollback_submission(
         self,

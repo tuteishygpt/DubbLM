@@ -6,6 +6,7 @@ interface Job { id: string; status: string }
 
 interface ProjectSummary {
   name: string
+  display_name?: string
   relative_path: string
   has_video: boolean
   has_subtitles: boolean
@@ -527,7 +528,7 @@ export function HukFlowStudioView({
                   <option value="">📁 Open Project (prj/)...</option>
                   {projects.map((p) => (
                     <option key={p.name} value={p.name}>
-                      📁 {p.name} {p.segment_count > 0 ? `(${p.segment_count} segments)` : ''}
+                      📁 {p.display_name ?? p.name} {p.segment_count > 0 ? `(${p.segment_count} segments)` : ''}
                     </option>
                   ))}
                 </select>

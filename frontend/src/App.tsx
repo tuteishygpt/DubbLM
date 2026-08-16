@@ -13,6 +13,7 @@ type View = (typeof views)[number]
 
 interface ProjectSummary {
   name: string
+  display_name?: string
   segment_count: number
   has_video: boolean
   has_transcription: boolean
@@ -193,7 +194,7 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
                         <span className="material-symbols-outlined" style={{ fontSize: '16px', color: '#d0bcff', flexShrink: 0 }}>
                           {p.has_video ? 'movie' : 'folder'}
                         </span>
-                        <span className="open-project-item-name">{p.name}</span>
+                        <span className="open-project-item-name">{p.display_name ?? p.name}</span>
                         {p.segment_count > 0 && (
                           <span className="open-project-item-meta">{p.segment_count} seg</span>
                         )}

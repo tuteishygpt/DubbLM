@@ -57,6 +57,7 @@ export function WorkflowView({ client, config }: { client: ApiClient; config: Co
   const [values, setValues] = useState<Record<string, JsonValue>>(() =>
     Object.fromEntries(fields.map((field) => [field.name, config.values[field.name] ?? '']))
   )
+  const [projectName, setProjectName] = useState('Project Alpha')
   const [video, setVideo] = useState<File>()
   const [tracks, setTracks] = useState<File[]>([])
   const [mapping, setMapping] = useState('{}')
@@ -245,11 +246,10 @@ export function WorkflowView({ client, config }: { client: ApiClient; config: Co
         })
       )
 
-      const overrides: Record<string, JsonValue> = Object.fromEntries(
-        fields
-          .filter((field) => values[field.name] !== config.values[field.name])
-          .map((field) => [field.name, values[field.name]])
-      )
+      const overrides: Record<string, JsonValue> = {
+        project_name: projectName.trim() || 'Untitled project',
+        ...Object.fromEntries(fields.map((field) => [field.name, values[field.name]])),
+      }
 
       // Attach voice profiles to overrides if configured
       if (enableVoiceOverrides && Object.keys(voiceProfiles).length > 0) {
@@ -345,7 +345,12 @@ export function WorkflowView({ client, config }: { client: ApiClient; config: Co
               <div className="field-grid">
                 <label>
                   Project Name
-                  <input type="text" placeholder="e.g., Q3 Marketing Video" defaultValue="Project Alpha" />
+                  <input
+                    type="text"
+                    placeholder="e.g., Q3 Marketing Video"
+                    value={projectName}
+                    onChange={(event) => setProjectName(event.target.value)}
+                  />
                 </label>
                 <label>
                   Workspace

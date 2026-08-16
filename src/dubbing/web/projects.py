@@ -36,6 +36,7 @@ class ProjectSummary:
     """Summary metadata for an existing project folder in `prj/`."""
 
     name: str
+    display_name: str
     relative_path: str
     created_at: str
     updated_at: str
@@ -54,6 +55,7 @@ class ProjectDetail:
     """Detailed metadata for a project folder in `prj/`."""
 
     name: str
+    display_name: str
     relative_path: str
     created_at: str
     updated_at: str
@@ -63,6 +65,7 @@ class ProjectDetail:
     artifacts: dict[str, Any]
     target_language: str
     source_language: str
+    saved_config: dict[str, Any] | None = None
     job_id: str | None = None
 
 
@@ -187,6 +190,7 @@ class ProjectService:
             return None
 
         artifacts_dir = project_dir / "artifacts"
+        metadata = self._read_project_metadata(artifacts_dir)
         has_artifacts = artifacts_dir.is_dir()
         transcription_file = artifacts_dir / "transcription.txt"
         dubbing_texts_file = artifacts_dir / "dubbing_texts.tsv"
@@ -249,6 +253,7 @@ class ProjectService:
 
         return ProjectSummary(
             name=project_dir.name,
+            display_name=str(metadata.get("project_name") or project_dir.name),
             relative_path=rel_path,
             created_at=created_at,
             updated_at=updated_at,
@@ -285,6 +290,7 @@ class ProjectService:
                 subtitle_files_meta.append(meta)
 
         artifacts_dir = project_dir / "artifacts"
+        metadata = self._read_project_metadata(artifacts_dir)
         artifacts_info: dict[str, Any] = {}
         if artifacts_dir.is_dir():
             for art_item in sorted(artifacts_dir.rglob("*")):
@@ -308,6 +314,7 @@ class ProjectService:
 
         return ProjectDetail(
             name=project_dir.name,
+            display_name=summary.display_name,
             relative_path=summary.relative_path,
             created_at=summary.created_at,
             updated_at=summary.updated_at,
@@ -317,8 +324,17 @@ class ProjectService:
             artifacts=artifacts_info,
             target_language=target_lang,
             source_language="en",
+            saved_config=metadata.get("config") if isinstance(metadata.get("config"), dict) else None,
             job_id=summary.job_id,
         )
+
+    @staticmethod
+    def _read_project_metadata(artifacts_dir: Path) -> dict[str, Any]:
+        try:
+            metadata = json.loads((artifacts_dir / "project_metadata.json").read_text(encoding="utf-8"))
+            return metadata if isinstance(metadata, dict) else {}
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return {}
 
     def _build_project_config(self, project_dir: Path) -> dict[str, Any]:
         artifacts_dir = project_dir / "artifacts"

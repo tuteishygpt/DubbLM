@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ApiClient } from '../api/types'
 
 interface Job { id: string; status: string }
-interface ProjectSummary { name: string; segment_count: number; job_id: string | null }
+interface ProjectSummary { name: string; display_name?: string; segment_count: number; job_id: string | null }
 interface SegmentAudio { id: string; name: string; url: string }
 interface Segment {
   segment_id: string; speaker: string; start: number; end: number; text: string; translation: string
@@ -68,7 +68,7 @@ export function DubbingTextsView({ client }: { client: ApiClient }) {
         <label>Ready Project (prj/)
           <select style={{ marginLeft: '8px' }} onChange={(e) => { if (e.target.value) openProject(e.target.value) }} defaultValue="">
             <option value="">📁 Select a project from prj/...</option>
-            {projects.map((p) => <option key={p.name} value={p.name}>📁 {p.name} {p.segment_count > 0 ? `(${p.segment_count} segments)` : ''}</option>)}
+            {projects.map((p) => <option key={p.name} value={p.name}>📁 {p.display_name ?? p.name} {p.segment_count > 0 ? `(${p.segment_count} segments)` : ''}</option>)}
           </select>
         </label>
       )}

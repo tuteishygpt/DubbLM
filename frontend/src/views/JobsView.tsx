@@ -5,6 +5,7 @@ interface JobFile { id: string; name: string; kind: string; size: number }
 interface Job { id: string; status: string; files: JobFile[] }
 interface ProjectSummary {
   name: string
+  display_name?: string
   relative_path: string
   has_video: boolean
   has_subtitles: boolean
@@ -94,7 +95,7 @@ export function JobsView({ client }: { client: ApiClient }) {
           <tbody>
             {projects.map((p) => (
               <tr key={p.name}>
-                <td>📁 <strong>{p.name}</strong> ({p.relative_path})</td>
+                <td>📁 <strong>{p.display_name ?? p.name}</strong> ({p.relative_path})</td>
                 <td>{p.segment_count > 0 ? `${p.segment_count} segments` : '—'}</td>
                 <td>{p.video_files.join(', ') || 'No video'}</td>
                 <td>

@@ -67,7 +67,7 @@ describe('WorkflowView', () => {
     expect(screen.getByRole('option', { name: 'Preview' })).toBeInTheDocument()
   })
 
-  it('validates input, uploads media, and submits only workflow overrides', async () => {
+  it('validates input, uploads media, and submits the named workflow snapshot', async () => {
     const user = userEvent.setup()
     const api = client()
     render(<WorkflowView client={api} config={config} />)
@@ -77,6 +77,8 @@ describe('WorkflowView', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Video is required')
 
     await user.upload(screen.getByLabelText('Video'), new File(['video'], 'movie.mp4', { type: 'video/mp4' }))
+    await user.clear(screen.getByLabelText('Project Name'))
+    await user.type(screen.getByLabelText('Project Name'), 'Client interview')
     await user.upload(screen.getByLabelText('Isolated audio track'), new File(['audio'], 'voice.wav', { type: 'audio/wav' }))
     await user.selectOptions(screen.getByLabelText('Target language'), 'es')
     await user.selectOptions(screen.getByLabelText('Speaker report mode'), 'detailed')
@@ -91,7 +93,16 @@ describe('WorkflowView', () => {
     await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/jobs', {
       input_upload_id: 'video-1',
       isolated_tracks: { SPEAKER_00: 'track-1' },
-      overrides: { target_language: 'es', speaker_report_mode: 'detailed', include_subtitles: true, run_mode: 'preview' },
+      overrides: expect.objectContaining({
+        project_name: 'Client interview',
+        source_language: 'en',
+        target_language: 'es',
+        speaker_report_mode: 'detailed',
+        include_subtitles: true,
+        audio_only: false,
+        quality: 'balanced',
+        run_mode: 'preview',
+      }),
     }))
     expect(api.upload).toHaveBeenNthCalledWith(1, '/api/uploads', expect.any(FormData))
     expect(api.upload).toHaveBeenNthCalledWith(2, '/api/uploads', expect.any(FormData))

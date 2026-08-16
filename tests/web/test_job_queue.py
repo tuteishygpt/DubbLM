@@ -68,6 +68,31 @@ def test_submission_materializes_owner_uploads_and_freezes_normalized_config(
     assert repository.get("alice", job.id).config["source_language"] == "en"
 
 
+def test_submission_persists_project_name_and_full_config_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_module, "DEFAULT_PROJECTS_ROOT", tmp_path / "prj")
+    store = _store(tmp_path / "data")
+    repository = FileJobRepository(tmp_path / "data")
+    video = _upload(store, "alice", "clip.mp4")
+
+    job = JobService(repository, store, config_path="").submit(
+        owner_id="alice",
+        input_upload_id=video.id,
+        overrides={
+            "project_name": "Client interview",
+            "source_language": "en",
+            "target_language": "es",
+            "timing_max_speed": 1.2,
+        },
+    )
+
+    metadata_path = Path(job.config["artifacts_dir"]) / "project_metadata.json"
+    metadata = __import__("json").loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["project_name"] == "Client interview"
+    assert metadata["job_id"] == job.id
+    assert metadata["config"] == job.config
+    assert metadata["config"]["timing_max_speed"] == 1.2
+
+
 def test_submission_rejects_browser_managed_paths_before_media_access(tmp_path):
     class UnreachableMediaStore:
         def get(self, *_args, **_kwargs):
