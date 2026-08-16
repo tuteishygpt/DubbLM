@@ -29,17 +29,26 @@ const options: OptionsResponse = {
   report_modes: [{ value: 'summary', label: 'Summary' }, { value: 'detailed', label: 'Detailed' }],
   qualities: [{ value: 'balanced', label: 'Balanced' }, { value: 'studio', label: 'Studio' }],
   run_modes: [{ value: 'full', label: 'Full pipeline' }, { value: 'preview', label: 'Preview' }],
+  tts_providers: ['gemini', 'openai', 'omnivoice'],
+  tts_models: { gemini: ['gemini-2.5-pro-preview-tts'], openai: ['tts-1', 'tts-1-hd'] },
+  tts_voices: { gemini: ['Kore', 'Puck'], openai: ['alloy', 'nova'] },
 }
 
 function client(): ApiClient {
   return {
-    get: vi.fn(async (path: string) => path === '/api/options' ? options : {}) as ApiClient['get'],
+    get: vi.fn(async (path: string) => {
+      if (path === '/api/options') return options
+      if (path === '/api/voice-profiles') return { revision: 'v1', profiles: { Narrator: { tts_system: 'gemini', voice_name: 'Puck' } } }
+      if (path === '/api/reference-library') return { revision: 'r1', entries: [{ speaker_id: 'ref1', reference_text: 'Sample', audio: { id: 'a1', name: 'sample.wav', url: '/sample.wav' } }] }
+      return {}
+    }) as ApiClient['get'],
     put: vi.fn(),
     post: vi.fn().mockResolvedValue({ id: 'job-8', status: 'queued' }),
     delete: vi.fn(),
     upload: vi.fn()
       .mockResolvedValueOnce({ id: 'video-1' })
-      .mockResolvedValueOnce({ id: 'track-1' }),
+      .mockResolvedValueOnce({ id: 'track-1' })
+      .mockResolvedValueOnce({ id: 'track-2' }),
     subscribeJobEvents: vi.fn(() => () => undefined),
   }
 }
@@ -74,6 +83,9 @@ describe('WorkflowView', () => {
     await user.click(screen.getByLabelText('Include subtitles'))
     await user.selectOptions(screen.getByLabelText('Run mode'), 'preview')
     fireEvent.change(screen.getByLabelText('Speaker-label mapping'), { target: { value: JSON.stringify({ SPEAKER_00: 'voice.wav' }) } })
+
+    // Disable voice overrides for standard submission
+    await user.click(screen.getByLabelText('Configure Dubbing Voices'))
     await user.click(screen.getByRole('button', { name: 'Queue job' }))
 
     await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/jobs', {
@@ -84,5 +96,50 @@ describe('WorkflowView', () => {
     expect(api.upload).toHaveBeenNthCalledWith(1, '/api/uploads', expect.any(FormData))
     expect(api.upload).toHaveBeenNthCalledWith(2, '/api/uploads', expect.any(FormData))
     expect(screen.getByRole('status')).toHaveTextContent('Job job-8 queued')
+  })
+
+  it('supports visual speaker track cards and custom voice profile configuration', async () => {
+    const user = userEvent.setup()
+    const api = client()
+    render(<WorkflowView client={api} config={config} />)
+    await screen.findAllByRole('option', { name: 'Spanish' })
+
+    await user.upload(screen.getByLabelText('Video'), new File(['video'], 'movie.mp4', { type: 'video/mp4' }))
+    await user.upload(screen.getByLabelText('Isolated audio track'), [
+      new File(['audio1'], 'speaker_00.wav', { type: 'audio/wav' }),
+      new File(['audio2'], 'speaker_01.wav', { type: 'audio/wav' }),
+    ])
+
+    expect(screen.getByText(/Isolated Audio Tracks & Voice Assignment \(2\)/i)).toBeInTheDocument()
+    expect(screen.getByText('speaker_00.wav')).toBeInTheDocument()
+    expect(screen.getByText('speaker_01.wav')).toBeInTheDocument()
+
+    // Configure Voice Settings for Default and SPEAKER_01
+    expect(screen.getByText('Dubbing Voice Selection')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /Default Voice \(\*\)/i })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /SPEAKER_00/i })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /SPEAKER_01/i })).toBeInTheDocument()
+
+    // Switch to SPEAKER_01 tab, expand advanced parameters and select provider
+    await user.click(screen.getByRole('tab', { name: /SPEAKER_01/i }))
+    await user.click(screen.getByText(/Customize detailed parameters/i))
+    await user.selectOptions(screen.getByLabelText('TTS Provider'), 'openai')
+    await user.type(screen.getByLabelText(/Style Prompt/i), 'warm voice')
+
+    await user.click(screen.getByRole('button', { name: 'Queue job' }))
+
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/jobs', expect.objectContaining({
+      input_upload_id: 'video-1',
+      isolated_tracks: {
+        SPEAKER_00: 'track-1',
+        SPEAKER_01: 'track-2',
+      },
+      overrides: expect.objectContaining({
+        voices: expect.objectContaining({
+          '*': expect.objectContaining({ tts_system: 'gemini' }),
+          SPEAKER_01: expect.objectContaining({ tts_system: 'openai', style_prompt: 'warm voice' }),
+        }),
+      }),
+    })))
   })
 })
