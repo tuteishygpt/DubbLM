@@ -51,7 +51,19 @@ function formatTimecode(seconds: number): string {
   return `00:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`
 }
 
-export function HukFlowStudioView({ client }: { client?: ApiClient }) {
+type NavigateView = 'HukFlow Studio' | 'Workflow' | 'Jobs' | 'Settings' | 'Voice Profiles' | 'Dubbing Texts'
+
+export function HukFlowStudioView({
+  client,
+  onNavigate,
+  pendingOpenJobId,
+  onPendingOpenJobConsumed,
+}: {
+  client?: ApiClient
+  onNavigate?: (view: NavigateView) => void
+  pendingOpenJobId?: string | null
+  onPendingOpenJobConsumed?: () => void
+}) {
   // ── jobs / document state ─────────────────────────────────────────────────
   const [jobs, setJobs] = useState<Job[]>([])
   const [projects, setProjects] = useState<ProjectSummary[]>([])
@@ -123,6 +135,14 @@ export function HukFlowStudioView({ client }: { client?: ApiClient }) {
   ] : segments
 
   const displaySpeakers = [...new Set(displaySegments.map((s) => s.speaker))]
+
+  // ── consume pendingOpenJobId from parent (Open Project sidebar action) ────
+  useEffect(() => {
+    if (!pendingOpenJobId) return
+    setSelectedJobId(pendingOpenJobId)
+    setSelectedProjectName('')
+    onPendingOpenJobConsumed?.()
+  }, [pendingOpenJobId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── load jobs and ready projects ──────────────────────────────────────────
   useEffect(() => {
