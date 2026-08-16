@@ -22,13 +22,13 @@ EXPECTED_WORKFLOW_FIELDS = [
     "isolated_tracks_files",
     "isolated_tracks_labels",
     "inner_transcription_system",
+    "start_time",
+    "duration",
 ]
 
 EXPECTED_SETTINGS_FIELDS = [
     "transcription_model",
     "transcription_system",
-    "start_time",
-    "duration",
     "no_cache",
     "translator_type",
     "llm_provider",

@@ -14,10 +14,11 @@ WORKFLOW_FIELDS = [
     "generate_speaker_report", "save_original_subtitles", "save_translated_subtitles",
     "keep_background", "include_original_audio", "remove_pauses",
     "isolated_tracks_files", "isolated_tracks_labels", "inner_transcription_system",
+    "start_time", "duration",
 ]
 
 SETTINGS_FIELDS = [
-    "transcription_model", "transcription_system", "start_time", "duration", "no_cache",
+    "transcription_model", "transcription_system", "no_cache",
     "translator_type", "llm_provider", "llm_model_name", "llm_temperature",
     "translation_prompt_prefix", "glossary", "refinement_llm_provider",
     "refinement_model_name", "refinement_temperature", "refinement_max_tokens",
