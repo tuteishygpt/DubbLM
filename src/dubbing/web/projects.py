@@ -223,6 +223,12 @@ class ProjectService:
                         audio_files.append(item.name)
                     elif ext in SUBTITLE_EXTENSIONS:
                         subtitle_files.append(item.name)
+            
+            artifacts_dir_tmp = project_dir / "artifacts"
+            if artifacts_dir_tmp.is_dir():
+                for item in artifacts_dir_tmp.iterdir():
+                    if item.is_file() and item.suffix.lower() in VIDEO_EXTENSIONS:
+                        video_files.append(f"artifacts/{item.name}")
         except OSError:
             return None
 
@@ -429,7 +435,7 @@ class ProjectService:
     ) -> list[dict[str, Any]]:
         candidates: list[tuple[Path, str]] = []
 
-        # Videos
+        # Videos in project root
         for item in project_dir.iterdir():
             if not item.is_file():
                 continue
@@ -441,6 +447,19 @@ class ProjectService:
                     candidates.append((item, "video"))
             elif ext in SUBTITLE_EXTENSIONS:
                 candidates.append((item, "subtitles"))
+
+        # Videos in artifacts
+        artifacts_dir = project_dir / "artifacts"
+        if artifacts_dir.is_dir():
+            for item in artifacts_dir.iterdir():
+                if not item.is_file():
+                    continue
+                ext = item.suffix.lower()
+                if ext in VIDEO_EXTENSIONS:
+                    if re.search(r"_[a-z]{2}\.", item.name, re.IGNORECASE) or item.name == "output_video.mp4":
+                        candidates.append((item, "output_video"))
+                    else:
+                        candidates.append((item, "video"))
 
         # Audio artifacts
         artifacts_dir = project_dir / "artifacts"

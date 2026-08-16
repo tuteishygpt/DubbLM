@@ -303,7 +303,7 @@ export function HukFlowStudioView({
 
   // ── edit translation ───────────────────────────────────────────────────────
   const handleTranslationChange = (id: string, value: string) => {
-    setSegments((prev) => prev.map((s) => s.segment_id === id ? { ...s, translation: value } : s))
+    setSegments((prev) => prev.map((s) => s.segment_id === id ? { ...s, translation: value, synthesized_text: value } : s))
     setDirty(true)
   }
 
@@ -890,7 +890,7 @@ export function HukFlowStudioView({
                     <div className="editable-dubbed-wrapper">
                       <textarea
                         className="dubbed-textarea"
-                        value={seg.translation}
+                        value={seg.synthesized_text || seg.translation}
                         onChange={(e) => handleTranslationChange(seg.segment_id, e.target.value)}
                         onClick={(e) => {
                           e.stopPropagation()

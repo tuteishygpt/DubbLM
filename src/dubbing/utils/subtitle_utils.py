@@ -36,7 +36,11 @@ class SubtitleManager:
             # Get timestamps and text
             start_time = segment["start"]
             end_time = segment["end"]
-            text = segment["text"] if subtitle_type == "original" else segment["translation"]
+            if subtitle_type == "original":
+                text = segment["text"]
+            else:
+                text = segment.get("synthesized_text") or segment.get("translation", "")
+                text = text.replace("\u0301", "")
             duration = end_time - start_time
             
             # Split text into sentences
