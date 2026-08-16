@@ -6,13 +6,13 @@ import json
 import os
 import re
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .contracts import MediaStore
-from .jobs import FileJobRepository, Job, JobNotFoundError, JobValidationError
+from .jobs import FileJobRepository, Job
 from .storage import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
 
 NAMESPACE_DUBBLM_PRJ = uuid.UUID("a7b2c3d4-e5f6-4a1b-8c2d-3e4f5a6b7c8d")
@@ -78,6 +78,7 @@ class ProjectService:
         *,
         job_repository: FileJobRepository | None = None,
         media_store: MediaStore | None = None,
+        queue: object | None = None,
         config_path: str | Path = "dubbing_config.yml",
     ) -> None:
         if projects_root is not None:
@@ -90,6 +91,7 @@ class ProjectService:
         self._projects_root = self._projects_root.resolve()
         self._job_repository = job_repository
         self._media_store = media_store
+        self._queue = queue
         self._config_path = str(config_path)
 
     @property
@@ -139,7 +141,7 @@ class ProjectService:
         registered_files = self._register_project_files(owner_id, job_id, project_dir, config)
 
         # Create or update Job in repository
-        job = self._job_repository.create(
+        self._job_repository.create(
             owner_id,
             config,
             job_id=job_id,
@@ -153,6 +155,41 @@ class ProjectService:
             state={"status": "succeeded", "message": f"Loaded ready project '{project_name}'"},
             files=registered_files,
         )
+        return self._job_repository.get(owner_id, job_id)
+
+    def run_project_step(
+        self,
+        project_name: str,
+        owner_id: str,
+        *,
+        run_step: str = "tts_to_end",
+        overrides: dict[str, Any] | None = None,
+    ) -> Job:
+        """Run or resume a dubbing pipeline step on an existing project folder."""
+        if self._job_repository is None or self._media_store is None:
+            raise ProjectValidationError("Job repository and media store are required to run projects.")
+
+        project_dir = self._validate_project_dir(project_name)
+        config = self._build_project_config(project_dir)
+        config["run_step"] = run_step
+        if overrides:
+            config.update(overrides)
+
+        job_id = str(uuid.uuid4())
+        registered_files = self._register_project_files(owner_id, job_id, project_dir, config)
+
+        self._job_repository.create(
+            owner_id,
+            config,
+            job_id=job_id,
+            state={"status": "queued", "message": f"Queued {run_step} for project '{project_name}'"},
+            files=registered_files,
+        )
+        if self._queue is not None:
+            try:
+                self._queue.enqueue(job_id)
+            except RuntimeError:
+                pass
         return self._job_repository.get(owner_id, job_id)
 
     @staticmethod
@@ -378,6 +415,13 @@ class ProjectService:
         }
         if output_video is not None:
             config["output"] = str(output_video)
+
+        metadata = self._read_project_metadata(artifacts_dir)
+        saved_cfg = metadata.get("config")
+        if isinstance(saved_cfg, dict):
+            for k, v in saved_cfg.items():
+                if k not in ("run_step", "output", "project_dir", "artifacts_dir") and v is not None:
+                    config[k] = v
         return config
 
     def _register_project_files(

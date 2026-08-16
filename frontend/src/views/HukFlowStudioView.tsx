@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { ApiClient } from '../api/types'
 
 // ── API types ─────────────────────────────────────────────────────────────
@@ -54,16 +55,64 @@ function formatTimecode(seconds: number): string {
 
 type NavigateView = 'HukFlow Studio' | 'Workflow' | 'Jobs' | 'Settings' | 'Voice Profiles' | 'Dubbing Texts'
 
+export interface RunStepOption {
+  id: string
+  title: string
+  badge: string
+  description: string
+  icon: string
+}
+
+export const RUN_STEPS: RunStepOption[] = [
+  {
+    id: 'tts_to_end',
+    title: 'TTS to End (Re-dub & Assemble)',
+    badge: 'Recommended',
+    description: 'Re-generate speech for all segments and build final audio & video',
+    icon: 'record_voice_over',
+  },
+  {
+    id: 'combine_video',
+    title: 'Combine Video Only (Mix & Subtitles)',
+    badge: 'Fast',
+    description: 'Re-mix existing audio with background and render video with subtitles',
+    icon: 'movie_filter',
+  },
+  {
+    id: 'translate_only',
+    title: 'Re-translate (LLM Translation)',
+    badge: 'LLM',
+    description: 'Run context-aware LLM translation using current transcripts',
+    icon: 'translate',
+  },
+  {
+    id: 'transcribe_only',
+    title: 'Transcribe Only (Diarization & STT)',
+    badge: 'STT',
+    description: 'Re-run speaker diarization and speech recognition only',
+    icon: 'transcribe',
+  },
+  {
+    id: 'from_scratch',
+    title: 'From Scratch (Force Clear Cache)',
+    badge: 'Full Run',
+    description: 'Clear all caches and re-run entire dubbing pipeline from zero',
+    icon: 'restart_alt',
+  },
+]
+
 export function HukFlowStudioView({
   client,
   onNavigate,
   pendingOpenJobId,
   onPendingOpenJobConsumed,
+  onJobStarted,
 }: {
   client?: ApiClient
   onNavigate?: (view: NavigateView) => void
   pendingOpenJobId?: string | null
   onPendingOpenJobConsumed?: () => void
+  onJobStarted?: (jobId: string, projectName?: string) => void
 }) {
   // ── jobs / document state ─────────────────────────────────────────────────
   const [jobs, setJobs] = useState<Job[]>([])
@@ -76,6 +125,11 @@ export function HukFlowStudioView({
   const [dirty, setDirty] = useState(false)
   const [loadError, setLoadError] = useState<string>('')
   const [isLoading, setIsLoading] = useState(false)
+
+  // ── Run Step action menu state ────────────────────────────────────────────
+  const [showRunDropdown, setShowRunDropdown] = useState(false)
+  const [isRunningStep, setIsRunningStep] = useState(false)
+  const runDropdownRef = useRef<HTMLDivElement>(null)
 
   // ── active segment (selected card) ───────────────────────────────────────
   const [activeSegmentId, setActiveSegmentId] = useState<string>('')
@@ -503,9 +557,121 @@ export function HukFlowStudioView({
     return () => cancelAnimationFrame(animationFrameId)
   }, [isPlaying, videoDuration, duration])
 
+  // Close run dropdown when clicking outside
+  useEffect(() => {
+    if (!showRunDropdown) return
+    const handle = (e: MouseEvent) => {
+      if (runDropdownRef.current && !runDropdownRef.current.contains(e.target as Node)) {
+        setShowRunDropdown(false)
+      }
+    }
+    window.document.addEventListener('mousedown', handle)
+    return () => window.document.removeEventListener('mousedown', handle)
+  }, [showRunDropdown])
+
+  const handleRunStep = async (stepId: string) => {
+    if (!client) return
+    setShowRunDropdown(false)
+    setIsRunningStep(true)
+    setStatusMessage(`Starting ${stepId}…`)
+
+    try {
+      // 1. If user has unsaved text changes, save them first!
+      if (dirty && selectedJobId) {
+        await handleSave()
+      }
+
+      let projectName = selectedProjectName
+      if (!projectName && selectedJobId) {
+        const foundProj = projects.find((p) => p.job_id === selectedJobId)
+        if (foundProj) projectName = foundProj.name
+      }
+
+      if (projectName) {
+        const res = await client.post<{ project_name: string; job: Job }>(
+          `/api/projects/${encodeURIComponent(projectName)}/run`,
+          { run_step: stepId, overrides: {} },
+        )
+        if (res?.job?.id) {
+          setStatusMessage(`Started ${stepId} (Job: ${res.job.id})`)
+          onJobStarted?.(res.job.id, projectName)
+        }
+      } else {
+        setLoadError('Please select or open a project first to run pipeline steps.')
+      }
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Failed to start pipeline step.')
+    } finally {
+      setIsRunningStep(false)
+    }
+  }
+
+  const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null)
+
+  useEffect(() => {
+    const el = window.document.getElementById('studio-header-run-slot')
+    if (el) setPortalTarget(el)
+  }, [])
+
+  const runMenuNode = (selectedProjectName || selectedJobId) ? (
+    <div className="studio-run-menu-wrap" ref={runDropdownRef}>
+      <button
+        type="button"
+        className="studio-run-btn"
+        onClick={() => setShowRunDropdown((v) => !v)}
+        disabled={isRunningStep}
+        title="Run or resume dubbing pipeline steps"
+        aria-haspopup="true"
+        aria-expanded={showRunDropdown}
+      >
+        {isRunningStep ? (
+          <span className="material-symbols-outlined spin-anim">sync</span>
+        ) : (
+          <span className="material-symbols-outlined">bolt</span>
+        )}
+        <span>{isRunningStep ? 'Starting…' : 'Run Step'}</span>
+        <span className="material-symbols-outlined dropdown-arrow">
+          {showRunDropdown ? 'expand_less' : 'expand_more'}
+        </span>
+      </button>
+
+      {showRunDropdown && (
+        <div className="run-menu-dropdown" role="menu" aria-label="Pipeline steps">
+          <div className="run-menu-header">
+            <span className="material-symbols-outlined">settings_suggest</span>
+            <span>Pipeline Execution Steps</span>
+          </div>
+          {RUN_STEPS.map((step) => (
+            <button
+              key={step.id}
+              type="button"
+              className="run-menu-item"
+              role="menuitem"
+              onClick={() => void handleRunStep(step.id)}
+            >
+              <div className="run-item-icon">
+                <span className="material-symbols-outlined">{step.icon}</span>
+              </div>
+              <div className="run-item-body">
+                <div className="run-item-top">
+                  <span className="run-item-title">{step.title}</span>
+                  <span className="run-item-badge">{step.badge}</span>
+                </div>
+                <span className="run-item-desc">{step.description}</span>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  ) : null
+
   return (
     <section className="studio-view-container">
       <h1 className="sr-only">HukFlow Studio</h1>
+
+      {/* Render Run Step menu next to Export button via portal if header slot exists */}
+      {portalTarget && runMenuNode ? createPortal(runMenuNode, portalTarget) : null}
 
       {/* ── Main Split Workspace ─────────────────────────────────────────── */}
       <div className="studio-workspace">
@@ -556,6 +722,9 @@ export function HukFlowStudioView({
                   Save
                 </button>
               )}
+
+              {/* Fallback inline render if portal target is not present */}
+              {!portalTarget && runMenuNode}
             </div>
 
             <div className="pane-actions">

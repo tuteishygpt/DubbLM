@@ -4,7 +4,8 @@ import os
 import sys
 import json
 import argparse
-from typing import Dict, Any, Optional, List, Tuple, Union
+import re
+from typing import Dict, Any
 from pathlib import Path
 import yaml
 from .log_config import get_logger
@@ -21,7 +22,18 @@ def _semantic_bool_argument(value: Any) -> Any:
         return False
     return value
 
+
 DEFAULT_PROJECTS_ROOT = Path(__file__).resolve().parents[3] / "prj"
+
+_UNSAFE_PROJECT_DIR_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def sanitize_project_dir_name(name: str) -> str:
+    """Sanitize user-provided project name to be safe for directory names across OSes."""
+    if not name:
+        return ""
+    return _UNSAFE_PROJECT_DIR_CHARS.sub("_", str(name)).strip(" .")
+
 
 def _parse_time_to_seconds(time_str: str) -> float:
     """Parse time string (HH:MM:SS, MM:SS, or SS) into seconds."""
@@ -114,6 +126,7 @@ class DubbingConfig:
             'segment_reference_min_duration': 2.0,
             'isolated_tracks': None,
             'inner_transcription_system': 'deepgram',
+            'project_name': None,
         }
         
         # Required parameters that must come from CLI
@@ -216,7 +229,15 @@ class DubbingConfig:
                 if os.environ.get("DUBBLM_PROJECTS_ROOT")
                 else DEFAULT_PROJECTS_ROOT
             )
-            project_dir = projects_root / input_path.stem
+            raw_project_name = self.config.get("project_name")
+            folder_name = (
+                sanitize_project_dir_name(str(raw_project_name))
+                if raw_project_name
+                else ""
+            )
+            if not folder_name:
+                folder_name = input_path.stem
+            project_dir = projects_root / folder_name
 
         if self.config.get("artifacts_dir"):
             artifacts_dir = Path(self.config["artifacts_dir"])
@@ -248,7 +269,7 @@ class DubbingConfig:
         # Generate output filename if not provided
         if not self.config.get('output'):
             target_lang = self.config['target_language']
-            output_filename = f"{input_path.stem}_{target_lang}{input_path.suffix}"
+            output_filename = f"{project_dir.name}_{target_lang}{input_path.suffix}"
             self.config['output'] = str(project_dir / output_filename)
             logger.info(f"Auto-generated output filename: {self.config['output']}")
         else:
@@ -548,6 +569,11 @@ class DubbingConfig:
             type=str,
             choices=['deepgram', 'assemblyai', 'gemini'],
             help='Transcription backend used per isolated track (default: deepgram). Ignored if no --isolated_track is provided.',
+        )
+        parser.add_argument(
+            '--project_name',
+            type=str,
+            help='Custom project name used for folder and output naming in prj/',
         )
 
         return parser

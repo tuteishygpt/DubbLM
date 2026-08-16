@@ -85,7 +85,7 @@ class SpeakerReporter:
                     except Exception as e:
                         logger.error(f"Error copying sample for {speaker_id}: {e}")
                         f.write(f"Speaker ID: {speaker_id}\n")
-                        f.write(f"  Voice Sample: Error - Could not copy sample file.\n")
+                        f.write("  Voice Sample: Error - Could not copy sample file.\n")
 
                     # Add a few example phrases
                     example_phrases = segments_by_speaker.get(speaker_id, [])

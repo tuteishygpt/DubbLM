@@ -7,6 +7,7 @@ import { SettingsView } from './views/SettingsView'
 import { VoicesView } from './views/VoicesView'
 import { DubbingTextsView } from './views/DubbingTextsView'
 import { HukFlowStudioView } from './views/HukFlowStudioView'
+import { JobProgressView } from './views/JobProgressView'
 
 const views = ['HukFlow Studio', 'Workflow', 'Jobs', 'Settings', 'Voice Profiles', 'Dubbing Texts'] as const
 type View = (typeof views)[number]
@@ -23,9 +24,13 @@ interface ProjectSummary {
 interface Job { id: string; status: string }
 
 export default function App({ client = apiClient }: { client?: ApiClient }) {
-  const [view, setView] = useState<View>('HukFlow Studio')
+  const [view, setView] = useState<View>('Workflow')
   const [config, setConfig] = useState<ConfigResponse>()
   const [error, setError] = useState('')
+
+  // ── Active dubbing job progress screen state ──────────────────────────────
+  const [activeProgressJobId, setActiveProgressJobId] = useState<string | null>(null)
+  const [activeProgressProjectName, setActiveProgressProjectName] = useState<string>('Dubbing Project')
 
   // ── Open Project sidebar state ────────────────────────────────────────────
   const [projects, setProjects] = useState<ProjectSummary[]>([])
@@ -73,6 +78,7 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
       )
       if (res?.job?.id) {
         setPendingOpenJobId(res.job.id)
+        setActiveProgressJobId(null)
         setView('HukFlow Studio')
       }
     } catch (err) {
@@ -83,7 +89,23 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
     }
   }
 
-  const isStudio = view === 'HukFlow Studio'
+  const handleJobStarted = (jobId: string, projectName?: string) => {
+    setActiveProgressJobId(jobId)
+    setActiveProgressProjectName(projectName || 'Dubbing Project')
+  }
+
+  const handleJobProgressComplete = (jobId: string) => {
+    setActiveProgressJobId(null)
+    setPendingOpenJobId(jobId)
+    setView('HukFlow Studio')
+  }
+
+  const handleJobProgressCancel = () => {
+    setActiveProgressJobId(null)
+    setView('Workflow')
+  }
+
+  const isStudio = view === 'HukFlow Studio' && !activeProgressJobId
 
   return (
     <div className="app-shell">
@@ -105,7 +127,10 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
                 key={item}
                 type="button"
                 className="header-nav-btn"
-                onClick={() => setView(item)}
+                onClick={() => {
+                  setActiveProgressJobId(null)
+                  setView(item)
+                }}
               >
                 {item}
               </button>
@@ -124,6 +149,7 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
           {isStudio && (
             <>
               <button className="header-nav-btn-secondary" type="button">Share</button>
+              <div id="studio-header-run-slot" className="studio-header-run-slot" />
               <button className="export-btn">Export</button>
             </>
           )}
@@ -152,7 +178,10 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
             <button
               className="new-clip-btn"
               type="button"
-              onClick={() => setView('Workflow')}
+              onClick={() => {
+                setActiveProgressJobId(null)
+                setView('Workflow')
+              }}
             >
               <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>add</span>
               New Clip
@@ -216,7 +245,16 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
 
             <nav aria-label="Primary">
               {views.map((item) => (
-                <button key={item} type="button" data-view={item} aria-current={item === view ? 'page' : undefined} onClick={() => setView(item)}>
+                <button
+                  key={item}
+                  type="button"
+                  data-view={item}
+                  aria-current={item === view && !activeProgressJobId ? 'page' : undefined}
+                  onClick={() => {
+                    setActiveProgressJobId(null)
+                    setView(item)
+                  }}
+                >
                   {item}
                 </button>
               ))}
@@ -237,24 +275,40 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
 
         {/* Main Canvas Workspace */}
         <main className={isStudio ? 'main--studio' : ''}>
-          {/* Studio renders immediately with demo data — no backend required */}
-          {view === 'HukFlow Studio' && (
-            <HukFlowStudioView
+          {/* Active Job Progress View */}
+          {activeProgressJobId ? (
+            <JobProgressView
               client={client}
-              onNavigate={setView}
-              pendingOpenJobId={pendingOpenJobId}
-              onPendingOpenJobConsumed={() => setPendingOpenJobId(null)}
+              jobId={activeProgressJobId}
+              projectName={activeProgressProjectName}
+              onComplete={handleJobProgressComplete}
+              onCancel={handleJobProgressCancel}
             />
-          )}
+          ) : (
+            <>
+              {/* Studio renders immediately with demo data — no backend required */}
+              {view === 'HukFlow Studio' && (
+                <HukFlowStudioView
+                  client={client}
+                  onNavigate={setView}
+                  pendingOpenJobId={pendingOpenJobId}
+                  onPendingOpenJobConsumed={() => setPendingOpenJobId(null)}
+                  onJobStarted={handleJobStarted}
+                />
+              )}
 
-          {/* Other views need config from backend */}
-          {view !== 'HukFlow Studio' && !config && !error && <p role="status">Loading application…</p>}
-          {view !== 'HukFlow Studio' && error && <p role="alert">{error}</p>}
-          {view !== 'HukFlow Studio' && config && view === 'Workflow' && <WorkflowView client={client} config={config} />}
-          {view !== 'HukFlow Studio' && config && view === 'Jobs' && <JobsView client={client} />}
-          {view !== 'HukFlow Studio' && config && view === 'Settings' && <SettingsView client={client} config={config} />}
-          {view !== 'HukFlow Studio' && config && view === 'Voice Profiles' && <VoicesView client={client} />}
-          {view !== 'HukFlow Studio' && config && view === 'Dubbing Texts' && <DubbingTextsView client={client} />}
+              {/* Other views need config from backend */}
+              {view !== 'HukFlow Studio' && !config && !error && <p role="status">Loading application…</p>}
+              {view !== 'HukFlow Studio' && error && <p role="alert">{error}</p>}
+              {view !== 'HukFlow Studio' && config && view === 'Workflow' && (
+                <WorkflowView client={client} config={config} onJobStarted={handleJobStarted} />
+              )}
+              {view !== 'HukFlow Studio' && config && view === 'Jobs' && <JobsView client={client} />}
+              {view !== 'HukFlow Studio' && config && view === 'Settings' && <SettingsView client={client} config={config} />}
+              {view !== 'HukFlow Studio' && config && view === 'Voice Profiles' && <VoicesView client={client} />}
+              {view !== 'HukFlow Studio' && config && view === 'Dubbing Texts' && <DubbingTextsView client={client} />}
+            </>
+          )}
         </main>
       </div>
     </div>

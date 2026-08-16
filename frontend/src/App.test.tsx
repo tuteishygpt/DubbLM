@@ -8,7 +8,7 @@ import {
   decodeSseEvent,
   type EventSourceLike,
 } from './api/client'
-import type { ApiClient, ConfigResponse } from './api/types'
+import type { ApiClient, ConfigResponse, SseEvent } from './api/types'
 
 const config: ConfigResponse = { revision: 'r1', values: {}, schema: { fields: [] } }
 
@@ -28,9 +28,9 @@ describe('application shell', () => {
   it('navigates among all six views with accessible controls', async () => {
     const user = userEvent.setup()
     render(<App client={stubClient()} />)
-    await screen.findByRole('heading', { name: 'HukFlow Studio' })
+    await screen.findByRole('heading', { name: 'Workflow' })
 
-    for (const view of ['Workflow', 'Jobs', 'Settings', 'Voice Profiles', 'Dubbing Texts', 'HukFlow Studio']) {
+    for (const view of ['HukFlow Studio', 'Jobs', 'Settings', 'Voice Profiles', 'Dubbing Texts', 'Workflow']) {
       await user.click(screen.getByRole('button', { name: view }))
       expect(screen.getByRole('heading', { name: view })).toBeInTheDocument()
     }
@@ -48,6 +48,68 @@ describe('application shell', () => {
 
     reject(new Error('offline'))
     expect(await screen.findByRole('alert')).toHaveTextContent('offline')
+  })
+
+  it('switches to JobProgressView when a dubbing job is started and transitions to Studio upon completion', async () => {
+    const user = userEvent.setup()
+    let sseCallback: ((event: SseEvent) => void) | undefined
+    const workflowConfig: ConfigResponse = {
+      revision: 'r1',
+      values: { source_language: 'en', target_language: 'be' },
+      schema: {
+        fields: [
+          { name: 'source_language', label: 'Source language', type: 'select', workflow: true },
+          { name: 'target_language', label: 'Target language', type: 'select', workflow: true },
+        ],
+      },
+    }
+
+    const client = stubClient({
+      get: vi.fn(async (path: string) => {
+        if (path === '/api/config') return workflowConfig
+        if (path === '/api/options') return { languages: [{ value: 'en', label: 'English' }, { value: 'be', label: 'Belarusian' }] }
+        if (path === '/api/jobs/job-app-1') return { id: 'job-app-1', status: 'running' }
+        if (path === '/api/projects') return { projects: [] }
+        return {}
+      }) as ApiClient['get'],
+      post: vi.fn().mockResolvedValue({ id: 'job-app-1', status: 'queued' }),
+      upload: vi.fn().mockResolvedValue({ id: 'upload-video-1' }),
+      subscribeJobEvents: vi.fn((_id, onEvent) => {
+        sseCallback = onEvent
+        return () => { sseCallback = undefined }
+      }),
+    })
+
+    render(<App client={client} />)
+    expect(await screen.findByRole('heading', { name: 'Workflow' })).toBeInTheDocument()
+
+    // Upload video and start dubbing
+    await user.upload(screen.getByLabelText('Video'), new File(['test'], 'input.mp4', { type: 'video/mp4' }))
+    await user.click(screen.getByRole('button', { name: 'Start' }))
+
+    // Expect transition to Progress Screen
+    expect(await screen.findByRole('progressbar')).toBeInTheDocument()
+    expect(screen.getByText('AI DUBBING PIPELINE')).toBeInTheDocument()
+    expect(screen.getByText(/ID: job-app-1/i)).toBeInTheDocument()
+    expect(screen.getByText('CURRENT ACTION:')).toBeInTheDocument()
+
+    // Emit success event and click proceed to studio
+    act(() => {
+      sseCallback?.({
+        id: 10,
+        job_id: 'job-app-1',
+        type: 'state',
+        timestamp: '2026-08-16T20:00:10Z',
+        data: { status: 'succeeded' },
+      })
+    })
+
+    expect(await screen.findByText('Dubbing successfully generated!')).toBeInTheDocument()
+    const proceedBtn = screen.getByRole('button', { name: /Go to Studio/i })
+    await user.click(proceedBtn)
+
+    // Should be on HukFlow Studio view now
+    expect(await screen.findByRole('heading', { name: 'HukFlow Studio' })).toBeInTheDocument()
   })
 })
 

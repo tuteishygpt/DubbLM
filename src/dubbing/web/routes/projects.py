@@ -31,9 +31,37 @@ def get_project(project_name: str, user=Depends(current_user), projects=Depends(
     return _project_detail_public(detail)
 
 
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ProjectRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    run_step: str = Field(default="tts_to_end")
+    overrides: dict[str, Any] = Field(default_factory=dict)
+
+
 @router.post("/{project_name}/open", status_code=status.HTTP_200_OK)
 def open_project(project_name: str, user=Depends(current_user), projects=Depends(get_project_service)):
     job = projects.open_project(project_name, user.id)
+    return {
+        "project_name": project_name,
+        "job": job_public(job),
+    }
+
+
+@router.post("/{project_name}/run", status_code=status.HTTP_201_CREATED)
+def run_project(
+    project_name: str,
+    payload: ProjectRunRequest = ProjectRunRequest(),
+    user=Depends(current_user),
+    projects=Depends(get_project_service),
+):
+    job = projects.run_project_step(
+        project_name,
+        user.id,
+        run_step=payload.run_step,
+        overrides=payload.overrides,
+    )
     return {
         "project_name": project_name,
         "job": job_public(job),

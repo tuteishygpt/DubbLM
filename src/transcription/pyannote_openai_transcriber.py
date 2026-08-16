@@ -6,21 +6,14 @@ import time
 import pickle
 import shutil
 import hashlib
-import subprocess
-import re
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple, Any, Optional, Union, Set, TYPE_CHECKING
+from typing import Dict, List, Tuple, Any, Optional, TYPE_CHECKING
 from pyannote.audio import Pipeline
-from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
 import whisper
-from types import SimpleNamespace
-import torch
 from pydub import AudioSegment
 from pydub.silence import split_on_silence
-from speechbrain.pretrained import EncoderClassifier
 from scipy.spatial.distance import cosine
-from speechbrain.dataio.dataio import read_audio
 from src.utils.sent_split import greedy_sent_split
 from transcription.transcription_interface import BaseTranscriber
 from src.utils.audio_embedder import AudioEmbedder
@@ -513,7 +506,7 @@ class PyAnnoteOpenAITranscriber(BaseTranscriber):
             Dictionary mapping time ranges to speaker IDs
         """
         # Start timing
-        start_time = time.perf_counter()
+        time.perf_counter()
 
         # If no cache_key is provided, generate one
         if cache_key is None:

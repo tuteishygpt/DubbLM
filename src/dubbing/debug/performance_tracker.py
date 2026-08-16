@@ -109,7 +109,7 @@ class PerformanceTracker:
         # Calculate and display the processing speed relative to video duration
         if total_duration and total_duration > 0:
             speed_ratio = total_elapsed / total_duration
-            summary_lines.append(f"\nProcessing speed:")
+            summary_lines.append("\nProcessing speed:")
             summary_lines.append(f" - Video duration: {total_duration:.2f} seconds ({total_duration/60:.2f} minutes)")
             summary_lines.append(f" - Processing-to-video ratio: {speed_ratio:.2f}x (higher means slower)")
             summary_lines.append(f" - Real-time factor: {1/speed_ratio:.2f}x (how many seconds of video processed per second)")
@@ -157,7 +157,7 @@ class PerformanceTracker:
         total_duration = self.metrics.get("video_duration", 0)
         if total_duration and total_duration > 0:
             speed_ratio = total_report_time / total_duration
-            summary_lines.append(f"\nProcessing speed relative to video/segment duration:")
+            summary_lines.append("\nProcessing speed relative to video/segment duration:")
             summary_lines.append(f" - Video/Segment duration: {total_duration:.2f} seconds ({total_duration/60:.2f} minutes)")
             summary_lines.append(f" - Processing-to-duration ratio: {speed_ratio:.2f}x (higher means slower)")
     

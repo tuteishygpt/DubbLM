@@ -2,7 +2,6 @@
 Implementation of transcription and diarization using WhisperX.
 """
 import os
-import time
 from typing import Dict, List, Tuple, Any, Optional, TYPE_CHECKING
 
 from transcription.transcription_interface import BaseTranscriber

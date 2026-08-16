@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional, Tuple, Set, Literal, TYPE_CHECKING
+from typing import List, Dict, Any, Optional, Literal, TYPE_CHECKING
 import time
 import json
 import os
@@ -1238,7 +1238,7 @@ IMPORTANT: Respond in JSON format with an array of objects containing speaker an
                         logger.warning(f"Empty translation received, retrying ({attempt+1}/{max_attempts})...")
                         if debug:
                             self._write_attempt_debug(session_dir, i, attempt, chunks, prompt, translation_text, None, 
-                                                     chunk_text, f"Empty translation received")
+                                                     chunk_text, "Empty translation received")
                         continue
                     else:
                         # Will handle failure after loop
@@ -1939,7 +1939,7 @@ IMPORTANT: The glossary provides base forms of translations. When using a term f
                     num_segments_in_chunk = len(chunk["translated_pairs"]) # Fallback if segments are missing
 
                 if current_pair_index + num_segments_in_chunk > len(refined_pairs):
-                    logger.error(f"Error: Not enough refined pairs to redistribute into chunk structure. Skipping chunk.")
+                    logger.error("Error: Not enough refined pairs to redistribute into chunk structure. Skipping chunk.")
                     # Optionally handle this error more gracefully, e.g., reuse original chunk data
                     batch_refined_chunks.append(chunk) # Append original chunk as fallback
                     continue
@@ -1988,7 +1988,7 @@ IMPORTANT: The glossary provides base forms of translations. When using a term f
             try:
                 comprehensive_report_file = os.path.join(session_dir, "comprehensive_refinement_comparison.txt")
                 with open(comprehensive_report_file, "w", encoding="utf-8") as f:
-                    f.write(f"=== COMPREHENSIVE REFINEMENT COMPARISON REPORT ===\n")
+                    f.write("=== COMPREHENSIVE REFINEMENT COMPARISON REPORT ===\n")
                     f.write(f"Total execution time: {total_execution_time:.2f} seconds\n")
                     f.write(f"Processed {len(translated_chunks)} chunks in {len(batches)} batches\n\n")
                     
@@ -2076,7 +2076,7 @@ IMPORTANT: The glossary provides base forms of translations. When using a term f
         Returns:
             None
         """
-        logger.debug(f"Generating human-readable timecodes report...")
+        logger.debug("Generating human-readable timecodes report...")
         
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(report_path), exist_ok=True)

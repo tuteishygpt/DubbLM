@@ -7,7 +7,6 @@ import hashlib
 import json
 import numpy as np
 from pathlib import Path
-from collections import Counter
 
 from .models import TTSSegmentData, SegmentAlignment, DiarizationSegment 
 from tts.tts_interface import TTSInterface
@@ -257,7 +256,7 @@ class OpenAITTSWrapper(TTSInterface):
         )
         
         if not reference_embeddings:
-            logger.warning(f"Could not extract embeddings from reference audio.")
+            logger.warning("Could not extract embeddings from reference audio.")
             return self.default_voice
         
         logger.debug(f"Extracted {len(reference_embeddings)} embeddings from reference audio")

@@ -9,7 +9,6 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = '0'  # Async CUDA operations
 # --- End suppression block ---
 
 import sys
-import logging
 from dotenv import load_dotenv
 
 from ..core.config import create_argument_parser, create_config_from_args

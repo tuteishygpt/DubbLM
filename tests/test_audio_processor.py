@@ -181,3 +181,43 @@ def test_run_ffmpeg_command_uses_safe_text_decoding(tmp_path, monkeypatch):
     assert captured["kwargs"]["text"] is True
     assert captured["kwargs"]["encoding"] == "utf-8"
     assert captured["kwargs"]["errors"] == "replace"
+
+
+def test_extract_audio_handles_same_input_and_output_file(tmp_path, monkeypatch):
+    from dubbing.audio.audio_processor import AudioProcessor
+
+    artifacts_audio = tmp_path / "artifacts" / "audio"
+    artifacts_audio.mkdir(parents=True)
+    source_wav = artifacts_audio / "source.wav"
+    source_wav.write_bytes(b"existing wav audio data")
+
+    processor = AudioProcessor(
+        CacheManager(use_cache=False, input_file=str(source_wav)),
+        PerformanceTracker(),
+        artifacts_root=str(tmp_path / "artifacts"),
+    )
+
+    # 1. When start_time is None and duration is None, should return source.wav directly without ffmpeg
+    result_path = processor.extract_audio(str(source_wav), start_time=None, duration=None)
+    assert Path(result_path).resolve() == source_wav.resolve()
+    assert (artifacts_audio / "source.wav.json").exists()
+
+    # 2. When start_time or duration is provided, ffmpeg should output to temp file first
+    executed_commands = []
+
+    def fake_subprocess_run(cmd, *args, **kwargs):
+        executed_commands.append(cmd)
+        # Create temp file so os.replace works
+        temp_file = artifacts_audio / "source_extract_tmp.wav"
+        temp_file.write_bytes(b"trimmed wav audio data")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("dubbing.audio.audio_processor.subprocess.run", fake_subprocess_run)
+
+    result_path = processor.extract_audio(str(source_wav), start_time=0.0, duration=120.0)
+    assert Path(result_path).resolve() == source_wav.resolve()
+    assert len(executed_commands) == 1
+    # Verify input is source_wav and output is source_extract_tmp.wav (not same file)
+    assert f'"{source_wav}"' in executed_commands[0]
+    assert "source_extract_tmp.wav" in executed_commands[0]
+

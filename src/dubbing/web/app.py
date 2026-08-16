@@ -75,6 +75,7 @@ def create_app(
         projects_root,
         job_repository=job_repository,
         media_store=media_store,
+        queue=job_queue,
         config_path=config_path or "dubbing_config.yml",
     )
 

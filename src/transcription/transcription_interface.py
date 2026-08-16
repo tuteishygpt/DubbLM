@@ -1,7 +1,6 @@
 """
 Common interface for transcription and diarization services.
 """
-import os
 import pickle
 import hashlib
 from pathlib import Path

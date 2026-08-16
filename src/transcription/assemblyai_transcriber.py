@@ -2,7 +2,6 @@
 Implementation of transcription and diarization using AssemblyAI API.
 """
 import os
-import time
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional, TYPE_CHECKING
@@ -140,7 +139,7 @@ class AssemblyAITranscriber(BaseTranscriber):
                 f"Converting {audio_file} ({file_size_mb:.1f}MB) to MP3 with bitrate {self.mp3_bitrate}"
             )
             
-            result = subprocess.run(
+            subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
@@ -274,7 +273,7 @@ class AssemblyAITranscriber(BaseTranscriber):
                 }
                 self.cache_manager.save_to_cache(step_name, cache_key, results_to_cache)
             
-            logger.info(f"AssemblyAI transcription completed successfully")
+            logger.info("AssemblyAI transcription completed successfully")
             logger.debug(f"Identified {len(set(speakers_rolls.values()))} speakers")
             logger.debug(f"Generated {len(transcription)} transcription segments")
             

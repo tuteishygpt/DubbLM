@@ -173,3 +173,30 @@ def test_projects_api_dubbing_texts_tsv_project(prj_fixture: Path, tmp_path: Pat
     assert texts["segments"][0]["text"] == "Good morning"
     assert texts["segments"][0]["translation"] == "Доброе утро"
     assert texts["segments"][0]["audio"] is not None
+
+
+class DummyQueue:
+    def __init__(self):
+        self.enqueued = []
+    def start(self): pass
+    def stop(self): pass
+    def enqueue(self, job_id):
+        self.enqueued.append(job_id)
+
+
+def test_projects_api_run_step(prj_fixture: Path, tmp_path: Path):
+    dummy_queue = DummyQueue()
+    app = create_app(root=tmp_path / "data", projects_root=prj_fixture, job_queue=dummy_queue)
+    with TestClient(app) as client:
+        # POST /api/projects/sample_project_1/run with tts_to_end
+        res = client.post(
+            "/api/projects/sample_project_1/run",
+            json={"run_step": "tts_to_end", "overrides": {}},
+        )
+        assert res.status_code == 201
+        data = res.json()
+        assert data["project_name"] == "sample_project_1"
+        job = data["job"]
+        assert job["id"]
+        assert job["status"] in ("queued", "running", "succeeded")
+        assert job["id"] in dummy_queue.enqueued

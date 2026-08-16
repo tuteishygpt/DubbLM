@@ -2,8 +2,7 @@
 
 import os
 import subprocess
-import shutil
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional, Any
 from pathlib import Path
 
 from src.utils.time_utils import format_seconds_to_srt
@@ -108,7 +107,7 @@ class DebugGenerator:
             logger.debug(message)
             
         try:
-            result = subprocess.run(
+            subprocess.run(
                 command, 
                 shell=True, 
                 check=True, 

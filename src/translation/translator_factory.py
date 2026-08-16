@@ -1,5 +1,3 @@
-from typing import Optional, Dict, Any, Union
-import os
 
 from translation.translation_interface import TranslationInterface
 from translation.llm_translator import LLMTranslator

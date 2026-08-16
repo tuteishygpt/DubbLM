@@ -283,14 +283,11 @@ class XTTSLocalWrapper(TTSInterface):
         )
 
         # 4) перадача на GPU / CPU
-        use_gpu = False
         device_str = "cpu"
         if TORCH_AVAILABLE and self.requested_device:
             if self.requested_device.lower() == "cuda" and torch.cuda.is_available():
-                use_gpu = True
                 device_str = "cuda:0"
             elif self.requested_device.lower() in {"auto", "gpu"} and torch.cuda.is_available():
-                use_gpu = True
                 device_str = "cuda:0"
 
         if TORCH_AVAILABLE:

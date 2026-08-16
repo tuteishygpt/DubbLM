@@ -4,7 +4,6 @@ import os
 import subprocess
 import json
 import tempfile
-import shutil
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict
 
@@ -812,7 +811,7 @@ class VideoProcessor:
                     f"{self._format_filter_input_label(processed_dubbed_audio_stream_label)}volume='{dubbed_volume_expr}':eval=frame[dubbed_conditional]"
                 )
                 all_filter_complex_parts.append(
-                    f"[original_conditional][dubbed_conditional]amix=inputs=2:duration=longest[final_mixed_audio]"
+                    "[original_conditional][dubbed_conditional]amix=inputs=2:duration=longest[final_mixed_audio]"
                 )
                 final_audio_stream_label = "[final_mixed_audio]"
         else:
@@ -921,8 +920,8 @@ class VideoProcessor:
                     command.extend(["-pix_fmt", "yuv420p"])
 
         # Audio encoding (always needed since audio is being replaced)
-        original_audio_codec = video_info.get('audio_codec', 'aac')
-        original_audio_bitrate = video_info.get('audio_bitrate')
+        video_info.get('audio_codec', 'aac')
+        video_info.get('audio_bitrate')
         
         # Use safer audio settings to avoid AAC encoding issues
         command.extend(["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"])
@@ -1107,7 +1106,7 @@ class VideoProcessor:
                             file_size = os.path.getsize(input_file)
                             logger.error(f"    Size: {file_size} bytes")
                         else:
-                            logger.error(f"    File does not exist!")
+                            logger.error("    File does not exist!")
             
             logger.error(f"FFmpeg command failed with return code {e.returncode}")
             logger.error(f"Error output: {error_output}")
@@ -1179,8 +1178,8 @@ class VideoProcessor:
                 cmd.append("/dev/null")
         else:
             # Second pass: final encoding with audio
-            original_audio_codec = video_info.get('audio_codec', 'aac')
-            original_audio_bitrate = video_info.get('audio_bitrate')
+            video_info.get('audio_codec', 'aac')
+            video_info.get('audio_bitrate')
             
             # Use consistent safe audio settings for two-pass encoding
             cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"])
@@ -1364,7 +1363,7 @@ class VideoProcessor:
             
             # Execute command
             logger.debug(f"Creating final audio for pause analysis: {' '.join(cmd)}")
-            result = subprocess.run(
+            subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,

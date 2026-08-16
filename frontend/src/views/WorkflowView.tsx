@@ -48,7 +48,15 @@ const READY_PRESETS: Array<{ label: string; profile: Partial<VoiceProfile> }> = 
   { label: 'F5-TTS - Voice Cloning (auto track)', profile: { tts_system: 'f5', reference_mode: 'speaker' } },
 ]
 
-export function WorkflowView({ client, config }: { client: ApiClient; config: ConfigResponse }) {
+export function WorkflowView({
+  client,
+  config,
+  onJobStarted,
+}: {
+  client: ApiClient
+  config: ConfigResponse
+  onJobStarted?: (jobId: string, projectName?: string) => void
+}) {
   const fields = config.schema.fields.filter((field) => field.workflow || field.scope === 'workflow')
   const regularFields = fields.filter((f) => f.type !== 'boolean')
   const booleanFields = fields.filter((f) => f.type === 'boolean')
@@ -275,6 +283,7 @@ export function WorkflowView({ client, config }: { client: ApiClient; config: Co
         overrides,
       })
       setMessage(`Job ${job.id} ${job.status}`)
+      onJobStarted?.(job.id, projectName.trim() || 'Untitled project')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {

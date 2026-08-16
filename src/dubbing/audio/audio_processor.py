@@ -137,14 +137,36 @@ class AudioProcessor:
                 self.performance_tracker.end_timing("extract_audio")
                 return audio_file
 
+        is_same_file = False
+        try:
+            is_same_file = Path(video_path).resolve() == Path(audio_file).resolve()
+        except OSError:
+            pass
+
+        if is_same_file and start_time is None and duration is None:
+            logger.info(f"Source audio is already target audio file: {audio_file}")
+            try:
+                sidecar.write_text(json.dumps(fingerprint), encoding="utf-8")
+            except OSError as e:
+                logger.debug(f"Could not write source audio sidecar {sidecar}: {e}")
+            self.performance_tracker.end_timing("extract_audio")
+            return audio_file
+
+        temp_audio_file = str(self.audio_dir / "source_extract_tmp.wav")
+
         if start_time is not None or duration is not None:
-            # Extract only the specified segment using ffmpeg
+            # Extract only the specified segment using ffmpeg into temp file
             ss_param = f"-ss {start_time}" if start_time is not None else ""
             t_param = f"-t {duration}" if duration is not None else ""
             
-            trim_cmd = f'ffmpeg -y {ss_param} -i "{video_path}" {t_param} -y -vn -acodec pcm_s16le -ar 16000 -ac 1 "{audio_file}"'
+            trim_cmd = f'ffmpeg -y {ss_param} -i "{video_path}" {t_param} -vn -acodec pcm_s16le -ar 16000 -ac 1 "{temp_audio_file}"'
             result = subprocess.run(trim_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if result.returncode != 0:
+                if os.path.exists(temp_audio_file):
+                    try:
+                        os.remove(temp_audio_file)
+                    except OSError:
+                        pass
                 ffmpeg_error = result.stderr.decode("utf-8", errors="replace").strip()
                 raise RuntimeError(
                     f"ffmpeg failed to extract audio from '{video_path}' (exit code {result.returncode}).\n"
@@ -152,14 +174,27 @@ class AudioProcessor:
                     f"ffmpeg stderr:\n{ffmpeg_error}"
                 )
             
+            os.replace(temp_audio_file, audio_file)
             start_str = f"from {start_time}s" if start_time is not None else "from beginning"
             duration_str = f"for {duration}s" if duration is not None else "to the end"
             logger.info(f"Extracted audio segment {start_str} {duration_str} to {audio_file}")
         else:
             # Extract full audio
-            audio = AudioSegment.from_file(video_path, format="mp4")
-            audio.export(audio_file, format="wav")
-            logger.debug(f"Extracted full audio to {audio_file}")
+            extract_cmd = f'ffmpeg -y -i "{video_path}" -vn -acodec pcm_s16le -ar 16000 -ac 1 "{temp_audio_file}"'
+            result = subprocess.run(extract_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode == 0 and os.path.exists(temp_audio_file):
+                os.replace(temp_audio_file, audio_file)
+                logger.debug(f"Extracted full audio to {audio_file}")
+            else:
+                if os.path.exists(temp_audio_file):
+                    try:
+                        os.remove(temp_audio_file)
+                    except OSError:
+                        pass
+                audio = AudioSegment.from_file(video_path)
+                audio = audio.set_frame_rate(16000).set_channels(1)
+                audio.export(audio_file, format="wav")
+                logger.debug(f"Extracted full audio via AudioSegment to {audio_file}")
         
         try:
             sidecar.write_text(json.dumps(fingerprint), encoding="utf-8")

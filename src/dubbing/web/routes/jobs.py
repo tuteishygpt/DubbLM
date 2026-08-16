@@ -5,7 +5,7 @@ import json
 from dataclasses import asdict
 from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 

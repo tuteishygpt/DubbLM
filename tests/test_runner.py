@@ -669,6 +669,71 @@ def test_smart_dubbing_subtitles_default_to_project_dir(tmp_path, monkeypatch):
     assert dubber._get_subtitle_path("translation", str(video_path), "be") == str(projects_root / "Are" / "Are_be.srt")
 
 
+def test_build_config_from_overrides_uses_project_name_for_directory_and_output(tmp_path, monkeypatch):
+    video_path = tmp_path / "Are.mp4"
+    video_path.write_bytes(b"video")
+    projects_root = _patch_projects_root(monkeypatch, tmp_path)
+
+    config = build_config_from_overrides(
+        {
+            "input": str(video_path),
+            "project_name": "Project bel",
+            "source_language": "en",
+            "target_language": "be",
+        }
+    )
+
+    project_dir = projects_root / "Project bel"
+
+    assert config.get("project_dir") == str(project_dir)
+    assert config.get("artifacts_dir") == str(project_dir / "artifacts")
+    assert config.get("output") == str(project_dir / "Project bel_be.mp4")
+    assert project_dir.is_dir()
+
+
+def test_build_config_from_overrides_sanitizes_unsafe_project_name(tmp_path, monkeypatch):
+    video_path = tmp_path / "Are.mp4"
+    video_path.write_bytes(b"video")
+    projects_root = _patch_projects_root(monkeypatch, tmp_path)
+
+    config = build_config_from_overrides(
+        {
+            "input": str(video_path),
+            "project_name": 'Project: Episode 1 / "Final"?',
+            "source_language": "en",
+            "target_language": "be",
+        }
+    )
+
+    expected_folder = "Project_ Episode 1 _ _Final__"
+    project_dir = projects_root / expected_folder
+
+    assert config.get("project_dir") == str(project_dir)
+    assert config.get("artifacts_dir") == str(project_dir / "artifacts")
+    assert config.get("output") == str(project_dir / f"{expected_folder}_be.mp4")
+    assert project_dir.is_dir()
+
+
+def test_smart_dubbing_subtitles_use_project_name_when_provided(tmp_path, monkeypatch):
+    video_path = tmp_path / "Are.mp4"
+    video_path.write_bytes(b"video")
+    projects_root = _patch_projects_root(monkeypatch, tmp_path)
+    config = build_config_from_overrides(
+        {
+            "input": str(video_path),
+            "project_name": "Project bel",
+            "source_language": "en",
+            "target_language": "be",
+        }
+    )
+
+    dubber = SmartDubbing.__new__(SmartDubbing)
+    dubber.config = config
+
+    assert dubber._get_subtitle_path("original", str(video_path), "en") == str(projects_root / "Project bel" / "Project bel_en.srt")
+    assert dubber._get_subtitle_path("translation", str(video_path), "be") == str(projects_root / "Project bel" / "Project bel_be.srt")
+
+
 def test_translate_segments_passes_project_debug_paths_to_translator(tmp_path, monkeypatch):
     video_path = tmp_path / "Are.mp4"
     video_path.write_bytes(b"video")

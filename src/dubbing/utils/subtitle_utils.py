@@ -3,7 +3,7 @@
 import os
 from typing import List, Dict
 
-from src.utils.time_utils import format_seconds_to_srt, format_seconds_to_hms
+from src.utils.time_utils import format_seconds_to_srt
 from src.utils.sent_split import greedy_sent_split, split_sentences
 from src.dubbing.core.log_config import get_logger
 
@@ -44,7 +44,7 @@ class SubtitleManager:
             # Add a period at the end of each sentence if it doesn't already have ending punctuation
             for i in range(len(sentences)):
                 sentence = sentences[i].strip()
-                if sentence and not sentence[-1] in ['.', '!', '?', ':', ';']:
+                if sentence and sentence[-1] not in ['.', '!', '?', ':', ';']:
                     sentences[i] = sentence + '.'
             
             if len(sentences) == 1 and len(text) <= max_chars_per_line:
@@ -164,7 +164,6 @@ class SubtitleManager:
             if not os.path.exists(file_path):
                 continue
                 
-            current_entry = {}
             entry_lines = []
             line_count = 0
             

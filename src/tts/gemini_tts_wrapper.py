@@ -14,7 +14,6 @@ from google_vertex import get_vertex_ai_settings
 
 from .models import (
     TTSSegmentData, 
-    VoiceDurationStats, 
     VoiceDurationDatabase,
     SegmentAlignment,
     DiarizationSegment
@@ -23,7 +22,7 @@ from tts.tts_interface import TTSInterface
 from src.utils.sent_split import greedy_sent_split
 from src.utils.audio_embedder import AudioEmbedder
 from src.utils.voice_matcher import VoiceMatcher
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from src.dubbing.core.log_config import get_logger
 
 # Import Google GenAI dependencies, with error handling for missing packages
@@ -523,7 +522,6 @@ class SampleManager:
                     file_size = sample_file_path.stat().st_size if sample_file_path.exists() else 0
                     is_valid = file_size > 10000  # At least 10KB
                     reason = f"Validation disabled, file size: {file_size} bytes"
-                    silence_ratio = 0.0 # No silence ratio if validation is off
                 
                 if is_valid:
                     logger.debug(f"Generated valid sample for {voice_name}: {reason}")
@@ -545,7 +543,7 @@ class SampleManager:
                 if sample_file_path.exists():
                     try:
                         sample_file_path.unlink()
-                    except:
+                    except Exception:
                         pass
                 
                 # If this is not the last attempt, continue to retry
@@ -956,7 +954,7 @@ class GeminiTTSWrapper(TTSInterface):
         can_be_pinned = ref_duration is not None and ref_duration >= min_ref_duration
 
         if not can_be_pinned:
-            logger.debug(f"Reference audio is too short for pinning. Using for current synthesis only.")
+            logger.debug("Reference audio is too short for pinning. Using for current synthesis only.")
 
         # Determine optimal segment duration based on audio length
         segment_duration_ms = 3000  # Default 3 seconds
@@ -976,7 +974,7 @@ class GeminiTTSWrapper(TTSInterface):
         )
         
         if not reference_embeddings:
-            logger.warning(f"Could not extract embeddings from reference audio.")
+            logger.warning("Could not extract embeddings from reference audio.")
             return self._validate_voice_name(self.config.default_voice)
         
         logger.debug(f"Extracted {len(reference_embeddings)} embeddings from reference audio (duration: {ref_duration:.1f}s)")

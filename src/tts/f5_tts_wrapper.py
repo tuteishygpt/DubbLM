@@ -1,13 +1,11 @@
-from typing import Optional, Dict, Any, Union, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple
 import os
-from importlib.resources import files
 import shutil
 from pydub import AudioSegment
-from pydub.silence import detect_nonsilent, split_on_silence
-import glob
+from pydub.silence import detect_nonsilent
 import tempfile
 import hashlib
-from datetime import datetime, timezone
+import numpy as np
 
 from tts.tts_interface import TTSInterface
 from .models import TTSSegmentData, SegmentAlignment, DiarizationSegment
@@ -22,10 +20,6 @@ except ImportError:
 
 # Import F5TTS dependencies, with error handling for missing packages
 try:
-    from f5_tts.api import F5TTS as F5TTSOriginal
-    from f5_tts.infer.utils_infer import load_model
-    from omegaconf import OmegaConf
-    from hydra.utils import get_class
     from f5_tts.synthesize import CSynthesizer
     from f5_tts.utils.file_utils import cargar_configuracion
     from f5_tts.utils.audio_utils import array_a_wav #, normalizar_audio # normalizar_audio not used here
@@ -208,7 +202,7 @@ class F5TTSWrapper(TTSInterface):
             logger.warning(f"  F5 ref creation: No segments for speaker {speaker_id}, cannot create reference.")
             return None, None
 
-        best_segment_audio = AudioSegment.empty()
+        AudioSegment.empty()
         try:
             full_audio = AudioSegment.from_file(original_full_audio_path)
         except Exception as e:
@@ -379,9 +373,11 @@ class F5TTSWrapper(TTSInterface):
             logger.debug("F5 TTS cleanup: Releasing synthesizer and ASR references.")
             del self.synthesizer
             self.synthesizer = None
-            if self.hps: del self.hps
+            if self.hps:
+                del self.hps
             self.hps = None
-            if self.asr_model: del self.asr_model
+            if self.asr_model:
+                del self.asr_model
             self.asr_model = None
             
             if self.device == "cuda" and torch.cuda.is_available():
@@ -393,8 +389,10 @@ class F5TTSWrapper(TTSInterface):
         # Clear tracked temp files that might have been missed
         for f_path in self._temp_files_created:
             if os.path.exists(f_path):
-                try: os.remove(f_path)
-                except Exception: pass
+                try:
+                    os.remove(f_path)
+                except Exception:
+                    pass
         self._temp_files_created.clear()
         
     def estimate_audio_segment_length(

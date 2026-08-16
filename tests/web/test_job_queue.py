@@ -91,6 +91,8 @@ def test_submission_persists_project_name_and_full_config_snapshot(tmp_path, mon
     assert metadata["job_id"] == job.id
     assert metadata["config"] == job.config
     assert metadata["config"]["timing_max_speed"] == 1.2
+    assert Path(job.config["project_dir"]) == tmp_path / "prj" / "Client interview"
+    assert Path(job.config["output"]) == tmp_path / "prj" / "Client interview" / "Client interview_es.mp4"
 
 
 def test_submission_rejects_browser_managed_paths_before_media_access(tmp_path):

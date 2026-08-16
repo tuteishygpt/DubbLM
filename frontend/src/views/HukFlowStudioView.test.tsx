@@ -257,4 +257,53 @@ describe('HukFlowStudioView', () => {
       expect(client.get).toHaveBeenCalledWith('/api/jobs/prj-job-6/dubbing-texts')
     })
   })
+
+  it('renders Run Step dropdown and triggers project pipeline step when clicked', async () => {
+    const user = userEvent.setup()
+    const onJobStarted = vi.fn()
+    const client = makeClient({
+      post: vi.fn(async (path: string) => {
+        if (path === '/api/projects/sample_proj/run') {
+          return { project_name: 'sample_proj', job: { id: 'job-run-step-1', status: 'queued' } }
+        }
+        return {}
+      }) as ApiClient['post'],
+      get: vi.fn(async (path: string) => {
+        if (path === '/api/projects') {
+          return { projects: [{ name: 'sample_proj', display_name: 'Sample Proj', segment_count: 5, job_id: 'job-1' }] }
+        }
+        if (path === '/api/jobs/job-1/dubbing-texts') {
+          return textDocument
+        }
+        return []
+      }) as ApiClient['get'],
+    })
+
+    render(<HukFlowStudioView client={client} onJobStarted={onJobStarted} />)
+
+    // Wait for project select and select sample_proj
+    const projectSelect = await screen.findByLabelText('Ready project selector')
+    await user.selectOptions(projectSelect, 'sample_proj')
+
+    // Run Step button should be visible
+    const runBtn = await screen.findByRole('button', { name: /Run Step/i })
+    expect(runBtn).toBeInTheDocument()
+
+    // Open dropdown
+    await user.click(runBtn)
+    expect(screen.getByText('TTS to End (Re-dub & Assemble)')).toBeInTheDocument()
+    expect(screen.getByText('Combine Video Only (Mix & Subtitles)')).toBeInTheDocument()
+    expect(screen.getByText('Re-translate (LLM Translation)')).toBeInTheDocument()
+
+    // Click TTS to End
+    await user.click(screen.getByText('TTS to End (Re-dub & Assemble)'))
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith(
+        '/api/projects/sample_proj/run',
+        expect.objectContaining({ run_step: 'tts_to_end' }),
+      )
+    })
+    expect(onJobStarted).toHaveBeenCalledWith('job-run-step-1', 'sample_proj')
+  })
 })

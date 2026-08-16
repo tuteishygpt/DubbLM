@@ -19,10 +19,9 @@ import torch
 import warnings
 import shutil
 import subprocess
-from typing import Dict, Iterable, List, Tuple, Optional, Any, Literal, Union
+from typing import Dict, Iterable, List, Tuple, Optional, Any
 from pathlib import Path
 from urllib.parse import quote
-from dotenv import load_dotenv
 from pydub import AudioSegment
 
 # Disable all warnings for a cleaner output.
@@ -2419,7 +2418,6 @@ class SmartDubbing:
             return
 
         import io
-        import mimetypes
         from pydub import AudioSegment
 
         prompt = EMOTION_ANALYSIS_PROMPT
@@ -4049,11 +4047,12 @@ class SmartDubbing:
         """
         input_file = Path(input_path)
         project_dir = Path(self.config.get("project_dir"))
+        name_base = project_dir.name if self.config.get("project_name") else input_file.stem
         # Base filenames for source and target
         source_lang = self.config.get('source_language')
         target_lang = self.config.get('target_language')
-        source_name = f"{input_file.stem}_{source_lang}.srt"
-        target_name = f"{input_file.stem}_{target_lang}.srt"
+        source_name = f"{name_base}_{source_lang}.srt"
+        target_name = f"{name_base}_{target_lang}.srt"
 
         # If names coincide, disambiguate with explicit prefixes
         if source_name == target_name:
@@ -4063,7 +4062,7 @@ class SmartDubbing:
                 return str(project_dir / f"target_{target_name}")
 
         # Default: use requested language-specific filename
-        return str(project_dir / f"{input_file.stem}_{language}.srt")
+        return str(project_dir / f"{name_base}_{language}.srt")
 
     def adjust_subtitle_timestamps(self, segments: List[Dict], pause_adjustments: List[Dict[str, float]]) -> List[Dict]:
         """Adjust subtitle timestamps based on pause adjustments from video processing.
