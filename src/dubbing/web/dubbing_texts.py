@@ -907,6 +907,9 @@ class DubbingTextService:
 
     @staticmethod
     def _build_dubber(config: object) -> object:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
         from ..core.smart_dubbing import SmartDubbing
 
         return SmartDubbing(config)
+

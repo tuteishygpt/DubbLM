@@ -6,11 +6,14 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from dotenv import load_dotenv
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+load_dotenv(override=True)
 
 from .dependencies import AnonymousCurrentUser
 from .dubbing_texts import DubbingTextConflictError, DubbingTextError, DubbingTextNotFoundError, DubbingTextValidationError, DubbingTextWriteError, DubbingTextService

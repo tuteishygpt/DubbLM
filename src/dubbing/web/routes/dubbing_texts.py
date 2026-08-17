@@ -64,3 +64,4 @@ def regenerate_text(job_id: str, segment_id: str, payload: RegenerateBody, user=
         owner_id=user.id, job_id=job.id, config=job.config, segment_id=segment_id,
         revision=payload.revision, synthesized_text=payload.synthesized_text,
     ))
+

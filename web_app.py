@@ -3,14 +3,17 @@
 
 import sys
 from pathlib import Path
-
+from dotenv import load_dotenv
 
 SRC_PATH = Path(__file__).resolve().parent / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
+
+load_dotenv(override=True)
 
 from dubbing.web.app import main
 
 
 if __name__ == "__main__":
     main()
+
