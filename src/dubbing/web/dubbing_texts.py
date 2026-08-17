@@ -878,6 +878,49 @@ class DubbingTextService:
         if not isinstance(overrides, Mapping):
             raise DubbingTextValidationError("Dubbing text configuration must be a mapping.")
         config = build_config_from_overrides(dict(overrides))
+
+        # Dynamically merge speaker_map from project_metadata.json if available
+        artifacts_dir = Path(str(config.get("artifacts_dir", "")))
+        if artifacts_dir.is_dir():
+            metadata_path = artifacts_dir / "project_metadata.json"
+            if metadata_path.is_file():
+                try:
+                    import json, yaml
+                    meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    saved_cfg = meta.get("config") if isinstance(meta.get("config"), dict) else {}
+                    speaker_map = saved_cfg.get("speaker_map") if isinstance(saved_cfg.get("speaker_map"), dict) else None
+                    if speaker_map:
+                        config_file = Path(str(config.get("config", "dubbing_config.yml")))
+                        global_voices: dict[str, Any] = {}
+                        if config_file.is_file():
+                            try:
+                                loaded_yaml = yaml.safe_load(config_file.read_bytes().decode("utf-8")) or {}
+                                global_voices = loaded_yaml.get("voices") or {}
+                            except Exception:
+                                pass
+                        resolved_voices = dict(config.get("voices") or {})
+                        for spk_id, prof_name in speaker_map.items():
+                            if prof_name in global_voices:
+                                resolved_voices[spk_id] = global_voices[prof_name]
+                        if resolved_voices:
+                            from dataclasses import asdict, is_dataclass
+                            from ..core.voice_profiles import normalize_voices
+                            raw_map = {}
+                            for spk, v in resolved_voices.items():
+                                if hasattr(v, "to_dict"):
+                                    raw_map[spk] = v.to_dict()
+                                elif is_dataclass(v) and not isinstance(v, type):
+                                    raw_map[spk] = asdict(v)
+                                elif isinstance(v, dict):
+                                    raw_map[spk] = v
+                            normalized = normalize_voices({"voices": raw_map})
+                            if hasattr(config, "set"):
+                                config.set("voices", normalized)
+                            else:
+                                config["voices"] = normalized
+                except Exception:
+                    pass
+
         audio_artifacts_dir = Path(str(config.get("audio_artifacts_dir", "")))
         audio_path = audio_artifacts_dir / "source.wav"
         if not audio_path.is_file():

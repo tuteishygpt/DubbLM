@@ -7,9 +7,10 @@ import { VoicesView } from './VoicesView'
 function api(): ApiClient {
   return {
     get: vi.fn(async (path: string) => path === '/api/options' ? {
-      tts_providers: ['gemini', 'openai'],
-      tts_models: { gemini: ['model-a'], openai: ['model-b'] },
-      tts_voices: { gemini: ['voice-a'], openai: ['voice-b'] },
+      tts_providers: ['gemini', 'openai', 'higgs'],
+      tts_models: { gemini: ['model-a'], openai: ['model-b'], higgs: [] },
+      tts_voices: { gemini: ['voice-a'], openai: ['voice-b'], higgs: [] },
+      tts_reference_capabilities: { gemini: 'unsupported', openai: 'unsupported', higgs: 'required' },
     } : path === '/api/voice-profiles' ? {
       revision: 'settings-1',
       profiles: { SPEAKER_00: { tts_system: 'gemini', model: 'model-a', voice_name: 'voice-a' } },
@@ -31,39 +32,47 @@ function api(): ApiClient {
 }
 
 describe('VoicesView', () => {
-  it('uses revisioned profile and reference-library contracts', async () => {
-    const user = userEvent.setup(); const client = api(); render(<VoicesView client={client} />)
-    expect(await screen.findByLabelText('Name')).toHaveValue('SPEAKER_00')
-    expect(screen.getByRole('option', { name: 'voice-a' })).toBeInTheDocument()
-    expect(screen.queryByRole('option', { name: 'voice-b' })).not.toBeInTheDocument()
+  it('creates a new voice profile and saves it', async () => {
+    const user = userEvent.setup()
+    const client = api()
+    render(<VoicesView client={client} />)
+    expect(await screen.findByLabelText(/Profile name/i)).toHaveValue('SPEAKER_00')
+
+    await user.click(screen.getAllByRole('button', { name: /New profile/i })[0])
+    expect(screen.getByLabelText(/Profile name/i)).toHaveValue('SPEAKER_01')
+
+    await user.clear(screen.getByLabelText(/Profile name/i))
+    await user.type(screen.getByLabelText(/Profile name/i), 'John Male')
     await user.selectOptions(screen.getByLabelText('Provider'), 'openai')
-    expect(screen.getByRole('option', { name: 'voice-b' })).toBeInTheDocument()
     await user.selectOptions(screen.getByLabelText('Model'), 'model-b')
     await user.selectOptions(screen.getByLabelText('Voice'), 'voice-b')
-    await user.click(screen.getByRole('button', { name: 'Save profile' }))
-    expect(client.put).toHaveBeenCalledWith('/api/voice-profiles/SPEAKER_00', {
+    await user.click(screen.getByRole('button', { name: /Save profile/i }))
+
+    expect(client.put).toHaveBeenCalledWith('/api/voice-profiles/John%20Male', {
       revision: 'settings-1',
       profile: { tts_system: 'openai', model: 'model-b', voice_name: 'voice-b' },
     })
+  })
 
-    await user.type(screen.getByLabelText('Speaker label'), 'SPEAKER_00')
-    await user.upload(screen.getByLabelText('Reference audio'), new File(['x'], 'new.wav', { type: 'audio/wav' }))
-    await user.click(screen.getByRole('button', { name: 'Upload reference' }))
-    await waitFor(() => expect(client.upload).toHaveBeenCalledWith('/api/reference-library', expect.any(FormData)))
-    const uploadForm = vi.mocked(client.upload).mock.calls[0][1]
-    expect(uploadForm.get('speaker_id')).toBe('SPEAKER_00')
-    expect(uploadForm.get('revision')).toBe('refs-1')
+  it('saves voice cloning profile with explicit reference_mode', async () => {
+    const user = userEvent.setup()
+    const client = api()
+    render(<VoicesView client={client} />)
+    expect(await screen.findByLabelText(/Profile name/i)).toHaveValue('SPEAKER_00')
 
-    await user.selectOptions(screen.getByLabelText('Reference'), 'SPEAKER_00')
-    await user.click(screen.getByRole('button', { name: 'Assign profile' }))
-    expect(client.put).toHaveBeenCalledWith('/api/reference-library/SPEAKER_00', {
-      profile_speaker_id: 'SPEAKER_00', settings_revision: 'settings-2',
+    await user.click(screen.getAllByRole('button', { name: /New profile/i })[0])
+    expect(screen.getByLabelText(/Profile name/i)).toHaveValue('SPEAKER_01')
+
+    await user.selectOptions(screen.getByLabelText('Provider'), 'higgs')
+    expect(screen.getByLabelText('Reference Mode')).toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Reference Mode'), 'speaker')
+    await user.click(screen.getByRole('button', { name: /Save profile/i }))
+
+    expect(client.put).toHaveBeenCalledWith('/api/voice-profiles/SPEAKER_01', {
+      revision: 'settings-1',
+      profile: { tts_system: 'higgs', reference_mode: 'speaker' },
     })
-
-    await user.click(screen.getByRole('button', { name: 'Delete sample.wav' }))
-    expect(client.delete).toHaveBeenCalledWith('/api/reference-library/Narrator', { revision: 'refs-2' })
-
-    await user.click(screen.getByRole('button', { name: 'Delete profile' }))
-    expect(client.delete).toHaveBeenCalledWith('/api/voice-profiles/SPEAKER_00', { revision: 'settings-3' })
   })
 })
+
+

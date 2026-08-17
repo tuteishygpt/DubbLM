@@ -31,6 +31,8 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
     get: vi.fn(async (path: string) => {
       if (path === '/api/jobs') return { jobs: [{ id: 'job-1', status: 'succeeded' }] }
       if (path.includes('/dubbing-texts')) return textDocument
+      if (path === '/api/voice-profiles') return { revision: 'rev-vp-1', profiles: {} }
+      if (path === '/api/projects') return { projects: [] }
       return {}
     }) as ApiClient['get'],
     post: vi.fn().mockResolvedValue({

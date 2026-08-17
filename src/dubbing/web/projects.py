@@ -197,6 +197,57 @@ class ProjectService:
         """Deterministic UUID based on project name for persistent job linkage."""
         return str(uuid.uuid5(NAMESPACE_DUBBLM_PRJ, project_name.strip()))
 
+    def update_speaker_map(
+        self, project_name: str, owner_id: str, speaker_map: dict[str, str]
+    ) -> None:
+        """Save a SPEAKER_XX → profile-name mapping into project_metadata.json."""
+        project_dir = self._validate_project_dir(project_name)
+        artifacts_dir = project_dir / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        metadata_path = artifacts_dir / "project_metadata.json"
+        metadata = self._read_project_metadata(artifacts_dir)
+        cfg = metadata.get("config") if isinstance(metadata.get("config"), dict) else {}
+        cfg["speaker_map"] = speaker_map
+        metadata["config"] = cfg
+        import tempfile
+        content = json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8")
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=artifacts_dir,
+                prefix=".project_metadata.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp:
+                tmp_path = tmp.name
+                tmp.write(content)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_path, metadata_path)
+        except OSError as exc:
+            raise ProjectError(f"Could not write project metadata: {exc}") from exc
+        finally:
+            if tmp_path:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _load_global_settings(self) -> dict[str, Any]:
+        """Read and parse dubbing_config.yml as a plain dict."""
+        import yaml
+        config_path = Path(self._config_path)
+        try:
+            raw = config_path.read_bytes()
+        except FileNotFoundError:
+            return {}
+        try:
+            decoded = yaml.safe_load(raw.decode("utf-8"))
+        except Exception:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+
     def _validate_project_dir(self, project_name: str) -> Path:
         clean_name = str(project_name or "").strip()
         if not clean_name or ".." in clean_name or "/" in clean_name or "\\" in clean_name:
@@ -207,6 +258,7 @@ class ProjectService:
         if not project_dir.is_dir():
             raise ProjectNotFoundError(f"Project '{clean_name}' not found at {project_dir}.")
         return project_dir
+
 
     def _summarize_project(self, project_dir: Path, owner_id: str) -> ProjectSummary | None:
         video_files: list[str] = []
@@ -278,7 +330,8 @@ class ProjectService:
         created_at = datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc).isoformat()
         updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
 
-        job_id = self.job_id_for_project(project_dir.name)
+        metadata_job_id = str(metadata.get("job_id") or "").strip()
+        job_id = metadata_job_id or self.job_id_for_project(project_dir.name)
         existing_job_id: str | None = None
         if self._job_repository is not None:
             try:
@@ -426,8 +479,21 @@ class ProjectService:
         saved_cfg = metadata.get("config")
         if isinstance(saved_cfg, dict):
             for k, v in saved_cfg.items():
-                if k not in ("run_step", "output", "project_dir", "artifacts_dir") and v is not None:
+                if k not in ("run_step", "output", "project_dir", "artifacts_dir", "speaker_map") and v is not None:
                     config[k] = v
+
+        # Resolve speaker_map: SPEAKER_XX → profile-name → full profile from global voices
+        speaker_map = saved_cfg.get("speaker_map") if isinstance(saved_cfg, dict) else None
+        if speaker_map and isinstance(speaker_map, dict):
+            global_settings = self._load_global_settings()
+            global_voices = global_settings.get("voices") or {}
+            resolved_voices: dict[str, Any] = dict(config.get("voices") or {})
+            for speaker_id, profile_name in speaker_map.items():
+                if profile_name in global_voices:
+                    resolved_voices[speaker_id] = global_voices[profile_name]
+            if resolved_voices:
+                config["voices"] = resolved_voices
+
         return config
 
     def _register_project_files(

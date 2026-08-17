@@ -17,8 +17,14 @@ def public(value: Any) -> Any:
 
 def job_public(job: object) -> dict[str, Any]:
     raw = public(job)
+    config = raw.get("config") if isinstance(raw.get("config"), dict) else {}
+    project_name = str(config.get("project_name") or "").strip()
+    if not project_name and config.get("project_dir"):
+        import os
+        project_name = os.path.basename(str(config["project_dir"]))
     return {
         "id": raw["id"],
+        "project_name": project_name or None,
         "state": raw["state"],
         "created_at": raw["created_at"],
         "started_at": raw["started_at"],

@@ -69,22 +69,25 @@ class HiggsAudioWrapper(TTSInterface):
         self.voice_prompt_mapping: Dict[str, str] = {}
 
     def initialize(self) -> None:
+        import io, contextlib
         token = os.getenv(self.hf_token_env)
+        buf = io.StringIO()
         try:
-            if token:
-                try:
-                    self.client = Client(self.space_id, hf_token=token)
-                except TypeError:
-                    self.client = Client(
-                        self.space_id,
-                        headers={"Authorization": f"Bearer {token}"},
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                if token:
+                    try:
+                        self.client = Client(self.space_id, hf_token=token)
+                    except TypeError:
+                        self.client = Client(
+                            self.space_id,
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+                else:
+                    logger.warning(
+                        "%s environment variable not set - using anonymous Hugging Face access.",
+                        self.hf_token_env,
                     )
-            else:
-                logger.warning(
-                    "%s environment variable not set - using anonymous Hugging Face access.",
-                    self.hf_token_env,
-                )
-                self.client = Client(self.space_id)
+                    self.client = Client(self.space_id)
         except Exception as exc:  # pragma: no cover - network failures at runtime
             raise RuntimeError(
                 f"Failed to initialize Higgs TTS client for space '{self.space_id}': {exc}"

@@ -40,6 +40,7 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
   const [openProjectError, setOpenProjectError] = useState('')
   const [pendingOpenJobId, setPendingOpenJobId] = useState<string | null>(null)
   const [studioMedia, setStudioMedia] = useState<StudioMediaInfo | null>(null)
+  const [showStudioSettings, setShowStudioSettings] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -144,7 +145,12 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
           <button className="header-icon-btn" title="cloud_done">
             <span className="material-symbols-outlined">cloud_done</span>
           </button>
-          <button className="header-icon-btn" title="settings">
+          <button
+            className="header-icon-btn"
+            title="Project Settings"
+            onClick={() => setShowStudioSettings((v) => !v)}
+            aria-label="Open project settings"
+          >
             <span className="material-symbols-outlined">settings</span>
           </button>
           {isStudio && (
@@ -303,6 +309,8 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
                   onPendingOpenJobConsumed={() => setPendingOpenJobId(null)}
                   onJobStarted={handleJobStarted}
                   onActiveMediaChange={setStudioMedia}
+                  showSettingsPanel={showStudioSettings}
+                  onCloseSettingsPanel={() => setShowStudioSettings(false)}
                 />
               )}
 

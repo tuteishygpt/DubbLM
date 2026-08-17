@@ -200,3 +200,54 @@ def test_projects_api_run_step(prj_fixture: Path, tmp_path: Path):
         assert job["id"]
         assert job["status"] in ("queued", "running", "succeeded")
         assert job["id"] in dummy_queue.enqueued
+
+
+def test_update_speaker_map_and_config_resolution(prj_fixture: Path, tmp_path: Path):
+    media = FileMediaStore(tmp_path / "data")
+    jobs = FileJobRepository(tmp_path / "data")
+    config_file = tmp_path / "dubbing_config.yml"
+    config_file.write_text(
+        "voices:\n"
+        "  'John Male':\n"
+        "    tts_system: gemini\n"
+        "    model: gemini-2.5-pro-preview-tts\n"
+        "    voice_name: Fenrir\n",
+        encoding="utf-8",
+    )
+    service = ProjectService(
+        prj_fixture, job_repository=jobs, media_store=media, config_path=config_file
+    )
+
+    # Update speaker map for sample_project_1
+    service.update_speaker_map(
+        "sample_project_1", "local", {"SPEAKER_00": "John Male"}
+    )
+
+    # Verify project detail has saved speaker_map
+    detail = service.get_project("sample_project_1", "local")
+    assert detail.saved_config is not None
+    assert detail.saved_config.get("speaker_map") == {"SPEAKER_00": "John Male"}
+
+    # Verify _build_project_config resolves SPEAKER_00 to John Male's profile
+    cfg = service._build_project_config(prj_fixture / "sample_project_1")
+    assert "voices" in cfg
+    assert "SPEAKER_00" in cfg["voices"]
+    assert cfg["voices"]["SPEAKER_00"]["voice_name"] == "Fenrir"
+    assert cfg["voices"]["SPEAKER_00"]["tts_system"] == "gemini"
+
+
+def test_projects_api_update_speaker_map_endpoint(prj_fixture: Path, tmp_path: Path):
+    app = create_app(root=tmp_path / "data", projects_root=prj_fixture)
+    client = TestClient(app)
+
+    res = client.put(
+        "/api/projects/sample_project_1/speaker-map",
+        json={"speaker_map": {"SPEAKER_00": "John Male"}},
+    )
+    assert res.status_code == 200
+    assert res.json() == {"ok": True}
+
+    # Verify through GET /api/projects/sample_project_1
+    detail_res = client.get("/api/projects/sample_project_1")
+    assert detail_res.status_code == 200
+    assert detail_res.json()["saved_config"]["speaker_map"] == {"SPEAKER_00": "John Male"}

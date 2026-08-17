@@ -252,12 +252,20 @@ def test_profile_validation_rejects_invalid_speaker_and_incomplete_provider_conf
     service = SettingsService(config_path)
     revision = service.load().revision
 
-    with pytest.raises(SettingsValidationError, match="Speaker ID"):
-        service.put_profile("narrator", {"tts_system": "gemini", "model": "model"}, revision=revision)
+    # Arbitrary profile names (like 'narrator' or 'John Male') are now allowed
+    service.put_profile("narrator", {"tts_system": "gemini", "model": "model"}, revision=revision)
+    rev2 = service.list_profiles().revision
+
+    # Empty name or name > 128 chars is rejected
+    with pytest.raises(SettingsValidationError, match="Profile name"):
+        service.put_profile("", {"tts_system": "gemini", "model": "model"}, revision=rev2)
+    with pytest.raises(SettingsValidationError, match="Profile name"):
+        service.put_profile("a" * 129, {"tts_system": "gemini", "model": "model"}, revision=rev2)
     with pytest.raises(SettingsValidationError, match="model"):
-        service.put_profile("SPEAKER_00", {"tts_system": "gemini"}, revision=revision)
+        service.put_profile("SPEAKER_00", {"tts_system": "gemini"}, revision=rev2)
     with pytest.raises(SettingsValidationError, match="reference_mode"):
-        service.put_profile("SPEAKER_00", {"tts_system": "higgs"}, revision=revision)
+        service.put_profile("SPEAKER_00", {"tts_system": "higgs"}, revision=rev2)
+
 
 
 def test_profiles_list_and_put_upsert_create_or_replace_only_matching_profile(tmp_path):
@@ -360,21 +368,22 @@ def test_star_update_or_delete_cannot_invalidate_partial_named_profiles(tmp_path
         service.delete_profile("*", revision=revision)
 
 
-def test_configured_reference_profile_requires_existing_audio_path(tmp_path):
+def test_configured_reference_profile_requires_non_empty_reference_audio(tmp_path):
     config_path = tmp_path / "dubbing_config.yml"
     _write_config(config_path, {"voices": {}})
     service = SettingsService(config_path)
 
-    with pytest.raises(SettingsValidationError, match="Reference file does not exist"):
+    with pytest.raises(SettingsValidationError, match="reference_audio is required"):
         service.put_profile(
             "SPEAKER_00",
             {
                 "tts_system": "higgs",
                 "reference_mode": "configured",
-                "reference_audio": str(tmp_path / "missing.wav"),
+                "reference_audio": "",
             },
             revision=service.list_profiles().revision,
         )
+
 
 
 def test_profile_params_must_be_a_mapping(tmp_path):

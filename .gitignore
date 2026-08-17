@@ -21,6 +21,10 @@ wheels/
 *.egg
 MANIFEST
 
+# Locks
+*.lock
+.*.lock
+
 # Virtual Environment
 .env
 .venv

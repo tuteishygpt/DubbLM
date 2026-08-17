@@ -70,6 +70,7 @@ describe('application shell', () => {
         if (path === '/api/options') return { languages: [{ value: 'en', label: 'English' }, { value: 'be', label: 'Belarusian' }] }
         if (path === '/api/jobs/job-app-1') return { id: 'job-app-1', status: 'running' }
         if (path === '/api/projects') return { projects: [] }
+        if (path === '/api/voice-profiles') return { revision: 'r1', profiles: {} }
         return {}
       }) as ApiClient['get'],
       post: vi.fn().mockResolvedValue({ id: 'job-app-1', status: 'queued' }),

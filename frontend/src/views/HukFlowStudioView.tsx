@@ -3,7 +3,15 @@ import { createPortal } from 'react-dom'
 import type { ApiClient } from '../api/types'
 
 // ── API types ─────────────────────────────────────────────────────────────
-interface Job { id: string; status: string }
+interface Job { id: string; status: string; project_name?: string | null }
+
+interface VoiceProfile {
+  tts_system: string
+  model?: string
+  voice_name?: string
+  reference_mode?: string
+}
+interface ProfilesSnapshot { revision: string; profiles: Record<string, VoiceProfile> }
 
 interface ProjectSummary {
   name: string
@@ -116,6 +124,8 @@ export function HukFlowStudioView({
   onPendingOpenJobConsumed,
   onJobStarted,
   onActiveMediaChange,
+  showSettingsPanel,
+  onCloseSettingsPanel,
 }: {
   client?: ApiClient
   onNavigate?: (view: NavigateView) => void
@@ -123,7 +133,15 @@ export function HukFlowStudioView({
   onPendingOpenJobConsumed?: () => void
   onJobStarted?: (jobId: string, projectName?: string) => void
   onActiveMediaChange?: (info: StudioMediaInfo) => void
+  showSettingsPanel?: boolean
+  onCloseSettingsPanel?: () => void
 }) {
+  // ── voice assignment state ───────────────────────────────────────────────
+  const [voiceProfiles, setVoiceProfiles] = useState<Record<string, VoiceProfile>>({})
+  const [speakerMap, setSpeakerMap] = useState<Record<string, string>>({})
+  const [speakerMapSaving, setSpeakerMapSaving] = useState(false)
+  const [speakerMapStatus, setSpeakerMapStatus] = useState('')
+
   // ── jobs / document state ─────────────────────────────────────────────────
   const [jobs, setJobs] = useState<Job[]>([])
   const [projects, setProjects] = useState<ProjectSummary[]>([])
@@ -212,6 +230,11 @@ export function HukFlowStudioView({
   // ── load jobs and ready projects ──────────────────────────────────────────
   useEffect(() => {
     if (!client) return
+    // Load voice profiles for assignment dropdown
+    client.get<ProfilesSnapshot>('/api/voice-profiles')
+      .then((res) => setVoiceProfiles(res.profiles ?? {}))
+      .catch(() => {})
+
     client.get<{ jobs: Job[] }>('/api/jobs')
       .then((res) => {
         const list = Array.isArray(res.jobs) ? res.jobs : []
@@ -252,6 +275,16 @@ export function HukFlowStudioView({
         setLoadError(err instanceof Error ? err.message : String(err))
       })
       .finally(() => setIsLoading(false))
+
+    // 1b. Fetch speaker_map for the selected job
+    client
+      .get<{ speaker_map?: Record<string, string> }>(`/api/jobs/${encodeURIComponent(selectedJobId)}/speaker-map`)
+      .then((res) => {
+        if (res?.speaker_map && typeof res.speaker_map === 'object') {
+          setSpeakerMap(res.speaker_map)
+        }
+      })
+      .catch(() => {})
 
     // 2. Fetch specific video and audio files associated with the selected job
     client
@@ -345,11 +378,48 @@ export function HukFlowStudioView({
         setSelectedJobId(res.job.id)
         setStatusMessage(`Opened project ${projectName}`)
       }
+      // Load saved speaker_map from project metadata
+      try {
+        const detail = await client.get<{ saved_config?: { speaker_map?: Record<string, string> } }>(
+          `/api/projects/${encodeURIComponent(projectName)}`,
+        )
+        const savedMap = detail?.saved_config?.speaker_map
+        if (savedMap && typeof savedMap === 'object') {
+          setSpeakerMap(savedMap)
+        }
+      } catch { /* ignore, speaker_map is optional */ }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err))
     } finally {
       setIsLoading(false)
       setTimeout(() => setStatusMessage(''), 3000)
+    }
+  }
+
+  // ── save voice assignment (speaker_map) ───────────────────────────────────
+  const handleSaveSpeakerMap = async () => {
+    if (!client) return
+    const targetJobId = selectedJobId
+    const projectName = selectedProjectName || projects.find((p) => p.job_id === selectedJobId)?.name || jobs.find((j) => j.id === selectedJobId)?.project_name
+    if (!targetJobId && !projectName) {
+      setSpeakerMapStatus('Open a project or job to save voice assignment.')
+      setTimeout(() => setSpeakerMapStatus(''), 3000)
+      return
+    }
+    setSpeakerMapSaving(true)
+    setSpeakerMapStatus('Saving…')
+    try {
+      if (targetJobId) {
+        await client.put(`/api/jobs/${encodeURIComponent(targetJobId)}/speaker-map`, { speaker_map: speakerMap })
+      } else if (projectName) {
+        await client.put(`/api/projects/${encodeURIComponent(projectName)}/speaker-map`, { speaker_map: speakerMap })
+      }
+      setSpeakerMapStatus('Voice assignment saved.')
+    } catch (err) {
+      setSpeakerMapStatus(err instanceof Error ? err.message : 'Failed to save.')
+    } finally {
+      setSpeakerMapSaving(false)
+      setTimeout(() => setSpeakerMapStatus(''), 3000)
     }
   }
 
@@ -928,8 +998,9 @@ export function HukFlowStudioView({
           </div>
         </div>
 
-        {/* RIGHT PANE: Video Player ─────────────────────────────────────────── */}
+        {/* RIGHT PANE: Video Player + Voice Assignment ────────────────────── */}
         <div className="studio-right-pane">
+
           <div className="video-preview-wrapper">
             <div className="video-canvas">
               <video
@@ -1239,6 +1310,95 @@ export function HukFlowStudioView({
           </div>
         </div>
       </div>
+
+      {/* ── Settings Modal (Voice Assignment) ─────────────────────────────── */}
+      {showSettingsPanel && (
+        <>
+          {/* Overlay */}
+          <div
+            className="settings-modal-overlay"
+            onClick={onCloseSettingsPanel}
+            aria-hidden="true"
+          />
+          {/* Drawer panel */}
+          <div className="settings-modal-panel" role="dialog" aria-label="Project Settings" aria-modal="true">
+            <div className="settings-modal-header">
+              <div className="settings-modal-title">
+                <span className="material-symbols-outlined">settings</span>
+                Project Settings
+              </div>
+              <button
+                type="button"
+                className="settings-modal-close"
+                onClick={onCloseSettingsPanel}
+                aria-label="Close settings"
+              >
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+
+            <div className="settings-modal-body">
+              {/* ── Voice Assignment ── */}
+              <div className="settings-section">
+                <div className="settings-section-title">
+                  <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>manage_accounts</span>
+                  Voice Assignment
+                </div>
+                <p className="settings-section-desc">
+                  Map each detected speaker to a voice profile from the global library.
+                  Changes apply to the next pipeline run.
+                </p>
+
+                {displaySpeakers.length === 0 ? (
+                  <div className="settings-empty">
+                    <span className="material-symbols-outlined" style={{ fontSize: '28px', color: 'var(--text-muted)' }}>person_off</span>
+                    <span>No speakers detected. Open a project first.</span>
+                  </div>
+                ) : (
+                  <div className="voice-assignment-rows">
+                    {displaySpeakers.map((speaker, idx) => (
+                      <div key={speaker} className="voice-assignment-row">
+                        <span className={`speaker-dot speaker-dot-${idx % 4}`} style={{ flexShrink: 0 }} />
+                        <span className="voice-assignment-speaker">{speaker}</span>
+                        <select
+                          className="voice-assignment-select"
+                          value={speakerMap[speaker] ?? ''}
+                          onChange={(e) => setSpeakerMap((prev) => ({ ...prev, [speaker]: e.target.value }))}
+                          aria-label={`Voice profile for ${speaker}`}
+                        >
+                          <option value="">— no override —</option>
+                          {Object.keys(voiceProfiles).map((name) => (
+                            <option key={name} value={name}>{name}</option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {speakerMapStatus && (
+                  <div className={`settings-status-msg${speakerMapStatus.includes('fail') || speakerMapStatus.includes('Open') ? ' settings-status-msg--err' : ''}`}>
+                    {speakerMapStatus}
+                  </div>
+                )}
+
+                <div className="settings-modal-actions">
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={handleSaveSpeakerMap}
+                    disabled={speakerMapSaving || displaySpeakers.length === 0}
+                  >
+                    {speakerMapSaving
+                      ? <><span className="material-symbols-outlined spin-anim" style={{ fontSize: '15px' }}>progress_activity</span> Saving…</>
+                      : <><span className="material-symbols-outlined" style={{ fontSize: '15px' }}>save</span> Save assignment</>}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </section>
   )
 }

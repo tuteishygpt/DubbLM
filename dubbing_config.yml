@@ -50,6 +50,7 @@ voices:
       на эту работу
   SPEAKER_02:
     tts_system: omnivoice
+    reference_mode: configured
     reference_audio: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_03\reference.mp3
     reference_text: И тут прямо какие-то Анадырь, Чита, и с этой стороны какие-то
       американские города, стоят печати аэропортов. Очень живописно выглядит, где-то
@@ -57,6 +58,13 @@ voices:
   SPEAKER_09:
     tts_system: higgs
     reference_mode: segment
+  SPEAKER_04:
+    tts_system: higgs
+    reference_mode: speaker
+  жыгамонт:
+    tts_system: higgs
+    reference_mode: configured
+    reference_audio: D:\CodexPRJ\DubbLM\server_data\media\local\8c6edf44-e6e6-4a9c-a037-caf94990a150\8c6edf44-e6e6-4a9c-a037-caf94990a150.mp3
 duration: 29
 transcription_model: best
 inner_transcription_system: assemblyai

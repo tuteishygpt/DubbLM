@@ -9,8 +9,8 @@ from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..dependencies import current_user, get_job_repository, get_job_service, get_media_store
-from ..jobs import TERMINAL_JOB_STATUSES
+from ..dependencies import current_user, get_job_repository, get_job_service, get_media_store, get_project_service
+from ..jobs import TERMINAL_JOB_STATUSES, JobValidationError
 from .common import job_public
 
 
@@ -177,3 +177,53 @@ def job_events(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+class JobSpeakerMapBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    speaker_map: dict[str, str]
+
+
+@router.put("/{job_id}/speaker-map", status_code=status.HTTP_200_OK)
+def update_job_speaker_map(
+    job_id: str,
+    payload: JobSpeakerMapBody,
+    user=Depends(current_user),
+    repository=Depends(get_job_repository),
+    projects=Depends(get_project_service),
+):
+    from pathlib import Path
+    job = repository.get(user.id, job_id)
+    config = job.config if isinstance(job.config, dict) else {}
+    project_dir_str = str(config.get("project_dir") or "").strip()
+    project_name = str(config.get("project_name") or "").strip()
+    if not project_name and project_dir_str:
+        project_name = Path(project_dir_str).name
+    if not project_name:
+        raise JobValidationError("Job has no associated project directory.")
+    projects.update_speaker_map(project_name, user.id, payload.speaker_map)
+    return {"ok": True, "project_name": project_name}
+
+
+@router.get("/{job_id}/speaker-map")
+def get_job_speaker_map(
+    job_id: str,
+    user=Depends(current_user),
+    repository=Depends(get_job_repository),
+    projects=Depends(get_project_service),
+):
+    from pathlib import Path
+    job = repository.get(user.id, job_id)
+    config = job.config if isinstance(job.config, dict) else {}
+    project_dir_str = str(config.get("project_dir") or "").strip()
+    project_name = str(config.get("project_name") or "").strip()
+    if not project_name and project_dir_str:
+        project_name = Path(project_dir_str).name
+    if not project_name:
+        return {"speaker_map": {}}
+    try:
+        detail = projects.get_project(project_name, user.id)
+        speaker_map = detail.saved_config.get("speaker_map") if detail.saved_config else {}
+        return {"speaker_map": speaker_map or {}}
+    except Exception:
+        return {"speaker_map": {}}

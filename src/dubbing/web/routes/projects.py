@@ -66,3 +66,20 @@ def run_project(
         "project_name": project_name,
         "job": job_public(job),
     }
+
+
+class SpeakerMapBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    speaker_map: dict[str, str]  # {"SPEAKER_00": "John Male", ...}
+
+
+@router.put("/{project_name}/speaker-map", status_code=status.HTTP_200_OK)
+def update_speaker_map(
+    project_name: str,
+    payload: SpeakerMapBody,
+    user=Depends(current_user),
+    projects=Depends(get_project_service),
+):
+    """Save a SPEAKER_XX → profile-name mapping into the project's metadata."""
+    projects.update_speaker_map(project_name, user.id, payload.speaker_map)
+    return {"ok": True}

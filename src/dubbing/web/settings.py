@@ -218,8 +218,8 @@ class SettingsService:
         if expected != actual:
             raise SettingsConflictError("Settings were changed by another writer.")
 
-    @staticmethod
-    def _profiles_from_values(values: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    @classmethod
+    def _profiles_from_values(cls, values: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         raw_profiles = values.get("voices") or {}
         if not isinstance(raw_profiles, Mapping):
             raise SettingsValidationError("voices must be a mapping.")
@@ -227,14 +227,16 @@ class SettingsService:
         for speaker, profile in raw_profiles.items():
             if not isinstance(profile, Mapping):
                 raise SettingsValidationError(f"Voice profile {speaker} must be a mapping.")
-            profiles[str(speaker)] = dict(profile)
+            profiles[str(speaker)] = cls._clean_profile(profile)
         return profiles
 
     @staticmethod
     def _validate_speaker_id(speaker_id: str) -> str:
         speaker = str(speaker_id or "").strip()
-        if speaker != "*" and not re.fullmatch(r"SPEAKER_\d+", speaker):
-            raise SettingsValidationError("Speaker ID must be '*' or match SPEAKER_XX.")
+        if not speaker:
+            raise SettingsValidationError("Profile name must not be empty.")
+        if len(speaker) > 128:
+            raise SettingsValidationError("Profile name must be 128 characters or fewer.")
         return speaker
 
     @staticmethod
@@ -248,6 +250,11 @@ class SettingsService:
                 if not value:
                     continue
             cleaned[str(key)] = value
+        provider = str(cleaned.get("tts_system") or "").lower()
+        cap = TTS_REFERENCE_CAPABILITIES.get(provider, "unsupported")
+        if cap in {"required", "optional"} and "reference_mode" not in cleaned:
+            if cleaned.get("reference_audio"):
+                cleaned["reference_mode"] = "configured"
         return cleaned
 
     @classmethod
@@ -291,11 +298,9 @@ class SettingsService:
         if capability == "required" and mode == "none":
             raise SettingsValidationError(f"reference_mode 'none' is not allowed for {provider}.")
         if mode == "configured":
-            configured_path = str(profile.reference_audio or "").strip()
-            if not configured_path or not Path(configured_path).expanduser().is_file():
-                raise SettingsValidationError(
-                    f"Reference file does not exist: {configured_path or '<missing>'}."
-                )
+            if not str(profile.reference_audio or "").strip():
+                raise SettingsValidationError("reference_audio is required for mode 'configured'.")
+            # Path existence is validated at route level when resolving from reference library.
 
     def _atomic_replace(self, content: bytes) -> None:
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
