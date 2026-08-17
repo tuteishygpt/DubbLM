@@ -1,3 +1,4 @@
+import importlib
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,10 @@ def _dubber(tmp_path: Path, **config) -> SmartDubbing:
     return dubber
 
 
+def _references_module():
+    return importlib.import_module("dubbing.core.pipeline.references")
+
+
 def _segment(**overrides):
     return {
         "speaker": "SPEAKER_00",
@@ -51,6 +56,124 @@ def _prepared_audio(dubber: SmartDubbing, segment=None, **kwargs) -> AudioSegmen
     )
     assert text == "recognized words"
     return AudioSegment.from_file(path)
+
+
+@pytest.mark.parametrize(
+    ("facade_name", "module_name", "args", "kwargs"),
+    [
+        (
+            "_attach_segment_reference",
+            "attach_segment_reference",
+            (),
+            {
+                "tts_segment_data_args": {},
+                "segment_dict": _segment(),
+                "speaker": "SPEAKER_00",
+                "segment_index": 0,
+                "original_audio_segment": None,
+                "segment_reference_min_duration": 0.5,
+                "segment_reference_min_duration_ms": 500,
+            },
+        ),
+        ("_canonical_segment_index", "canonical_segment_index", (_segment(), 0), {}),
+        ("_segment_reference_artifact_paths", "segment_reference_artifact_paths", (), {}),
+        (
+            "_segment_reference_error",
+            "segment_reference_error",
+            ("SPEAKER_00", 0, Path("source.wav"), "reason"),
+            {},
+        ),
+        (
+            "_prepare_segment_reference",
+            "prepare_segment_reference",
+            (),
+            {
+                "segment_dict": _segment(),
+                "speaker": "SPEAKER_00",
+                "chronological_index": 0,
+                "reuse_existing": False,
+            },
+        ),
+        (
+            "_resolve_segment_reference",
+            "resolve_segment_reference",
+            (),
+            {
+                "tts_segment_data_args": {},
+                "segment_dict": _segment(),
+                "profile": VoiceProfile(tts_system="fake", reference_mode="none"),
+                "provider_capability": "unsupported",
+                "speaker": "SPEAKER_00",
+                "segment_index": 0,
+                "original_audio_segment": None,
+                "segment_reference_min_duration": 0.5,
+            },
+        ),
+    ],
+)
+def test_reference_facade_methods_delegate_to_module_at_call_time(
+    tmp_path, monkeypatch, facade_name, module_name, args, kwargs
+):
+    module = _references_module()
+    sentinel = object()
+    calls = []
+
+    def implementation(*implementation_args, **implementation_kwargs):
+        calls.append((implementation_args, implementation_kwargs))
+        return sentinel
+
+    monkeypatch.setattr(module, module_name, implementation)
+    dubber = _dubber(tmp_path)
+
+    assert getattr(dubber, facade_name)(*args, **kwargs) is sentinel
+    assert len(calls) == 1
+
+
+def test_reference_module_matches_exact_facade_results(tmp_path):
+    module = _references_module()
+    dubber = _dubber(tmp_path, keep_background=True)
+    processed = tmp_path / "processed" / "vocals.wav"
+    segment = _segment(_timing_original_index=7)
+
+    assert module.canonical_segment_index(segment, 3) == (
+        SmartDubbing._canonical_segment_index(segment, 3)
+    )
+    assert module.segment_reference_artifact_paths(
+        config=dubber.config,
+        processed_source_path=str(processed),
+    ) == dubber._segment_reference_artifact_paths(str(processed))
+    module_error = module.segment_reference_error(
+        "SPEAKER_00", 7, processed, "unreadable"
+    )
+    facade_error = SmartDubbing._segment_reference_error(
+        "SPEAKER_00", 7, processed, "unreadable"
+    )
+    assert type(module_error) is type(facade_error)
+    assert str(module_error) == str(facade_error)
+
+
+def test_prepare_segment_reference_uses_current_facade_helpers(tmp_path, monkeypatch):
+    dubber = _dubber(tmp_path)
+    reference = dubber.speakers_audio_dir / "segments" / "SPEAKER_00_17.wav"
+    reference.parent.mkdir()
+    _audio(reference, 440, 1000)
+    calls = []
+    monkeypatch.setattr(
+        dubber,
+        "_canonical_segment_index",
+        lambda segment, index: calls.append((segment, index)) or 17,
+    )
+
+    path, text = dubber._prepare_segment_reference(
+        segment_dict=_segment(),
+        speaker="SPEAKER_00",
+        chronological_index=3,
+        reuse_existing=True,
+    )
+
+    assert path == str(reference)
+    assert text == "recognized words"
+    assert calls == [(_segment(), 3)]
 
 
 def test_normal_segment_reference_uses_mapped_isolated_track(tmp_path):

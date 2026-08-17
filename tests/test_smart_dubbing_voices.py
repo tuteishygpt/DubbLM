@@ -2,6 +2,8 @@
 
 from unittest.mock import patch
 
+import pytest
+
 import dubbing.core.config as config_module
 import dubbing.core.smart_dubbing as smart_dubbing_module
 from dubbing.core.runner import build_config_from_overrides
@@ -188,39 +190,17 @@ def test_unmapped_speaker_falls_through_to_star_profile(tmp_path, monkeypatch):
     assert profile.voice_name == "default"
 
 
-def test_legacy_tts_system_mapping_still_routes(tmp_path, monkeypatch):
-    """Existing configs using only tts_system_mapping keep working end-to-end."""
-    import warnings
+def test_smart_dubbing_init_rejects_legacy_plain_mapping_before_initialization():
+    from dubbing.core.voice_profiles import LegacyVoiceConfigError
 
-    video_path = tmp_path / "clip.mp4"
-    video_path.write_bytes(b"video")
-    _patch_projects_root(monkeypatch, tmp_path)
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        config = build_config_from_overrides(
-            {
-                "config": "",  # don't inherit repo dubbing_config.yml
-                "input": str(video_path),
-                "source_language": "en",
-                "target_language": "be",
-                "tts_system": "coqui",
-                "tts_system_mapping": '{"SPEAKER_00": "gemini", "SPEAKER_01": "openai"}',
-                "voice_prompt": '{"SPEAKER_00": "calm"}',
-            }
-        )
-
-    _install_stub_factory(monkeypatch, [])
-    dubber = SmartDubbing.__new__(SmartDubbing)
-    dubber.config = config
-    _skip_optional_init(dubber)
-    dubber.__init__(config)
-
-    assert dubber._get_tts_system_for_speaker("SPEAKER_00") == "gemini"
-    assert dubber._get_tts_system_for_speaker("SPEAKER_01") == "openai"
-
-    profile = dubber._resolve_voice_profile("SPEAKER_00")
-    assert profile.style_prompt == "calm"
+    with pytest.raises(
+        LegacyVoiceConfigError,
+        match=(
+            r"^Legacy per-speaker TTS setting 'reference_audio_mapping' is no longer supported in "
+            r"SmartDubbing config; migrate speaker configuration to 'voices:'\.$"
+        ),
+    ):
+        SmartDubbing({"reference_audio_mapping": {"SPEAKER_00": "old.wav"}})
 
 
 def test_pool_key_stable_across_param_ordering():

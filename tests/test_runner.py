@@ -6,7 +6,6 @@ import pytest
 
 import dubbing.core.config as config_module
 import dubbing.core.runner as runner
-from dubbing.core.config import create_argument_parser
 from dubbing.core.smart_dubbing import (
     EMOTION_ANALYSIS_PROMPT,
     SOFT_STYLE_BY_EMOTION,
@@ -58,17 +57,15 @@ def test_build_config_from_overrides_parses_structured_fields(tmp_path, monkeypa
             "input": str(video_path),
             "source_language": "en",
             "target_language": "be",
-            "tts_system_mapping": '{"SPEAKER_00": "gemini"}',
             "glossary": '{"term": "translation"}',
-            "voice_prompt": '{"SPEAKER_00": "calm"}',
+            "voices": '{"SPEAKER_00": {"tts_system": "gemini", "style_prompt": "calm"}}',
             "keep_original_audio_ranges": ["00:01-00:03", "10-12"],
             "output": "",
         }
     )
 
-    assert config.get("tts_system_mapping") == {"SPEAKER_00": "gemini"}
     assert config.get("glossary") == {"term": "translation"}
-    assert config.get("voice_prompt") == {"SPEAKER_00": "calm"}
+    assert config.get("voices")["SPEAKER_00"].style_prompt == "calm"
     assert config.get("keep_original_audio_ranges") == [(1.0, 3.0), (10.0, 12.0)]
     assert config.get("output") == str(projects_root / "clip" / "clip_be.mp4")
 
@@ -91,6 +88,20 @@ def test_build_config_from_overrides_treats_zero_duration_as_unset(tmp_path, mon
 
     assert config.get("start_time") == 0
     assert config.get("duration") is None
+
+
+def test_run_dubbing_job_returns_failed_result_for_legacy_voice_config():
+    result = run_dubbing_job(
+        {
+            "config": "",
+            "voice_prompt": {"SPEAKER_00": "calm"},
+        }
+    )
+
+    assert result.status == (
+        "Failed: Legacy per-speaker TTS setting 'voice_prompt' is no longer supported in "
+        "runner overrides; migrate speaker configuration to 'voices:'."
+    )
 
 
 def test_build_config_from_overrides_clears_zero_duration_from_yaml(tmp_path, monkeypatch):
@@ -457,104 +468,6 @@ def test_run_dubbing_job_treats_full_pipeline_step_as_normal_run(tmp_path):
 
     assert result.status == "Completed"
     assert result.output_file == str(output_path)
-
-
-def test_argument_parser_accepts_omnivoice_tts_system():
-    parser = create_argument_parser()
-
-    args = parser.parse_args(
-        [
-            "--input",
-            "clip.mp4",
-            "--source_language",
-            "en",
-            "--target_language",
-            "be",
-            "--tts_system",
-            "omnivoice",
-        ]
-    )
-
-    assert args.tts_system == "omnivoice"
-
-
-def test_argument_parser_accepts_gemini_transcription_backend_and_model():
-    parser = create_argument_parser()
-
-    args = parser.parse_args(
-        [
-            "--input",
-            "clip.mp4",
-            "--source_language",
-            "en",
-            "--target_language",
-            "be",
-            "--transcription_system",
-            "gemini",
-            "--gemini_transcription_model",
-            "gemini-2.5-flash",
-        ]
-    )
-
-    assert args.transcription_system == "gemini"
-    assert args.gemini_transcription_model == "gemini-2.5-flash"
-
-
-def test_argument_parser_accepts_deepgram_transcription_backend():
-    parser = create_argument_parser()
-
-    args = parser.parse_args(
-        [
-            "--input",
-            "clip.mp4",
-            "--source_language",
-            "ru",
-            "--target_language",
-            "be",
-            "--transcription_system",
-            "deepgram",
-        ]
-    )
-
-    assert args.transcription_system == "deepgram"
-
-
-def test_argument_parser_accepts_tts_to_end_run_step():
-    parser = create_argument_parser()
-
-    args = parser.parse_args(
-        [
-            "--input",
-            "clip.mp4",
-            "--source_language",
-            "en",
-            "--target_language",
-            "be",
-            "--run_step",
-            "tts_to_end",
-        ]
-    )
-
-    assert args.run_step == "tts_to_end"
-
-
-def test_argument_parser_accepts_full_pipeline_run_step():
-    parser = create_argument_parser()
-
-    args = parser.parse_args(
-        [
-            "--input",
-            "clip.mp4",
-            "--source_language",
-            "en",
-            "--target_language",
-            "be",
-            "--run_step",
-            "full_pipeline",
-        ]
-    )
-
-    assert args.run_step == "full_pipeline"
 
 
 def test_build_config_from_overrides_preserves_gemini_transcription_model(tmp_path, monkeypatch):

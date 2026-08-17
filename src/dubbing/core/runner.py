@@ -1,6 +1,5 @@
-"""Reusable configuration + execution helpers for CLI and UI entry points."""
+"""Reusable configuration and execution helpers for programmatic/UI callers."""
 
-import argparse
 import io
 import json
 import logging
@@ -26,10 +25,6 @@ _PIPELINE_LOCK = threading.Lock()
 
 _JSON_FIELDS = {
     "glossary",
-    "tts_system_mapping",
-    "voice_prompt",
-    "reference_audio_mapping",
-    "reference_text_mapping",
     "isolated_tracks",
 }
 # `voices` supports both YAML and JSON (JSON is a subset of YAML), so we parse it
@@ -73,6 +68,9 @@ def _normalize_override_value(key: str, value: Any) -> Any:
 
 def build_config_from_overrides(overrides: dict[str, Any]) -> DubbingConfig:
     """Create a validated config object from plain override values."""
+    from .voice_profiles import reject_legacy_voice_config
+    reject_legacy_voice_config(overrides, source="runner overrides")
+
     config = DubbingConfig()
     config_path = overrides.get("config", "dubbing_config.yml")
     if config_path:
@@ -86,14 +84,14 @@ def build_config_from_overrides(overrides: dict[str, Any]) -> DubbingConfig:
         if normalized_value is not None:
             normalized_overrides[key] = normalized_value
 
-    config.load_from_cli(argparse.Namespace(**normalized_overrides))
+    config.load_overrides(normalized_overrides)
     config.validate()
     config.process_special_parameters()
     return config
 
 
 def _run_combine_video_step(dubber: Any, config: DubbingConfig) -> str:
-    """Run the advanced combine-video path used by the CLI."""
+    """Run the advanced combine-video path used by programmatic and UI callers."""
     expected_translated_audio = config.get("translated_audio_path")
     expected_background_audio = None
 

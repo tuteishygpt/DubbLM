@@ -19,9 +19,11 @@ import torch
 import warnings
 import shutil
 import subprocess
-from typing import Dict, Iterable, List, Tuple, Optional, Any
+from functools import wraps
+from typing import Dict, Iterable, List, Tuple, Optional, Any, Literal, Union
 from pathlib import Path
 from urllib.parse import quote
+from dotenv import load_dotenv
 from pydub import AudioSegment
 
 # Disable all warnings for a cleaner output.
@@ -34,6 +36,7 @@ from .voice_profiles import (
     FALLBACK_SPEAKER,
     VoiceProfile,
     normalize_voices,
+    reject_legacy_voice_config,
     resolve_profile,
 )
 from ..audio.audio_processor import AudioProcessor
@@ -44,15 +47,25 @@ from ..debug.debug_generator import DebugGenerator
 from ..debug.reporter import SpeakerReporter
 from ..utils.subtitle_utils import SubtitleManager
 from .log_config import get_logger
+from .pipeline import artifacts as artifact_helpers
+from .pipeline import audio_assembly as audio_assembly_helpers
+from .pipeline import synthesis as synthesis_helpers
+from .pipeline import cache_keys as cache_key_helpers
+from .pipeline import emotions as emotion_helpers
+from .pipeline import references as reference_helpers
+from .pipeline import transcription as transcription_helpers
+from .pipeline import translation as translation_helpers
+from .pipeline.context import (
+    active_context,
+    commit_context,
+    snapshot_context,
+    validate_plan_dependent_segments,
+)
 
 # Import existing factories and interfaces
 from tts.tts_factory import TTSFactory
 from translation.llm_translator import DEFAULT_LLM_MODELS
 from translation.translator_factory import TranslatorFactory
-from transcription.transcription_factory import TranscriptionFactory
-
-# Disable warnings
-warnings.filterwarnings("ignore")
 
 # Get logger
 logger = get_logger(__name__)
@@ -89,6 +102,45 @@ SMART_DUBBING_STRESS_MARKS_REQUIREMENT = (
 )
 
 
+def _with_pipeline_context(method):
+    """Give each outer run one shared context without changing its signature."""
+
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        if getattr(self, "_pipeline_run_context", None) is not None:
+            return method(self, *args, **kwargs)
+
+        context = snapshot_context(self)
+        initial_values = vars(context).copy()
+        self._pipeline_run_context = context
+        completed = False
+        try:
+            result = method(self, *args, **kwargs)
+            completed = True
+            return result
+        finally:
+            if completed:
+                changed_fields = {
+                    field_name
+                    for field_name, initial_value in initial_values.items()
+                    if getattr(context, field_name) != initial_value
+                }
+                commit_context(
+                    self, context, changed_fields=changed_fields
+                )
+            if getattr(self, "_pipeline_run_context", None) is context:
+                del self._pipeline_run_context
+
+    wrapper.pipeline_context_owner = True
+    return wrapper
+
+
+def _update_pipeline_context(facade, field_name: str, value: Any) -> None:
+    """Keep an active run context and its compatibility mirror synchronized."""
+    setattr(active_context(facade), field_name, value)
+    setattr(facade, f"_{field_name}", value)
+
+
 class SmartDubbing:
     """
     A video dubbing system that transcribes, translates, and synthesizes speech for videos.
@@ -104,6 +156,8 @@ class SmartDubbing:
         Args:
             config: Configuration object containing all settings
         """
+        raw_config = config.to_dict() if hasattr(config, "to_dict") else dict(config)
+        reject_legacy_voice_config(raw_config, source="SmartDubbing config")
         self.config = config
         self.project_dir = Path(self.config.get("project_dir"))
         self.artifacts_root = Path(self.config.get("artifacts_dir"))
@@ -111,20 +165,12 @@ class SmartDubbing:
         self.speakers_audio_dir = Path(self.config.get("speakers_audio_dir"))
         self.audio_chunks_dir = Path(self.config.get("audio_chunks_dir"))
         self.su_audio_chunks_dir = Path(self.config.get("su_audio_chunks_dir"))
-        # Legacy per-speaker mirrors (kept for backward-compat with a few call sites and tests).
-        self.tts_system_mapping = self.config.get('tts_system_mapping') or {}
-        self.voice_prompt = self.config.get('voice_prompt') or {}
-        self.reference_audio_mapping = self.config.get('reference_audio_mapping') or {}
-        self.reference_text_mapping = self.config.get('reference_text_mapping') or {}
-
-        # Unified per-speaker profiles. DubbingConfig.process_special_parameters folds legacy
-        # fields into this dict; when a plain dict-config is used (mostly in tests) we
-        # normalize on the fly so downstream code always sees VoiceProfile objects.
+        # Normalize plain mapping configs so downstream code always sees VoiceProfile objects.
         voices_cfg = self.config.get('voices')
         if not isinstance(voices_cfg, dict) or not all(
             isinstance(v, VoiceProfile) for v in voices_cfg.values()
         ):
-            voices_cfg = normalize_voices(self.config.to_dict() if hasattr(self.config, "to_dict") else dict(self.config))
+            voices_cfg = normalize_voices(raw_config)
             if hasattr(self.config, "set"):
                 self.config.set('voices', voices_cfg)
             else:
@@ -227,181 +273,28 @@ class SmartDubbing:
         return filtered
     
     def _initialize_translator(self) -> None:
-        """Initialize translator based on configuration."""
-        self.translator = None
-        self.translator_init_error = None
-        try:
-            settings = self._effective_translation_cache_dimensions()
-            primary = settings["primary"]
-            refinement = settings["refinement"]
-            self.translator = TranslatorFactory.create_translator(
-                translator_type=settings["translator_type"],
-                llm_provider=primary["provider"],
-                model_name=primary["model"],
-                temperature=primary["temperature"],
-                max_tokens=primary["max_tokens"],
-                refinement_llm_provider=refinement["provider"],
-                refinement_model_name=refinement["model"],
-                refinement_temperature=refinement["temperature"],
-                refinement_max_tokens=refinement["max_tokens"],
-                refinement_persona=refinement["persona"],
-                translation_prompt_prefix=self.config.get('translation_prompt_prefix'),
-                glossary=self.config.get('glossary'),
-                cache_manager=self.cache_manager
-            )
-            logger.debug(f"Using {self.config.get('translator_type', 'llm')} translator")
-        except Exception as e:
-            self.translator_init_error = e
-            logger.warning(f"Failed to initialize translator: {e}")
+        return translation_helpers.initialize_translator(self)
     
     def _default_tts_system(self) -> str:
-        """The TTS backend used as fallback when a profile does not name one."""
-        return self.config.get('tts_system', 'coqui')
+        return synthesis_helpers.default_tts_system(self)
 
     def _resolve_voice_profile(self, speaker: str) -> VoiceProfile:
-        """Resolve a speaker to its effective VoiceProfile (with `"*"` fallback)."""
-        return resolve_profile(
-            self.voice_profiles,
-            speaker,
-            tts_system_default=self._default_tts_system(),
-        )
+        return synthesis_helpers.resolve_voice_profile(self, speaker)
 
     def _profile_pool_key(self, profile: VoiceProfile) -> tuple:
-        """Client-pool identity for a profile, taking global TTS defaults into account."""
-        return (
-            (profile.tts_system or self._default_tts_system() or "").lower(),
-            profile.model or (self.config.get('tts_model') or ""),
-            tuple(sorted(profile.params.items())),
-        )
+        return synthesis_helpers.profile_pool_key(self, profile)
 
     def _global_omnivoice_kwargs(self) -> Dict[str, Any]:
-        """Backend-specific globals still sourced from top-level config (legacy)."""
-        return {
-            "space_id": self.config.get('omnivoice_space_id'),
-            "api_name": self.config.get('omnivoice_api_name'),
-            "lang": self.config.get('omnivoice_lang'),
-            "instruct": self.config.get('omnivoice_instruct', ''),
-            "num_steps": self.config.get('omnivoice_num_steps'),
-            "guidance_scale": self.config.get('omnivoice_guidance_scale'),
-            "denoise": self.config.get('omnivoice_denoise'),
-            "speed": self.config.get('omnivoice_speed'),
-            "duration": self.config.get('omnivoice_duration'),
-            "preprocess_prompt": self.config.get('omnivoice_preprocess_prompt'),
-            "postprocess_output": self.config.get('omnivoice_postprocess_output'),
-        }
+        return synthesis_helpers.global_omnivoice_kwargs(self)
 
     def _build_tts_client(self, profile: VoiceProfile) -> Any:
-        """Create a single TTS client for a normalized profile.
-
-        Voice/style mapping is not attached here — those are per-segment and are
-        threaded into TTSSegmentData at synth time. This function only handles
-        provider construction (system, model, provider-specific bootstrap kwargs).
-        """
-        tts_system = profile.tts_system or self._default_tts_system()
-        model = profile.model or self.config.get('tts_model')
-
-        # Provider-specific bootstrap kwargs. Globals still come from the top-level
-        # config; per-profile `params` override them.
-        bootstrap: Dict[str, Any] = {}
-        if tts_system.lower() == "omnivoice":
-            bootstrap.update(self._global_omnivoice_kwargs())
-        bootstrap.update(profile.params or {})
-
-        return TTSFactory.create_tts(
-            tts_system=tts_system,
-            device=self.device,
-            voice_config=None,  # per-segment via TTSSegmentData
-            voice_prompt=None,  # per-segment via TTSSegmentData
-            prompt_prefix=self.config.get('tts_prompt_prefix'),
-            # A manually assigned voice does not need catalog matching. This also
-            # prevents OpenAI/Gemini from generating the catalog samples solely
-            # for a profile whose voice is already known.
-            enable_voice_matching=(
-                self.config.get('voice_auto_selection', True)
-                and not bool(profile.voice_name)
-            ),
-            debug_tts=self.config.get('debug_tts', False),
-            model=model,
-            default_reference_audio=self.config.get('reference_audio'),
-            **bootstrap,
-        )
+        return synthesis_helpers.build_tts_client(self, profile)
 
     def _initialize_tts_systems(self) -> None:
-        """Instantiate one TTS client per unique (system, model, params) profile."""
-        # Client pool keyed by pool_key. Multiple speakers with identical settings
-        # share the same client.
-        self.tts_clients: Dict[tuple, Any] = {}
-        # Speaker -> pool_key resolution cache.
-        self._speaker_pool_key: Dict[str, tuple] = {}
-        self.default_tts = None
-        self.tts_init_error: Optional[Exception] = None
+        return synthesis_helpers.initialize_tts_systems(self)
 
-        # Build the effective set of profiles to instantiate: every named profile
-        # plus a fallback (`"*"` or synthesised from global TTS defaults).
-        profiles_to_build: Dict[tuple, VoiceProfile] = {}
-        for speaker, profile in self.voice_profiles.items():
-            resolved = self._resolve_voice_profile(speaker)
-            key = self._profile_pool_key(resolved)
-            profiles_to_build.setdefault(key, resolved)
-            self._speaker_pool_key[speaker] = key
-
-        fallback_profile = self._resolve_voice_profile(FALLBACK_SPEAKER)
-        fallback_key = self._profile_pool_key(fallback_profile)
-        profiles_to_build.setdefault(fallback_key, fallback_profile)
-
-        first_error: Optional[Exception] = None
-        for key, profile in profiles_to_build.items():
-            try:
-                client = self._build_tts_client(profile)
-                self.tts_clients[key] = client
-                logger.debug(
-                    "Initialized TTS client for pool_key=%s (system=%s, model=%s)",
-                    key, profile.tts_system, profile.model,
-                )
-            except Exception as exc:
-                if first_error is None:
-                    first_error = exc
-                logger.warning(
-                    "Failed to initialize TTS client for pool_key=%s (system=%s, model=%s): %s",
-                    key, profile.tts_system, profile.model, exc,
-                )
-
-        if first_error is not None and not self.tts_clients:
-            self.tts_init_error = first_error
-
-        # default_tts is the client for the "*" profile (or first available).
-        if fallback_key in self.tts_clients:
-            self.default_tts = self.tts_clients[fallback_key]
-        elif self.tts_clients:
-            self.default_tts = next(iter(self.tts_clients.values()))
-
-        # Backwards-compat mirror: `self.tts_systems` used to be a dict keyed by
-        # backend name. A few older call sites/tests still touch it, so mirror the
-        # default client under its backend name. New code should use tts_clients.
-        self.tts_systems: Dict[str, Any] = {}
-        if self.default_tts is not None:
-            self.tts_systems[fallback_profile.tts_system or self._default_tts_system()] = self.default_tts
-    
     def _initialize_transcriber(self) -> None:
-        """Initialize transcriber based on configuration."""
-        self.transcriber = None
-        self.transcriber_init_error = None
-        try:
-            self.transcriber = TranscriptionFactory.create_transcriber(
-                transcription_system=self.config.get('transcription_system', 'whisper'),
-                source_language=self.config.get('source_language'),
-                device=self.device,
-                transcription_model=self.config.get('transcription_model'),
-                whisper_model=self.config.get('whisper_model', 'large-v3'),
-                gemini_transcription_model=self.config.get('gemini_transcription_model', 'gemini-3-flash-preview'),
-                deepgram_model=self.config.get('deepgram_model', 'nova-3'),
-                cache_manager=self.cache_manager,
-                artifacts_root=self.config.get("artifacts_dir"),
-            )
-            logger.debug(f"Initialized {self.transcriber.name} transcriber")
-        except Exception as e:
-            self.transcriber_init_error = e
-            logger.warning(f"Failed to initialize transcriber: {e}")
+        return transcription_helpers.initialize_transcriber(self)
 
     def _format_component_init_error(
         self,
@@ -427,664 +320,102 @@ class SmartDubbing:
         return message
 
     def _require_transcriber(self):
-        """Return the initialized transcriber or raise an actionable error."""
-        if self.transcriber is not None:
-            return self.transcriber
-
-        raise RuntimeError(
-            self._format_component_init_error(
-                "Transcriber",
-                self.config.get('transcription_system', 'whisper'),
-                getattr(self, "transcriber_init_error", None),
-            )
-        )
+        return transcription_helpers.require_transcriber(self)
 
     def _require_translator(self):
-        """Return the initialized translator or raise an actionable error."""
-        if self.translator is not None:
-            return self.translator
-
-        raise RuntimeError(
-            self._format_component_init_error(
-                "Translator",
-                self.config.get('translator_type', 'llm'),
-                getattr(self, "translator_init_error", None),
-            )
-        )
+        return translation_helpers.require_translator(self)
 
     def _attach_segment_reference(
-        self,
-        *,
-        tts_segment_data_args: Dict[str, Any],
-        segment_dict: Dict[str, Any],
-        speaker: str,
-        segment_index: int,
-        original_audio_segment: Optional[AudioSegment],
-        segment_reference_min_duration: float,
-        segment_reference_min_duration_ms: int,
+        self, *, tts_segment_data_args: Dict[str, Any], segment_dict: Dict[str, Any],
+        speaker: str, segment_index: int, original_audio_segment: Optional[AudioSegment],
+        segment_reference_min_duration: float, segment_reference_min_duration_ms: int,
     ) -> tuple[Dict[str, Any], Optional[AudioSegment]]:
-        """Attach a segment-specific reference clip and its transcription when possible."""
-        segment_duration = segment_dict["end"] - segment_dict["start"]
-        if (
-            original_audio_segment is None
-            or (
-                segment_reference_min_duration > 0.0
-                and segment_duration < segment_reference_min_duration
-            )
-        ):
-            return tts_segment_data_args, original_audio_segment
-
-        start_ms = max(int(segment_dict["start"] * 1000), 0)
-        end_ms = min(int(segment_dict["end"] * 1000), len(original_audio_segment))
-
-        if end_ms <= start_ms:
-            return tts_segment_data_args, original_audio_segment
-
-        segment_audio = original_audio_segment[start_ms:end_ms]
-        if segment_reference_min_duration_ms != 0 and len(segment_audio) < segment_reference_min_duration_ms:
-            return tts_segment_data_args, original_audio_segment
-
-        segment_ref_dir = self.speakers_audio_dir / "segments"
-        segment_ref_dir.mkdir(parents=True, exist_ok=True)
-        segment_ref_path = segment_ref_dir / f"{speaker}_{segment_index}.wav"
-        segment_audio.export(segment_ref_path, format="wav")
-        tts_segment_data_args["reference_audio_path"] = str(segment_ref_path)
-        tts_segment_data_args["reference_text"] = segment_dict.get("text")
-
-        return tts_segment_data_args, original_audio_segment
-
-    @staticmethod
-    def _canonical_segment_index(
-        segment_dict: Dict[str, Any], chronological_index: int
-    ) -> int:
-        """Return the stable segment index used by reference and TTS artifacts."""
-        stored = segment_dict.get("_timing_original_index")
-        if isinstance(stored, int) and not isinstance(stored, bool) and stored >= 0:
-            return stored
-        return chronological_index
-
-    def _segment_reference_artifact_paths(
-        self, processed_source_path: Optional[str] = None
-    ) -> tuple[Path, Path]:
-        """Return the rebased vocals and source artifact paths."""
-        if processed_source_path:
-            processed = Path(processed_source_path)
-            if self.config.get("keep_background", False):
-                vocals_path = processed
-                source_path = processed.with_name("source.wav")
-            else:
-                source_path = processed
-                vocals_path = processed.with_name("vocals.wav")
-        elif self.config.get("audio_artifacts_dir"):
-            configured_dir = self.config.get("audio_artifacts_dir")
-            audio_dir = Path(configured_dir)
-            source_path = audio_dir / "source.wav"
-            vocals_path = audio_dir / "vocals.wav"
-        else:
-            source_path = Path("source.wav")
-            vocals_path = Path("vocals.wav")
-        return vocals_path, source_path
-
-    @staticmethod
-    def _segment_reference_error(
-        speaker: str, segment_index: int, source_path: Path, reason: str
-    ) -> ValueError:
-        return ValueError(
-            f"speaker={speaker} segment={segment_index} mode=segment "
-            f"source={source_path}: {reason}"
+        return reference_helpers.attach_segment_reference(
+            self, tts_segment_data_args=tts_segment_data_args, segment_dict=segment_dict,
+            speaker=speaker, segment_index=segment_index,
+            original_audio_segment=original_audio_segment,
+            segment_reference_min_duration=segment_reference_min_duration,
+            segment_reference_min_duration_ms=segment_reference_min_duration_ms,
         )
+
+    @staticmethod
+    def _canonical_segment_index(segment_dict: Dict[str, Any], chronological_index: int) -> int:
+        return reference_helpers.canonical_segment_index(segment_dict, chronological_index)
+
+    def _segment_reference_artifact_paths(self, processed_source_path: Optional[str] = None) -> tuple[Path, Path]:
+        return reference_helpers.segment_reference_artifact_paths(config=self.config, processed_source_path=processed_source_path)
+
+    @staticmethod
+    def _segment_reference_error(speaker: str, segment_index: int, source_path: Path, reason: str) -> ValueError:
+        return reference_helpers.segment_reference_error(speaker, segment_index, source_path, reason)
 
     def _prepare_segment_reference(
-        self,
-        *,
-        segment_dict: Dict[str, Any],
-        speaker: str,
-        chronological_index: int,
-        reuse_existing: bool,
-        processed_source_path: Optional[str] = None,
+        self, *, segment_dict: Dict[str, Any], speaker: str, chronological_index: int,
+        reuse_existing: bool, processed_source_path: Optional[str] = None,
         decoded_audio_cache: Optional[Dict[tuple[str, float], AudioSegment]] = None,
     ) -> tuple[str, Optional[str]]:
-        """Prepare one segment reference from its authoritative audio source."""
-        canonical_index = self._canonical_segment_index(
-            segment_dict, chronological_index
+        return reference_helpers.prepare_segment_reference(
+            self, segment_dict=segment_dict, speaker=speaker,
+            chronological_index=chronological_index, reuse_existing=reuse_existing,
+            processed_source_path=processed_source_path, decoded_audio_cache=decoded_audio_cache,
         )
-        reference_path = (
-            self.speakers_audio_dir
-            / "segments"
-            / f"{speaker}_{canonical_index}.wav"
-        )
-        reference_text = segment_dict.get("text")
-        try:
-            minimum_duration = max(
-                0.0,
-                float(self.config.get("segment_reference_min_duration", 2.0) or 0.0),
-            )
-        except (TypeError, ValueError, OverflowError):
-            minimum_duration = 2.0
-        minimum_ms = int(minimum_duration * 1000)
-
-        if reuse_existing and reference_path.is_file():
-            try:
-                existing = AudioSegment.from_file(reference_path)
-                if len(existing) > 0 and len(existing) >= minimum_ms:
-                    return str(reference_path), reference_text
-            except Exception:
-                pass
-
-        isolated_tracks = self.config.get("isolated_tracks")
-        mapped_isolated = (
-            isolated_tracks.get(speaker)
-            if isinstance(isolated_tracks, dict) and speaker in isolated_tracks
-            else None
-        )
-        vocals_path, source_path = self._segment_reference_artifact_paths(
-            processed_source_path
-        )
-        if isinstance(isolated_tracks, dict) and speaker in isolated_tracks:
-            candidates = [(Path(str(mapped_isolated or "")), True)]
-        else:
-            candidates = []
-            if self.config.get("keep_background", False):
-                candidates.append((vocals_path, False))
-            candidates.append((source_path, False))
-        authoritative_path = candidates[0][0]
-
-        try:
-            start = float(segment_dict["start"])
-            end = float(segment_dict["end"])
-        except (KeyError, TypeError, ValueError, OverflowError) as exc:
-            raise self._segment_reference_error(
-                speaker,
-                canonical_index,
-                authoritative_path,
-                "segment reference requires numeric start and end timestamps",
-            ) from exc
-        if not math.isfinite(start) or not math.isfinite(end):
-            raise self._segment_reference_error(
-                speaker,
-                canonical_index,
-                authoritative_path,
-                "segment timestamps must be finite",
-            )
-        if start < 0 or end < 0 or end <= start:
-            raise self._segment_reference_error(
-                speaker,
-                canonical_index,
-                authoritative_path,
-                "segment timestamps must be non-negative with end greater than start",
-            )
-        if end - start < minimum_duration:
-            raise self._segment_reference_error(
-                speaker,
-                canonical_index,
-                authoritative_path,
-                f"recognized segment duration {end - start:.2f}s is below the "
-                f"configured minimum {minimum_duration:.2f}s",
-            )
-
-        cache = decoded_audio_cache if decoded_audio_cache is not None else {}
-        prior_failures: List[str] = []
-        selected_audio: Optional[AudioSegment] = None
-        selected_path: Optional[Path] = None
-        selected_start_ms = 0
-        selected_end_ms = 0
-
-        for candidate_path, is_isolated in candidates:
-            offset = 0.0
-            if is_isolated:
-                try:
-                    offset = float(self.config.get("start_time") or 0.0)
-                except (TypeError, ValueError, OverflowError) as exc:
-                    raise self._segment_reference_error(
-                        speaker,
-                        canonical_index,
-                        candidate_path,
-                        "start_time must be a finite non-negative number",
-                    ) from exc
-                if not math.isfinite(offset) or offset < 0:
-                    raise self._segment_reference_error(
-                        speaker,
-                        canonical_index,
-                        candidate_path,
-                        "start_time must be a finite non-negative number",
-                    )
-
-            candidate_start = start + offset
-            candidate_end = end + offset
-            failure: Optional[str] = None
-            audio: Optional[AudioSegment] = None
-            if not candidate_path.is_file():
-                failure = "reference source file is missing"
-            else:
-                cache_key = (str(candidate_path.resolve(strict=False)), offset)
-                try:
-                    audio = cache.get(cache_key)
-                    if audio is None:
-                        audio = AudioSegment.from_file(candidate_path)
-                        cache[cache_key] = audio
-                except Exception as exc:
-                    failure = f"reference source is unreadable: {exc}"
-            if audio is not None:
-                if len(audio) <= 0:
-                    failure = "reference source is empty"
-                elif candidate_end * 1000 > len(audio) + 1e-6:
-                    failure = (
-                        f"segment interval {candidate_start:.3f}..{candidate_end:.3f}s "
-                        f"is outside source duration {len(audio) / 1000.0:.3f}s"
-                    )
-
-            if failure is not None:
-                if is_isolated:
-                    raise self._segment_reference_error(
-                        speaker, canonical_index, candidate_path, failure
-                    )
-                prior_failures.append(f"{candidate_path}: {failure}")
-                continue
-
-            selected_audio = audio
-            selected_path = candidate_path
-            selected_start_ms = int(candidate_start * 1000)
-            selected_end_ms = int(candidate_end * 1000)
-            break
-
-        if selected_audio is None or selected_path is None:
-            reason = "no usable reference source"
-            if prior_failures:
-                reason += "; " + "; ".join(prior_failures)
-            raise self._segment_reference_error(
-                speaker, canonical_index, source_path, reason
-            )
-
-        segment_audio = selected_audio[selected_start_ms:selected_end_ms]
-        if len(segment_audio) <= 0 or len(segment_audio) < minimum_ms:
-            raise self._segment_reference_error(
-                speaker,
-                canonical_index,
-                selected_path,
-                f"exported duration {len(segment_audio) / 1000.0:.2f}s is below "
-                f"the configured minimum {minimum_duration:.2f}s",
-            )
-
-        reference_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            segment_audio.export(reference_path, format="wav")
-            exported = AudioSegment.from_file(reference_path)
-        except Exception as exc:
-            raise self._segment_reference_error(
-                speaker,
-                canonical_index,
-                selected_path,
-                f"could not export or read reference WAV {reference_path}: {exc}",
-            ) from exc
-        if not reference_path.is_file() or len(exported) <= 0:
-            raise self._segment_reference_error(
-                speaker,
-                canonical_index,
-                selected_path,
-                f"exported reference WAV is missing or empty: {reference_path}",
-            )
-        if len(exported) < minimum_ms:
-            raise self._segment_reference_error(
-                speaker,
-                canonical_index,
-                selected_path,
-                f"exported duration {len(exported) / 1000.0:.2f}s is below "
-                f"the configured minimum {minimum_duration:.2f}s",
-            )
-        return str(reference_path), reference_text
 
     def _prepare_audio_inputs(self) -> tuple[str, Optional[str], str]:
-        """Extract the source audio and optional background/vocals tracks."""
-        audio_file = self.audio_processor.extract_audio(
-            self.config.get('input'),
-            self.config.get('start_time'),
-            self.config.get('duration')
-        )
-        background_audio_path = None
-        segment_reference_audio_file = audio_file
-        if self.config.get('keep_background', False):
-            (
-                background_audio_path,
-                separated_vocals_path,
-            ) = self.audio_processor.separate_background_and_vocals(audio_file)
-            if separated_vocals_path:
-                segment_reference_audio_file = separated_vocals_path
-
-        return audio_file, background_audio_path, segment_reference_audio_file
+        return artifact_helpers.prepare_audio_inputs(self)
 
     @staticmethod
     def _cache_fingerprint(dimensions: Dict[str, Any]) -> str:
-        """Return a deterministic fingerprint for JSON-compatible dimensions."""
-        serialized = json.dumps(
-            dimensions,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:20]
+        return cache_key_helpers.cache_fingerprint(dimensions)
 
     def _effective_tts_cache_fingerprint(self, speakers: Iterable[str]) -> str:
-        """Return the canonical effective TTS/reference configuration identity."""
-        profiles = []
-        content_identities: Dict[str, str] = {}
-        use_content_hashes = getattr(
-            getattr(self, "cache_manager", None), "use_cache", True
-        )
-
-        def content_identity(path: Optional[str]) -> str:
-            identity_key = str(path or "")
-            if not use_content_hashes:
-                return identity_key
-            if identity_key not in content_identities:
-                content_identities[identity_key] = self._file_content_identity(path)
-            return content_identities[identity_key]
-
-        for speaker in sorted({str(value) for value in speakers}):
-            profile = self._resolve_voice_profile(speaker)
-            provider = profile.tts_system or self._default_tts_system()
-            voice_name = profile.voice_name
-            if voice_name is None:
-                global_voice_name = self.config.get("voice_name")
-                if isinstance(global_voice_name, str):
-                    voice_name = global_voice_name
-            provider_params: Dict[str, Any] = {}
-            if provider.lower() == "omnivoice":
-                provider_params.update(
-                    {
-                        key: value
-                        for key, value in self._global_omnivoice_kwargs().items()
-                        if value is not None
-                    }
-                )
-            provider_params.update(profile.params or {})
-            effective_reference_path = profile.reference_audio
-            if profile.reference_mode == "speaker":
-                speakers_dir = getattr(self, "speakers_audio_dir", None)
-                if speakers_dir is not None:
-                    effective_reference_path = str(
-                        Path(speakers_dir) / f"{speaker}.wav"
-                    )
-            segment_source_identity = None
-            segment_source_offset = None
-            if profile.reference_mode == "segment":
-                isolated_tracks = self.config.get("isolated_tracks")
-                if isinstance(isolated_tracks, dict) and speaker in isolated_tracks:
-                    selected_source = isolated_tracks.get(speaker)
-                    segment_source_identity = content_identity(
-                        str(selected_source or "")
-                    )
-                    segment_source_offset = self.config.get("start_time") or 0.0
-                else:
-                    vocals_path, source_path = self._segment_reference_artifact_paths()
-                    segment_source_identity = {
-                        "vocals": content_identity(str(vocals_path))
-                        if self.config.get("keep_background", False)
-                        else None,
-                        "source": content_identity(str(source_path)),
-                    }
-                    segment_source_offset = 0.0
-            profiles.append(
-                {
-                    "speaker": speaker,
-                    "provider": provider,
-                    "model": profile.model or self.config.get("tts_model"),
-                    "voice": voice_name,
-                    "style_prompt": profile.style_prompt,
-                    "reference_mode": profile.reference_mode,
-                    "reference_audio": profile.reference_audio,
-                    "reference_audio_identity": content_identity(
-                        effective_reference_path
-                    ),
-                    "reference_text": profile.reference_text,
-                    "segment_source_identity": segment_source_identity,
-                    "segment_source_offset": segment_source_offset,
-                    "params": dict(sorted(provider_params.items())),
-                }
-            )
-        return self._cache_fingerprint(
-            {"contract": "strict-reference-v1", "speakers": profiles}
-        )
+        return cache_key_helpers.effective_tts_cache_fingerprint(self, speakers)
 
     @staticmethod
     def _file_content_identity(path: Optional[str]) -> str:
-        """Return a path-plus-content identity for a readable local file."""
-        identity = str(path or "")
-        if not path:
-            return identity
-        try:
-            file_path = Path(path)
-            if not file_path.is_file():
-                return identity
-            digest = hashlib.sha256()
-            with file_path.open("rb") as source_file:
-                for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            return f"{file_path.resolve(strict=False)}:{digest.hexdigest()}"
-        except OSError:
-            return identity
+        return cache_key_helpers.file_content_identity(path)
 
     def _shared_audio_transcription_identity(self, audio_file: str) -> str:
-        """Return the shared audio/transcription identity used by text caches."""
-        source_language = self.config.get("source_language")
-        target_language = self.config.get("target_language")
-        whisper_model = self.config.get("whisper_model", "large-v3")
-        start_time = self.config.get("start_time")
-        duration = self.config.get("duration")
-        return self.cache_manager.generate_cache_key(
-            audio_file,
-            source_language,
-            target_language,
-            whisper_model,
-            start_time,
-            duration,
-        )
+        return cache_key_helpers.shared_audio_transcription_identity(self, audio_file)
 
     def _effective_translation_cache_dimensions(self) -> Dict[str, Any]:
-        """Resolve translation settings exactly as ``LLMTranslator`` receives them."""
-        primary_provider = self.config.get("llm_provider") or "gemini"
-        primary_model = (
-            self.config.get("llm_model_name")
-            or DEFAULT_LLM_MODELS.get(primary_provider)
+        return cache_key_helpers.effective_translation_cache_dimensions(
+            self,
+            DEFAULT_LLM_MODELS,
+            active_context(self).semantic_plan_fingerprint,
         )
-        primary_temperature = self.config.get("llm_temperature", 0.5)
-        if primary_temperature is None:
-            primary_temperature = 0.5
-        primary_max_tokens = self.config.get("llm_max_tokens", 16384)
-        if primary_max_tokens is None:
-            primary_max_tokens = 16384
-
-        refinement_provider = (
-            self.config.get("refinement_llm_provider") or primary_provider
-        )
-        refinement_model = (
-            self.config.get("refinement_model_name") or primary_model
-        )
-        refinement_temperature = self.config.get("refinement_temperature", 1.0)
-        if refinement_temperature is None:
-            refinement_temperature = 1.0
-        refinement_max_tokens = (
-            self.config.get("refinement_max_tokens") or primary_max_tokens
-        )
-
-        return {
-            "schema_version": "translation_v2",
-            "translator_type": self.config.get("translator_type") or "llm",
-            "primary": {
-                "provider": primary_provider,
-                "model": primary_model,
-                "temperature": primary_temperature,
-                "max_tokens": primary_max_tokens,
-            },
-            "refinement": {
-                "provider": refinement_provider,
-                "model": refinement_model,
-                "temperature": refinement_temperature,
-                "max_tokens": refinement_max_tokens,
-                "persona": self.config.get("refinement_persona") or "normal",
-            },
-            "glossary": self.config.get("glossary") or {},
-            "prompt_prefix": self._build_translation_prompt_prefix(
-                self.config.get("translation_prompt_prefix")
-            ),
-            "semantic_plan_fingerprint": getattr(
-                self, "_semantic_plan_fingerprint", None
-            ),
-        }
 
     def _build_dubbing_text_snapshot_key(self, audio_file: str) -> str:
-        """Compute the stable, plan-independent key used by the text editor."""
-        audio_identity = self._shared_audio_transcription_identity(audio_file)
-        dimensions = {
-            "schema_version": "dubbing_texts_v2",
-            "prompt_prefix": self._build_translation_prompt_prefix(
-                self.config.get("translation_prompt_prefix")
-            ),
-        }
-        return (
-            f"dubbing_texts_v2_{audio_identity}_"
-            f"{self._cache_fingerprint(dimensions)}"
-        )
+        return cache_key_helpers.build_dubbing_text_snapshot_key(self, audio_file)
 
     def _build_translation_cache_key(self, audio_file: str) -> str:
-        """Compute the plan-aware translation cache key used by the pipeline."""
-        snapshot_identity = self._build_dubbing_text_snapshot_key(audio_file)
-        settings = self._effective_translation_cache_dimensions()
-        return (
-            f"translation_v2_{snapshot_identity}_"
-            f"{self._cache_fingerprint(settings)}"
-        )
+        return cache_key_helpers.build_translation_cache_key(self, audio_file)
 
     def _build_emotions_cache_key(
-        self,
-        audio_file: str,
-        segments: List[Dict[str, Any]],
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
+        self, audio_file: str, segments: List[Dict[str, Any]],
+        provider: Optional[str] = None, model: Optional[str] = None,
     ) -> str:
-        """Compute the input- and algorithm-aware emotion-analysis identity."""
-        provider = str(provider or self.config.get("emotion_provider") or "gemini").lower()
-        model = str(model or self.config.get("emotion_model") or "gemini-3.1-flash-lite")
-        audio_identity = self.cache_manager.generate_cache_key(
-            audio_file, "", "", "analysis-audio-v2"
-        )
-
-        if provider == "gemini":
-            namespace = f"gemini_{quote(model, safe='.-_')}"
-            algorithm = {
-                "prompt": EMOTION_ANALYSIS_PROMPT,
-                "temperature": 0.2,
-                "accepted_labels": ["Neutral", "Angry", "Happy", "Sad"],
-            }
-        elif provider == "speechbrain":
-            namespace = "speechbrain"
-            algorithm = {
-                "source": "speechbrain/emotion-recognition-wav2vec2-IEMOCAP",
-                "pymodule_file": "custom_interface.py",
-                "classname": "CustomEncoderWav2vec2Classifier",
-                "label_mapping": {
-                    "neu": "Neutral",
-                    "ang": "Angry",
-                    "hap": "Happy",
-                    "sad": "Sad",
-                    "None": None,
-                },
-                "style_mapping": SOFT_STYLE_BY_EMOTION,
-            }
-        else:
-            namespace = quote(provider, safe=".-_")
-            algorithm = {"fallback_emotion": "Neutral"}
-
-        dimensions = {
-            "schema_version": "emotions_v2",
-            "segments": segments,
-            "semantic_plan_fingerprint": getattr(
-                self, "_semantic_plan_fingerprint", None
-            ),
-            "algorithm": algorithm,
-        }
-        return (
-            f"emotions_v2_{namespace}_{audio_identity}_"
-            f"{self._cache_fingerprint(dimensions)}"
+        return cache_key_helpers.build_emotions_cache_key(
+            self, audio_file, segments, provider, model,
+            emotion_analysis_prompt=EMOTION_ANALYSIS_PROMPT,
+            soft_style_by_emotion=SOFT_STYLE_BY_EMOTION,
+            semantic_plan_fingerprint=active_context(
+                self
+            ).semantic_plan_fingerprint,
         )
 
     def _restore_semantic_plan_fingerprint(self, audio_file: str) -> None:
-        """Restore the semantic identity needed by resume cache keys."""
-        isolated_tracks = self.config.get("isolated_tracks")
-        if not isolated_tracks or not self.config.get("semantic_split_enabled", True):
-            return
-        step_name = "isolated_tracks_semantic_plan"
-        cache_key = self._isolated_tracks_cache_key(audio_file, isolated_tracks)
-        if not self.cache_manager.cache_exists(step_name, cache_key):
-            raise FileNotFoundError(
-                "Semantic-plan cache is missing or stale; run transcribe_only or the "
-                "full pipeline before resuming plan-dependent translation/TTS."
-            )
-        cached = self.cache_manager.load_from_cache(step_name, cache_key)
-        transcription = cached.get("transcription") if isinstance(cached, dict) else None
-        fingerprints = {
-            segment.get("semantic_plan_fingerprint")
-            for segment in (transcription or [])
-            if segment.get("semantic_plan_fingerprint")
-        }
-        if (
-            len(fingerprints) != 1
-            or any(
-                segment.get("semantic_plan_fingerprint") not in fingerprints
-                for segment in (transcription or [])
-            )
-        ):
-            raise ValueError("Cached semantic plan has a missing or inconsistent fingerprint")
-        self._semantic_plan_fingerprint = next(iter(fingerprints))
-        self._semantic_plan_cache_persistable = True
+        return transcription_helpers.restore_semantic_plan_fingerprint(self, audio_file)
 
     def _validate_plan_dependent_segments(self, segments: List[Dict[str, Any]]) -> None:
-        expected = getattr(self, "_semantic_plan_fingerprint", None)
-        if expected is None:
-            return
-        if any(
-            segment.get("semantic_plan_fingerprint") != expected
-            for segment in segments
-        ):
-            raise ValueError(
-                "Cached artifact semantic_plan_fingerprint is absent or does not "
-                "match the active semantic plan"
-            )
+        validate_plan_dependent_segments(active_context(self), segments)
 
     def _load_required_cached_step(self, *, step_name: str, cache_key: str, hint: str) -> Any:
-        """Load a required cached artifact or raise an actionable error."""
-        if not getattr(self.cache_manager, "use_cache", True):
-            raise FileNotFoundError(
-                f"run_step=tts_to_end requires cached {hint} artifacts from a previous full dubbing run, "
-                "but caching is currently disabled. Re-enable cache or run the full pipeline first."
-            )
-
-        if not self.cache_manager.cache_exists(step_name, cache_key):
-            raise FileNotFoundError(
-                f"run_step=tts_to_end requires cached {hint} artifacts from a previous full dubbing run in the same project directory, "
-                f"but no cache entry was found for step '{step_name}'."
-            )
-
-        cached_value = self.cache_manager.load_from_cache(step_name, cache_key)
-        if cached_value is None:
-            raise FileNotFoundError(
-                f"run_step=tts_to_end found step '{step_name}' but could not load cached {hint} artifacts. "
-                "Re-run the full pipeline to rebuild them."
-            )
-
-        return cached_value
+        return artifact_helpers.load_required_cached_step(
+            self, step_name=step_name, cache_key=cache_key, hint=hint
+        )
 
     def _build_speaker_rolls_from_segments(self, segments: List[Dict]) -> Dict[Tuple[float, float], str]:
-        """Reconstruct a speaker timeline from translated segment data."""
-        speakers_rolls: Dict[Tuple[float, float], str] = {}
-        for segment in segments:
-            start = segment.get("start")
-            end = segment.get("end")
-            speaker = segment.get("speaker")
-            if start is None or end is None or speaker is None:
-                continue
-            speakers_rolls[(float(start), float(end))] = str(speaker)
-        return speakers_rolls
+        return artifact_helpers.build_speaker_rolls_from_segments(self, segments)
 
     def _save_requested_subtitles(
         self,
@@ -1094,67 +425,12 @@ class SmartDubbing:
         save_translated_subtitles: bool,
         pause_adjustments: Optional[List[Dict[str, float]]] = None,
     ) -> None:
-        """Persist subtitle files for the current output state."""
-        if not (save_original_subtitles or save_translated_subtitles):
-            return
-
-        remove_pauses_enabled = self.config.get('remove_pauses', False)
-        if not remove_pauses_enabled:
-            if save_original_subtitles:
-                self.subtitle_manager.save_subtitles(
-                    segments_for_output,
-                    "original",
-                    self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language')),
-                )
-
-            if save_translated_subtitles:
-                self.subtitle_manager.save_subtitles(
-                    segments_for_output,
-                    "translation",
-                    self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language')),
-                )
-            return
-
-        if pause_adjustments:
-            logger.info("Adjusting subtitle timestamps based on pause modifications...")
-            adjusted_segments = self.adjust_subtitle_timestamps(segments_for_output, pause_adjustments)
-            if save_original_subtitles:
-                self.subtitle_manager.save_subtitles(
-                    adjusted_segments,
-                    "original",
-                    self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language')),
-                )
-                adjusted_path = self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language'))
-                logger.info(f"Saved pause-corrected original subtitles to {adjusted_path}")
-
-            if save_translated_subtitles:
-                self.subtitle_manager.save_subtitles(
-                    adjusted_segments,
-                    "translation",
-                    self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language')),
-                )
-                adjusted_path = self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language'))
-                logger.info(f"Saved pause-corrected translated subtitles to {adjusted_path}")
-            return
-
-        logger.info("No pause adjustments needed, saving subtitles with original timestamps...")
-        if save_original_subtitles:
-            self.subtitle_manager.save_subtitles(
-                segments_for_output,
-                "original",
-                self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language')),
-            )
-            subtitle_path = self._get_subtitle_path("original", self.config.get('input'), self.config.get('source_language'))
-            logger.info(f"Saved original subtitles to {subtitle_path}")
-
-        if save_translated_subtitles:
-            self.subtitle_manager.save_subtitles(
-                segments_for_output,
-                "translation",
-                self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language')),
-            )
-            subtitle_path = self._get_subtitle_path("translation", self.config.get('input'), self.config.get('target_language'))
-            logger.info(f"Saved translated subtitles to {subtitle_path}")
+        return artifact_helpers.save_requested_subtitles(
+            self, segments_for_output,
+            save_original_subtitles=save_original_subtitles,
+            save_translated_subtitles=save_translated_subtitles,
+            pause_adjustments=pause_adjustments,
+        )
 
     def _combine_final_video(
         self,
@@ -1163,143 +439,30 @@ class SmartDubbing:
         background_audio_path: Optional[str],
         speakers_rolls: Dict[Tuple[float, float], str],
     ) -> tuple[str, List[Dict[str, float]]]:
-        """Combine the current translated audio track with the source video."""
-        keep_original_audio_ranges = self.config.get('keep_original_audio_ranges')
-        muted_speakers = getattr(self, "muted_speakers", set())
-        if keep_original_audio_ranges is None and self.config.get('include_original_audio', False) and muted_speakers:
-            try:
-                keep_original_audio_ranges = [
-                    (start, end) for (start, end), spk in (speakers_rolls or {}).items() if spk not in muted_speakers
-                ]
-                if keep_original_audio_ranges:
-                    logger.info(f"Computed keep_original_audio_ranges excluding muted speakers ({len(keep_original_audio_ranges)} ranges)")
-            except Exception:
-                keep_original_audio_ranges = self.config.get('keep_original_audio_ranges')
-
-        return self.video_processor.combine_audio_with_video(
-            video_path=self.config.get('input'),
-            translated_audio_path=translated_audio_path,
+        return artifact_helpers.combine_final_video(
+            self, translated_audio_path=translated_audio_path,
             background_audio_path=background_audio_path,
-            watermark_path=self.config.get('watermark_path'),
-            watermark_text=self.config.get('watermark_text'),
-            include_original_audio=self.config.get('include_original_audio', False),
-            output_file=self.config.get('output'),
-            start_time=self.config.get('start_time'),
-            duration=self.config.get('duration'),
-            keep_original_audio_ranges=keep_original_audio_ranges,
-            source_language=self.config.get('source_language'),
-            target_language=self.config.get('target_language'),
-            normalize_audio=self.config.get('normalize_audio', True),
-            use_two_pass_encoding=self.config.get('use_two_pass_encoding', True),
-            remove_pauses=self.config.get('remove_pauses', False),
-            min_pause_duration=self.config.get('min_pause_duration', 300),
-            preserve_pause_duration=self.config.get('preserve_pause_duration', 1.5),
-            keyframe_buffer=self.config.get('keyframe_buffer', 0.2),
-            ffmpeg_batch_size=self.config.get('ffmpeg_batch_size', 50),
-            dubbed_volume=self.config.get('dubbed_volume', 1.0),
-            background_volume=self.config.get('background_volume', 0.562341),
-            upscale_factor=self.config.get('upscale_factor', 1.0),
-            upscale_sharpen=self.config.get('upscale_sharpen', True),
+            speakers_rolls=speakers_rolls,
         )
 
     def _persist_dubbing_text_snapshot(
         self, segments: List[Dict], audio_file: str
     ) -> None:
-        """Persist the latest real segment state for the Dubbing Texts editor."""
-        translation_cache_reusable = getattr(
-            self, "_semantic_plan_cache_persistable", True
+        return translation_helpers.persist_dubbing_text_snapshot(
+            self, segments, audio_file
         )
-        try:
-            snapshot_key = self._build_dubbing_text_snapshot_key(audio_file)
-            snapshot_payload = {
-                "version": 1,
-                "segments": segments,
-                "translation_cache_reusable": translation_cache_reusable,
-                "translation_cache_key": (
-                    self._build_translation_cache_key(audio_file)
-                    if translation_cache_reusable
-                    else None
-                ),
-            }
-            self.cache_manager.save_to_cache(
-                "dubbing_texts", snapshot_key, snapshot_payload
-            )
-        except Exception as e:
-            logger.warning(f"Could not persist Dubbing Texts snapshot: {e}")
 
     def _persist_synthesis_results(
         self, segments: List[Dict], audio_file: str
     ) -> None:
-        """Persist post-synthesis editor state and reusable pipeline state."""
-        self._persist_dubbing_text_snapshot(segments, audio_file)
-
-        translation_cache_reusable = getattr(
-            self, "_semantic_plan_cache_persistable", True
+        return translation_helpers.persist_synthesis_results(
+            self, segments, audio_file
         )
-        if not translation_cache_reusable:
-            return
-        try:
-            cache_key = self._build_translation_cache_key(audio_file)
-            self.cache_manager.save_to_cache("translation", cache_key, segments)
-        except Exception as e:
-            logger.warning(f"Could not persist synthesis results to translation cache: {e}")
 
     def _reset_input_cache(self, reason: str) -> None:
-        """Delete every cached artifact tied to the current input file.
+        return artifact_helpers.reset_input_cache(self, reason)
 
-        Also drops any legacy per-step caches saved without an input hash so
-        callers do not silently reuse stale results from earlier runs.
-        """
-        logger.info(f"Clearing cached artifacts for this input ({reason})")
-        try:
-            if hasattr(self.cache_manager, "clear_input_cache"):
-                self.cache_manager.clear_input_cache(self.config.get('input'))
-        except Exception as e:
-            logger.warning(f"Could not clear per-input cache: {e}")
-
-        # Also wipe rendered chunk wavs. Without this a from-scratch run that
-        # loses a segment mid-flight (e.g. OmniVoice AcceleratorError) would
-        # silently reuse the previous run's chunk with the same index — audio
-        # produced by a completely different TTS backend.
-        for chunk_dir in (
-            getattr(self, "audio_chunks_dir", None),
-            getattr(self, "su_audio_chunks_dir", None),
-        ):
-            if chunk_dir and Path(chunk_dir).exists():
-                for item in Path(chunk_dir).glob("*.wav"):
-                    try:
-                        item.unlink()
-                    except OSError as exc:
-                        logger.debug(f"Could not remove stale chunk {item}: {exc}")
-
-        # Legacy fallback: older transcription backends write to ./cache/<step>/
-        # without the input-hash prefix, so a targeted wipe is still needed.
-        legacy_root = getattr(self.cache_manager, "cache_root", None)
-        if legacy_root is None:
-            return
-        for step_name in (
-            "whisperx_diarization_transcription",
-            "gemini_diarization_transcription",
-            "deepgram_diarization_transcription",
-            "assemblyai_diarization_transcription",
-            "isolated_tracks_transcription",
-            "isolated_tracks_raw_transcription",
-            "isolated_tracks_semantic_plan",
-            "semantic_boundary_classification",
-            "chunked_processing",
-            "segment_transcription",
-            "diarization",
-            "transcription",
-            "translation",
-            "emotions",
-        ):
-            legacy_dir = Path(legacy_root) / step_name
-            if legacy_dir.exists():
-                try:
-                    shutil.rmtree(legacy_dir)
-                except Exception as e:
-                    logger.warning(f"Could not remove legacy cache {legacy_dir}: {e}")
-
+    @_with_pipeline_context
     def run_transcribe_only(self, save_original_subtitles: bool = False) -> str:
         """Run only audio extraction, diarization, and transcription; then exit.
 
@@ -1334,6 +497,7 @@ class SmartDubbing:
         finally:
             self._cleanup()
 
+    @_with_pipeline_context
     def run_translate_only(
         self,
         save_original_subtitles: bool = False,
@@ -1387,6 +551,7 @@ class SmartDubbing:
         finally:
             self._cleanup()
 
+    @_with_pipeline_context
     def run_analyze_emotions_only(
         self,
         save_translated_subtitles: bool = False,
@@ -1461,6 +626,7 @@ class SmartDubbing:
         finally:
             self._cleanup()
 
+    @_with_pipeline_context
     def run_from_scratch(
         self,
         save_original_subtitles: bool = False,
@@ -1477,6 +643,7 @@ class SmartDubbing:
             save_translated_subtitles=save_translated_subtitles,
         )
 
+    @_with_pipeline_context
     def run_from_tts(self, save_original_subtitles: bool = False, save_translated_subtitles: bool = False) -> str:
         """Resume from cached translation artifacts, rerun TTS, and finish the video."""
         logger.info("Resuming dubbing process from the TTS step")
@@ -1611,6 +778,7 @@ class SmartDubbing:
 
         return output_video_path
     
+    @_with_pipeline_context
     def run_pipeline(self, save_original_subtitles: bool = False, save_translated_subtitles: bool = False) -> str:
         """Run the full dubbing pipeline."""
         pipeline_start_time = time.perf_counter()
@@ -1788,1066 +956,76 @@ class SmartDubbing:
     def _load_cached_diarize_and_transcribe(
         self, audio_file: str
     ) -> Tuple[Dict[Tuple[float, float], str], List[Dict]]:
-        """Return a cached diarize+transcribe result or raise a clear error.
-
-        Used by ``run_translate_only`` to guarantee we never re-run the
-        transcriber during a resume step. Reproduces the exact cache_key that
-        ``SmartDubbing.diarize_and_transcribe`` writes — a full-pipeline or
-        ``transcribe_only`` run passes that key to the transcriber, so any
-        cached result lives under it. If the transcriber does not advertise
-        ``cache_step_name`` (legacy pyannote_openai with its multi-step cache
-        layout), fall back to a normal ``diarize_and_transcribe`` call so its
-        own internal cache is still consulted.
-        """
-        # Isolated-tracks path publishes its own step_name outside of any
-        # transcriber. Reproduce the same cache_key the write path used;
-        # miss → fall back to a fresh isolated run (its own cache is a no-op
-        # then, so we just recompute).
-        isolated_tracks = self.config.get('isolated_tracks')
-        if isolated_tracks:
-            step_name = (
-                "isolated_tracks_semantic_plan"
-                if self.config.get("semantic_split_enabled", True)
-                else "isolated_tracks_transcription"
-            )
-            cache_key = self._isolated_tracks_cache_key(audio_file, isolated_tracks)
-            if not self.cache_manager.cache_exists(step_name, cache_key):
-                raise FileNotFoundError(
-                    f"run_step=translate_only requires cached isolated-tracks "
-                    f"diarization+transcription from a previous transcribe_only or "
-                    f"full pipeline run in the same project directory, but no cache "
-                    f"entry was found for step '{step_name}'. Run "
-                    f"--run_step transcribe_only (or the full pipeline) first."
-                )
-            return self._diarize_and_transcribe_isolated(audio_file, isolated_tracks)
-
-        transcriber = self._require_transcriber()
-        step_name = (getattr(transcriber, "cache_step_name", "") or "").strip()
-
-        if not step_name:
-            logger.warning(
-                "Transcriber %s does not advertise a cache_step_name; falling back "
-                "to a normal diarize_and_transcribe call (its own cache is still consulted).",
-                transcriber.name,
-            )
-            speakers_rolls, transcription = transcriber.diarize_and_transcribe(
-                audio_file=audio_file,
-                cache_key=None,
-                use_cache=True,
-            )
-            self.debug_data["diarization"] = speakers_rolls
-            self.debug_data["transcription"] = transcription
-            self._save_transcription_file(transcription)
-            return speakers_rolls, transcription
-
-        # Use the SAME cache_key that SmartDubbing.diarize_and_transcribe would
-        # compute on a full-pipeline / transcribe_only run — that's what any
-        # existing cache entry was written under.
-        cache_key = self.cache_manager.generate_cache_key(
-            audio_file,
-            self.config.get('source_language'),
-            self.config.get('target_language'),
-            self.config.get('whisper_model', 'large-v3'),
-            self.config.get('start_time'),
-            self.config.get('duration'),
-        )
-
-        if not self.cache_manager.cache_exists(step_name, cache_key):
-            raise FileNotFoundError(
-                f"run_step=translate_only requires cached diarization+transcription "
-                f"from a previous transcribe_only or full pipeline run in the same "
-                f"project directory, but no cache entry was found for step "
-                f"'{step_name}'. Run --run_step transcribe_only (or the full pipeline) "
-                f"first."
-            )
-
-        speakers_rolls, transcription = transcriber.diarize_and_transcribe(
-            audio_file=audio_file,
-            cache_key=cache_key,
-            use_cache=True,
-        )
-        self.debug_data["diarization"] = speakers_rolls
-        self.debug_data["transcription"] = transcription
-        self._save_transcription_file(transcription)
-        return speakers_rolls, transcription
+        return transcription_helpers.load_cached_diarize_and_transcribe(self, audio_file)
 
     def diarize_and_transcribe(self, audio_file: str) -> Tuple[Dict[Tuple[float, float], str], List[Dict]]:
-        """Perform speaker diarization and transcription."""
-        # Opt-in isolated-tracks path: only active when the user supplies
-        # per-speaker isolated audio files. Skips the standard transcriber
-        # entirely; the standard path below is left untouched.
-        isolated_tracks = self.config.get('isolated_tracks')
-        if isolated_tracks:
-            return self._diarize_and_transcribe_isolated(audio_file, isolated_tracks)
-
-        transcriber = self._require_transcriber()
-
-        # Generate cache key
-        cache_key = self.cache_manager.generate_cache_key(
-            audio_file,
-            self.config.get('source_language'),
-            self.config.get('target_language'),
-            self.config.get('whisper_model', 'large-v3'),
-            self.config.get('start_time'),
-            self.config.get('duration')
-        )
-
-        # Perform diarization and transcription
-        speakers_rolls, transcription = transcriber.diarize_and_transcribe(
-            audio_file=audio_file,
-            cache_key=cache_key,
-            use_cache=self.cache_manager.use_cache
-        )
-
-        # Store for debug
-        self.debug_data["diarization"] = speakers_rolls
-        self.debug_data["transcription"] = transcription
-
-        # Save transcription to file
-        self._save_transcription_file(transcription)
-
-        return speakers_rolls, transcription
+        return transcription_helpers.diarize_and_transcribe(self, audio_file)
 
     def _isolated_tracks_cache_key(
-        self,
-        audio_file: str,
-        isolated_tracks: Dict[str, str],
+        self, audio_file: str, isolated_tracks: Dict[str, str],
     ) -> str:
-        """Cache key for the isolated-tracks path.
+        return cache_key_helpers.isolated_tracks_cache_key(self, audio_file, isolated_tracks)
 
-        Includes the main audio_file hash (to stay consistent with the
-        CacheManager's input-hash directory layout) plus a fingerprint of
-        every isolated track file, the inner transcription system, and the
-        language pair. That way, swapping a track or the inner backend
-        invalidates the cache automatically.
-        """
-        inner_system = self.config.get('inner_transcription_system', 'deepgram')
-        base_key = self.cache_manager.generate_cache_key(
-            audio_file,
-            self.config.get('source_language'),
-            self.config.get('target_language'),
-            self.config.get('whisper_model', 'large-v3'),
-            self.config.get('start_time'),
-            self.config.get('duration'),
-        )
-
-        fingerprint = hashlib.md5()
-        for speaker in sorted(isolated_tracks.keys()):
-            path = isolated_tracks[speaker]
-            fingerprint.update(speaker.encode('utf-8'))
-            fingerprint.update(b'=')
-            try:
-                stat = os.stat(path)
-                fingerprint.update(str(stat.st_size).encode('utf-8'))
-                fingerprint.update(str(int(stat.st_mtime)).encode('utf-8'))
-            except OSError:
-                fingerprint.update(str(path).encode('utf-8'))
-            fingerprint.update(b';')
-        fingerprint.update(inner_system.encode('utf-8'))
-        if self.config.get("semantic_split_enabled", True):
-            from ..audio.semantic_planner import SEMANTIC_PLANNER_VERSION
-
-            fingerprint.update(
-                self._isolated_tracks_raw_cache_key(isolated_tracks).encode("utf-8")
-            )
-            semantic_payload = {
-                "algorithm": SEMANTIC_PLANNER_VERSION,
-                "incomplete_tail_rules": "incomplete_tail_en_v1",
-                "prompt_parser": "semantic_boundary_prompt_v1",
-                "semantic_split_enabled": True,
-                "tts_preferred_segment_duration": self.config.get("tts_preferred_segment_duration", 15.0),
-                "tts_hard_segment_duration": self.config.get("tts_hard_segment_duration", 35.0),
-                "semantic_split_search_window": self.config.get("semantic_split_search_window", 10.0),
-                "source_language": self.config.get("source_language"),
-                "classifier": self._semantic_classifier_identity(),
-                "classifier_timeout": 30.0,
-                "classifier_batch_size": 50,
-                "classifier_batch_characters": 12000,
-            }
-            fingerprint.update(
-                json.dumps(semantic_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            )
-
-        return f"{base_key}_isolated_{fingerprint.hexdigest()[:16]}"
-
-    def _isolated_tracks_raw_cache_key(
-        self,
-        isolated_tracks: Dict[str, str],
-    ) -> str:
-        """Fingerprint provider-level VAD/ASR output independently of planning."""
-        payload: Dict[str, Any] = {
-            "algorithm": "isolated_raw_v1",
-            "source_language": self.config.get("source_language"),
-            "inner_transcription_system": self.config.get(
-                "inner_transcription_system", "deepgram"
-            ),
-            "start_time": self.config.get("start_time"),
-            "duration": self.config.get("duration"),
-            "deepgram_model": self.config.get("deepgram_model"),
-            "assemblyai_model": self.config.get("transcription_model"),
-            "gemini_model": self.config.get("gemini_transcription_model"),
-            "tracks": [],
-        }
-        for speaker in sorted(isolated_tracks):
-            path = isolated_tracks[speaker]
-            try:
-                track_digest = hashlib.sha256()
-                with open(path, "rb") as track_file:
-                    for chunk in iter(lambda: track_file.read(1024 * 1024), b""):
-                        track_digest.update(chunk)
-                identity = [speaker, track_digest.hexdigest()]
-            except OSError:
-                identity = [speaker, str(path), None, None]
-            payload["tracks"].append(identity)
-        return f"isolated_raw_v1_{hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:20]}"
+    def _isolated_tracks_raw_cache_key(self, isolated_tracks: Dict[str, str]) -> str:
+        return cache_key_helpers.isolated_tracks_raw_cache_key(self, isolated_tracks)
 
     def _semantic_classifier(self) -> Tuple[Optional[Any], str]:
-        if self.config.get("translator_type", "llm") != "llm":
-            return None, "deterministic-only"
-        translator = getattr(self, "translator", None)
-        classifier = getattr(translator, "classify_semantic_boundaries", None)
-        if callable(classifier):
-            return classifier, "ready"
-        if getattr(self, "translator_init_error", None) is not None:
-            return None, "initialization_failed"
-        return None, "unavailable"
+        return transcription_helpers.semantic_classifier(self)
 
     def _semantic_classifier_identity(self) -> Dict[str, Any]:
-        """Return the effective classifier identity used by semantic-plan caches."""
-        _classifier, status = self._semantic_classifier()
-        if status == "deterministic-only":
-            return {"mode": status}
-        translator = getattr(self, "translator", None)
-        return {
-            "mode": status,
-            "provider": getattr(
-                translator, "llm_provider", self.config.get("llm_provider")
-            ),
-            "model": getattr(
-                translator, "model_name", self.config.get("llm_model_name")
-            ),
-            "temperature": getattr(
-                translator,
-                "temperature",
-                self.config.get("llm_temperature", 0.5),
-            ),
-            "max_tokens": getattr(
-                translator,
-                "max_tokens",
-                self.config.get("llm_max_tokens", 16384),
-            ),
-        }
+        return cache_key_helpers.semantic_classifier_identity(self)
 
     @staticmethod
     def _write_semantic_boundary_diagnostics(
         path: str, records: List[Dict[str, Any]]
     ) -> None:
-        debug_path = Path(path)
-        debug_path.parent.mkdir(parents=True, exist_ok=True)
-        with debug_path.open("w", encoding="utf-8", newline="\n") as handle:
-            for record in records:
-                handle.write(
-                    json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
-                )
+        return transcription_helpers.write_semantic_boundary_diagnostics(path, records)
 
     def _diarize_and_transcribe_isolated(
         self,
         audio_file: str,
         isolated_tracks: Dict[str, str],
     ) -> Tuple[Dict[Tuple[float, float], str], List[Dict]]:
-        """Isolated-tracks branch of ``diarize_and_transcribe``.
-
-        Delegates to ``dubbing.audio.isolated_tracks.run_isolated_tracks``
-        and caches the result under ``isolated_tracks_transcription`` so
-        ``translate_only`` / ``tts_to_end`` can resume without re-running
-        VAD or the inner transcriber.
-        """
-        from dubbing.audio.isolated_tracks import (
-            collect_isolated_tracks_raw,
-            run_isolated_tracks,
-        )
-
-        semantic_enabled = self.config.get("semantic_split_enabled", True)
-        semantic_debug_path = (
-            str(Path(self.config.get("debug_dir")) / "semantic_boundaries.jsonl")
-            if self.config.get("debug_info", False) and self.config.get("debug_dir")
-            else None
-        )
-        step_name = (
-            "isolated_tracks_semantic_plan"
-            if semantic_enabled
-            else "isolated_tracks_transcription"
-        )
-        cache_key = self._isolated_tracks_cache_key(audio_file, isolated_tracks)
-
-        if (
-            self.cache_manager.use_cache
-            and self.cache_manager.cache_exists(step_name, cache_key)
-        ):
-            logger.debug("Loading isolated-tracks diarization+transcription from cache...")
-            cached = self.cache_manager.load_from_cache(step_name, cache_key)
-            if not isinstance(cached, dict):
-                cached = None
-            if cached is not None:
-                if (
-                    semantic_enabled
-                    and semantic_debug_path
-                    and not isinstance(cached.get("semantic_diagnostics"), list)
-                ):
-                    logger.info(
-                        "Cached semantic plan predates boundary diagnostics; replanning from raw transcription."
-                    )
-                    cached = None
-                if cached is None:
-                    logger.warning("Semantic-plan cache cannot satisfy debug diagnostics.")
-                else:
-                    if semantic_enabled and semantic_debug_path:
-                        self._write_semantic_boundary_diagnostics(
-                            semantic_debug_path,
-                            cached["semantic_diagnostics"],
-                        )
-            if cached is not None:
-                speakers_rolls = cached["diarization"]
-                transcription = cached["transcription"]
-                if transcription and semantic_enabled:
-                    fingerprints = {
-                        segment.get("semantic_plan_fingerprint")
-                        for segment in transcription
-                        if segment.get("semantic_plan_fingerprint")
-                    }
-                    if (
-                        len(fingerprints) != 1
-                        or any(
-                            segment.get("semantic_plan_fingerprint") not in fingerprints
-                            for segment in transcription
-                        )
-                    ):
-                        logger.warning(
-                            "Cached semantic plan has a missing or inconsistent fingerprint; replanning."
-                        )
-                        cached = None
-                    else:
-                        self._semantic_plan_fingerprint = next(iter(fingerprints))
-                if cached is not None:
-                    self._semantic_plan_cache_persistable = True
-                    self.debug_data["diarization"] = speakers_rolls
-                    self.debug_data["transcription"] = transcription
-                    self._save_transcription_file(transcription)
-                    return speakers_rolls, transcription
-            logger.warning("Corrupt isolated-tracks cache entry, recomputing.")
-
-        inner_system = self.config.get('inner_transcription_system', 'deepgram')
-        logger.info(
-            "Isolated-tracks path: %d tracks, inner_transcription_system=%s",
-            len(isolated_tracks),
-            inner_system,
-        )
-
-        raw_step_name = "isolated_tracks_raw_transcription"
-        raw_cache_key = self._isolated_tracks_raw_cache_key(isolated_tracks)
-        raw_tracks_data = None
-        if (
-            self.cache_manager.use_cache
-            and self.cache_manager.cache_exists(raw_step_name, raw_cache_key)
-        ):
-            raw_tracks_data = self.cache_manager.load_from_cache(
-                raw_step_name, raw_cache_key
-            )
-        if raw_tracks_data is None:
-            raw_tracks_data = collect_isolated_tracks_raw(
-                tracks=isolated_tracks,
-                inner_system=inner_system,
-                source_language=self.config.get('source_language'),
-                device=self.config.get('device'),
-                cache_manager=self.cache_manager,
-                inner_kwargs=self._isolated_inner_kwargs(inner_system),
-                start_time=self.config.get('start_time'),
-                duration=self.config.get('duration'),
-            )
-            self.cache_manager.save_to_cache(
-                raw_step_name, raw_cache_key, raw_tracks_data
-            )
-
-        semantic_classifier, classifier_status = self._semantic_classifier()
-        classification_step = "semantic_boundary_classification"
-
-        def load_classification(key: str) -> Any:
-            if self.cache_manager.cache_exists(classification_step, key):
-                return self.cache_manager.load_from_cache(classification_step, key)
-            return None
-
-        def save_classification(key: str, value: Any) -> None:
-            self.cache_manager.save_to_cache(classification_step, key, value)
-
-        classifier_cache_context = {
-            **self._semantic_classifier_identity(),
-            "timeout": 30.0,
-            "batch_size": 50,
-            "batch_characters": 12000,
-        }
-        semantic_diagnostics: List[Dict[str, Any]] = []
-        speakers_rolls, transcription = run_isolated_tracks(
-            tracks=isolated_tracks,
-            inner_system=inner_system,
-            source_language=self.config.get('source_language'),
-            device=self.config.get('device'),
-            cache_manager=self.cache_manager,
-            inner_kwargs=self._isolated_inner_kwargs(inner_system),
-            start_time=self.config.get('start_time'),
-            duration=self.config.get('duration'),
-            semantic_split_enabled=semantic_enabled,
-            tts_preferred_segment_duration=self.config.get(
-                "tts_preferred_segment_duration", 15.0
-            ),
-            tts_hard_segment_duration=self.config.get(
-                "tts_hard_segment_duration", 35.0
-            ),
-            semantic_split_search_window=self.config.get(
-                "semantic_split_search_window", 10.0
-            ),
-            semantic_classifier=semantic_classifier,
-            semantic_classifier_status=classifier_status,
-            semantic_debug_path=semantic_debug_path,
-            raw_tracks_data=raw_tracks_data,
-            classification_cache_get=load_classification,
-            classification_cache_set=save_classification,
-            classifier_cache_context=classifier_cache_context,
-            semantic_diagnostics_out=semantic_diagnostics,
-        )
-
-        plan_persistable = all(
-            segment.get("_semantic_plan_cache_persistable", True)
-            for segment in transcription
-        )
-        if semantic_enabled and not plan_persistable:
-            logger.warning(
-                "Semantic boundary classification used a transient fallback; "
-                "caching the deterministic fallback plan for resume."
-            )
-        self.cache_manager.save_to_cache(
-            step_name,
-            cache_key,
-            {
-                "diarization": speakers_rolls,
-                "transcription": transcription,
-                "semantic_diagnostics": semantic_diagnostics,
-            },
-        )
-        if transcription and semantic_enabled:
-            self._semantic_plan_fingerprint = transcription[0].get(
-                "semantic_plan_fingerprint"
-            )
-            self._semantic_plan_cache_persistable = True
-
-        self.debug_data["diarization"] = speakers_rolls
-        self.debug_data["transcription"] = transcription
-        self._save_transcription_file(transcription)
-        return speakers_rolls, transcription
+        return transcription_helpers.diarize_and_transcribe_isolated(self, audio_file, isolated_tracks)
 
     def _isolated_inner_kwargs(self, inner_system: str) -> Dict[str, Any]:
-        """Extra kwargs for the inner transcriber used by isolated-tracks."""
-        if inner_system == "deepgram":
-            model = self.config.get("deepgram_model")
-            return {"deepgram_model": model} if model else {}
-        if inner_system == "gemini":
-            model = self.config.get("gemini_transcription_model")
-            return {"gemini_transcription_model": model} if model else {}
-        if inner_system == "assemblyai":
-            model = self.config.get("transcription_model")
-            return {"speech_model": model} if model else {}
-        return {}
+        return transcription_helpers.isolated_inner_kwargs(self, inner_system)
     
     def translate_segments(self, transcription: List[Dict], audio_file: str) -> List[Dict]:
-        """Translate segments using the translator."""
-        semantic_fingerprints = {
-            segment.get("semantic_plan_fingerprint")
-            for segment in transcription
-            if segment.get("semantic_plan_fingerprint")
-        }
-        semantic_segments = [
-            segment for segment in transcription if segment.get("semantic_unit_id")
-        ]
-        if semantic_segments and (
-            len(semantic_fingerprints) != 1
-            or any(
-                segment.get("semantic_plan_fingerprint") not in semantic_fingerprints
-                for segment in semantic_segments
-            )
-        ):
-            raise ValueError(
-                "Semantic transcription has a missing or inconsistent semantic_plan_fingerprint"
-            )
-        if len(semantic_fingerprints) > 1:
-            raise ValueError("Transcription contains multiple semantic plan fingerprints")
-        if semantic_fingerprints:
-            self._semantic_plan_fingerprint = next(iter(semantic_fingerprints))
-        cache_key = self._build_translation_cache_key(audio_file)
-        step_name = "translation"
-        
-        translated_segments = None
-        # Check if results are cached
-        if self.cache_manager.cache_exists(step_name, cache_key):
-            logger.debug("Loading translations from cache...")
-            translated_segments = self.cache_manager.load_from_cache(step_name, cache_key)
-            if translated_segments is not None:
-                self._validate_plan_dependent_segments(translated_segments)
-                self.performance_tracker.record_metric("translation", 0.0)
-            else:
-                logger.warning("Found corrupted translation cache, re-translating.")
-
-        if translated_segments is None:
-            # Start timing
-            self.performance_tracker.start_timing("translation")
-            translator = self._require_translator()
-            
-            if not translator.is_available():
-                raise ValueError("No translator available")
-
-            original_prompt_prefix = getattr(translator, "prompt_prefix", None)
-            if hasattr(translator, "prompt_prefix"):
-                translator.prompt_prefix = self._build_translation_prompt_prefix(
-                    original_prompt_prefix
-                )
-
-            try:
-                translated_segments = translator.translate(
-                    segments=transcription,
-                    source_language=self.config.get('source_language'),
-                    target_language=self.config.get('target_language'),
-                    refinement_persona=self.config.get('refinement_persona', 'normal'),
-                    debug=self.debug_data,
-                    debug_dir=self.config.get("translation_debug_dir"),
-                    refinement_debug_dir=self.config.get("translation_refinement_debug_dir"),
-                    timecodes_report_path=self.config.get("timecodes_report_path"),
-                )
-            finally:
-                if hasattr(translator, "prompt_prefix"):
-                    translator.prompt_prefix = original_prompt_prefix
-            
-            # Save results to cache
-            if getattr(self, "_semantic_plan_cache_persistable", True):
-                self.cache_manager.save_to_cache(step_name, cache_key, translated_segments)
-            
-            # End timing
-            elapsed_time = self.performance_tracker.end_timing("translation")
-            logger.info(f"Finished translation in {elapsed_time:.2f} seconds (≈ {elapsed_time/60:.2f} minutes)")
-        
-        # Store for debug
-        self.debug_data["translation"] = translated_segments
-        self._persist_dubbing_text_snapshot(translated_segments, audio_file)
-        
-        return translated_segments
+        return translation_helpers.translate_segments(
+            self, transcription, audio_file
+        )
 
     def _build_translation_prompt_prefix(self, base_prompt_prefix: Optional[str]) -> str:
-        """Combine any user-provided translation prompt prefix with SmartDubbing TTS stress rules."""
-        base_prompt = (base_prompt_prefix or "").strip()
-        if "U+0301" in base_prompt or "каса́" in base_prompt:
-            return base_prompt
-        if base_prompt:
-            return f"{base_prompt}\n\n{SMART_DUBBING_STRESS_MARKS_REQUIREMENT}"
-        return SMART_DUBBING_STRESS_MARKS_REQUIREMENT
+        return translation_helpers.build_translation_prompt_prefix(
+            self, base_prompt_prefix, SMART_DUBBING_STRESS_MARKS_REQUIREMENT
+        )
     
     def analyze_emotions(self, segments: List[Dict], audio_file: str) -> List[Dict]:
-        """Analyze emotions in the audio for each segment."""
-        if not segments:
-            return []
-
-        provider = str(self.config.get("emotion_provider") or "gemini").lower()
-        model = str(self.config.get("emotion_model") or "gemini-3.1-flash-lite")
-
-        cache_key = self._build_emotions_cache_key(
-            audio_file, segments, provider, model
-        )
-        step_name = "emotions"
-
-        if self.cache_manager.cache_exists(step_name, cache_key):
-            logger.debug("Loading emotion analysis from cache...")
-            cached_segments = self.cache_manager.load_from_cache(step_name, cache_key)
-            if cached_segments is not None:
-                try:
-                    self._validate_plan_dependent_segments(cached_segments)
-                except ValueError:
-                    logger.warning(
-                        "Emotion cache does not match the active semantic plan; "
-                        "re-analyzing."
-                    )
-                else:
-                    return cached_segments
-            logger.warning("Found corrupted emotion cache, re-analyzing.")
-
-        logger.info("Analyzing speech emotions (provider=%s, model=%s)...", provider, model)
-        self.performance_tracker.start_timing("emotion_analysis")
-
-        try:
-            if provider == "gemini":
-                self._analyze_emotions_gemini(segments, audio_file, model)
-            elif provider == "speechbrain":
-                self._analyze_emotions_speechbrain(segments, audio_file)
-            else:
-                logger.warning("Unknown emotion_provider '%s'; defaulting all segments to Neutral.", provider)
-                for segment in segments:
-                    segment["emotion"] = "Neutral"
-        finally:
-            self.performance_tracker.end_timing("emotion_analysis")
-
-        self.cache_manager.save_to_cache(step_name, cache_key, segments)
-        return segments
+        return emotion_helpers.analyze_emotions(self, segments, audio_file)
 
     def _analyze_emotions_gemini(self, segments: List[Dict], audio_file: str, model: str) -> None:
-        """Classify each segment's emotion via a Gemini multimodal model on Vertex AI."""
-        try:
-            from google import genai
-            from google.genai import types as genai_types
-        except ImportError:
-            logger.warning(
-                "google-genai package unavailable; falling back to Neutral for all segments. "
-                "Install google-genai or switch emotion_provider to 'speechbrain'."
-            )
-            for segment in segments:
-                segment["emotion"] = "Neutral"
-            return
-
-        try:
-            from google_vertex import get_vertex_ai_settings
-            vertex_settings = get_vertex_ai_settings()
-            client = genai.Client(**vertex_settings.genai_client_kwargs)
-        except Exception as exc:
-            logger.warning("Vertex AI unavailable for emotion analysis (%s); defaulting to Neutral.", exc)
-            for segment in segments:
-                segment["emotion"] = "Neutral"
-            return
-
-        import io
-        from pydub import AudioSegment
-
-        prompt = EMOTION_ANALYSIS_PROMPT
-        config_obj = genai_types.GenerateContentConfig(temperature=0.2)
-        allowed = {"Neutral", "Angry", "Happy", "Sad"}
-
-        audio = AudioSegment.from_file(audio_file)
-        for segment in segments:
-            try:
-                start = max(int(segment["start"] * 1000), 0)
-                end = min(int(segment["end"] * 1000), len(audio))
-                if end <= start:
-                    segment["emotion"] = "Neutral"
-                    segment.setdefault("style_prompt", "")
-                    continue
-
-                segment_audio = audio[start:end]
-                buffer = io.BytesIO()
-                segment_audio.export(buffer, format="wav")
-                audio_part = genai_types.Part.from_bytes(
-                    data=buffer.getvalue(),
-                    mime_type="audio/wav",
-                )
-
-                response = client.models.generate_content(
-                    model=model,
-                    contents=[audio_part, prompt],
-                    config=config_obj,
-                )
-                raw = (getattr(response, "text", None) or "").strip()
-                style_text = ""
-                emotion_label = "Neutral"
-                for line in raw.splitlines():
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    lower = stripped.lower()
-                    if lower.startswith("style:"):
-                        style_text = stripped.split(":", 1)[1].strip().strip('"\'')
-                    elif lower.startswith("emotion:"):
-                        tag = stripped.split(":", 1)[1].strip().split()[0]
-                        tag = tag.strip(".,!?\"'").capitalize()
-                        if tag in allowed:
-                            emotion_label = tag
-                if not style_text and raw:
-                    # Fallback: model ignored the format — take the first non-empty line.
-                    first_line = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
-                    style_text = first_line.strip('"\'')
-                segment["emotion"] = emotion_label
-                segment["style_prompt"] = style_text
-            except Exception as exc:
-                logger.warning("Gemini emotion classification failed for segment: %s", exc)
-                segment["emotion"] = "Neutral"
-                segment.setdefault("style_prompt", "")
+        return emotion_helpers.analyze_emotions_gemini(
+            self, segments, audio_file, model, EMOTION_ANALYSIS_PROMPT
+        )
 
     def _analyze_emotions_speechbrain(self, segments: List[Dict], audio_file: str) -> None:
-        """Legacy speechbrain-based classifier (IEMOCAP wav2vec2)."""
-        try:
-            from speechbrain.inference.interfaces import foreign_class
-        except ModuleNotFoundError as exc:
-            if exc.name != "speechbrain":
-                raise
-            logger.warning(
-                "Skipping emotion analysis because optional dependency "
-                "'speechbrain' is unavailable. Install it or switch emotion_provider to 'gemini'."
-            )
-            for segment in segments:
-                segment["emotion"] = "Neutral"
-            return
-
-        classifier = foreign_class(
-            source="speechbrain/emotion-recognition-wav2vec2-IEMOCAP",
-            pymodule_file="custom_interface.py",
-            classname="CustomEncoderWav2vec2Classifier",
-            run_opts={"device": self.torch_device},
+        return emotion_helpers.analyze_emotions_speechbrain(
+            self, segments, audio_file, SOFT_STYLE_BY_EMOTION
         )
-        emotion_dict = {
-            'neu': 'Neutral',
-            'ang': 'Angry',
-            'hap': 'Happy',
-            'sad': 'Sad',
-            'None': None,
-        }
-
-        from pydub import AudioSegment
-        audio = AudioSegment.from_file(audio_file)
-        for segment in segments:
-            try:
-                start = int(segment["start"] * 1000)
-                end = int(segment["end"] * 1000)
-                segment_audio = audio[start:end]
-                temp_segment_path = self.config.get("temp_segment_audio_path")
-                segment_audio.export(temp_segment_path, format="wav")
-                out_prob, score, index, text_lab = classifier.classify_file(temp_segment_path)
-                emotion = emotion_dict[text_lab[0]] or "Neutral"
-                segment["emotion"] = emotion
-                segment["style_prompt"] = SOFT_STYLE_BY_EMOTION.get(emotion, "")
-                os.remove(temp_segment_path)
-            except Exception as e:
-                logger.warning(f"Error analyzing emotion: {e}")
-                segment["emotion"] = "Neutral"
-                segment.setdefault("style_prompt", "")
     
     def synthesize_speech(self, segments: List[Dict], speakers_rolls: Dict, audio_file: str) -> str:
-        """Synthesize measured text candidates within each recognized segment."""
-        if not segments:
-            raise ValueError("Cannot synthesize speech with no segments.")
-
-        from .timing import TimingPolicy, plan_anchor_windows, timing_cache_fingerprint
-        from tts.models import TTSSegmentData
-
-        try:
-            self._timing_source_duration = len(AudioSegment.from_file(audio_file)) / 1000.0
-        except Exception as exc:
-            raise ValueError(f"Cannot measure processed source audio for timing: {audio_file}") from exc
-        self._timing_source_audio_file = audio_file
-
-        planned = plan_anchor_windows(segments, self._timing_source_duration)
-        for item in planned:
-            item.segment["_timing_original_index"] = item.original_index
-            item.segment["_timing_available_window"] = item.available_window
-            item.segment.pop("_timing_next_anchor", None)
-        segments[:] = [item.segment for item in planned]
-
-        policy = TimingPolicy.from_config(self.config)
-        self._plan_dependent_cache_allowed = getattr(
-            self, "_semantic_plan_cache_persistable", True
-        )
-        self.performance_tracker.start_timing("speech_synthesis")
-
-        semantic_fingerprints = {
-            segment.get("semantic_plan_fingerprint")
-            for segment in segments
-            if segment.get("semantic_plan_fingerprint")
-        }
-        semantic_segments = [
-            segment for segment in segments if segment.get("semantic_unit_id")
-        ]
-        if semantic_segments and (
-            len(semantic_fingerprints) != 1
-            or any(
-                segment.get("semantic_plan_fingerprint") not in semantic_fingerprints
-                for segment in semantic_segments
-            )
-        ):
-            raise ValueError(
-                "Semantic TTS segments have a missing or inconsistent semantic_plan_fingerprint"
-            )
-        semantic_suffix = (
-            f"_{next(iter(semantic_fingerprints))}"
-            if len(semantic_fingerprints) == 1
-            else ""
-        )
-        tts_fingerprint = self._effective_tts_cache_fingerprint(
-            segment["speaker"] for segment in segments
-        )
-        source_cache_key = self.cache_manager.generate_cache_key(
-            audio_file,
-            self.config.get("source_language"),
-            self.config.get("target_language"),
-            self.config.get("whisper_model", "large-v3"),
-            self.config.get("start_time"),
-            self.config.get("duration"),
-        )
-        selection_fingerprint = self._tts_selection_cache_fingerprint(segments)
-        has_segment_references = any(
-            self._resolve_voice_profile(segment["speaker"]).reference_mode == "segment"
-            for segment in segments
-        )
-        cache_key = (
-            f"{source_cache_key}_{self.config.get('target_language')}_"
-            f"{self.config.get('tts_system')}_{timing_cache_fingerprint(policy)}_"
-            f"{tts_fingerprint}_{selection_fingerprint}{semantic_suffix}"
-        )
-        aggregate_cache_dir = self.cache_manager.get_cache_path("synthesized_speech")
-        cached_audio_path = aggregate_cache_dir / f"{cache_key}.wav"
-        output_path = self.config.get("translated_audio_path")
-        if (
-            self.cache_manager.use_cache
-            and self._plan_dependent_cache_allowed
-            and not self.config.get("debug_info", False)
-            and not has_segment_references
-            and cached_audio_path.exists()
-        ):
-            shutil.copy(cached_audio_path, output_path)
-            self.performance_tracker.end_timing("speech_synthesis")
-            return output_path
-
-        if not self.tts_clients:
-            raise ValueError("No TTS systems are initialized properly")
-
-        segment_cache_dir = self.cache_manager.get_cache_path("segment_synthesis")
-        base_cache_prefix = f"{source_cache_key}_{tts_fingerprint}"
-        self.audio_chunks_dir.mkdir(parents=True, exist_ok=True)
-        self.su_audio_chunks_dir.mkdir(parents=True, exist_ok=True)
-
-        segment_reference_min_duration = self.config.get(
-            "segment_reference_min_duration", 2.0
-        )
-        try:
-            segment_reference_min_duration = max(
-                0.0, float(segment_reference_min_duration)
-            )
-        except (TypeError, ValueError, OverflowError):
-            segment_reference_min_duration = 2.0
-
-        prepared: List[Dict[str, Any]] = []
-        preflight_segments: Dict[tuple, List[Any]] = {}
-        preflight_clients: Dict[tuple, Any] = {}
-        reference_issues: List[tuple[int, str]] = []
-        original_audio_segment = None
-        segment_reference_audio_cache: Dict[tuple[str, float], AudioSegment] = {}
-
-        for chronological_index, segment in enumerate(segments):
-            speaker = segment["speaker"]
-            profile = self._resolve_voice_profile(speaker)
-            pool_key = self._profile_pool_key(profile)
-            tts_instance = self.tts_clients.get(pool_key) or getattr(
-                self, "default_tts", None
-            )
-            if tts_instance is None:
-                raise ValueError(
-                    f"TTS client for {profile.tts_system or self._default_tts_system()} is not available"
-                )
-            tts_system = profile.tts_system or self._default_tts_system()
-            original_index = self._canonical_segment_index(
-                segment, chronological_index
-            )
-            style_prompt = (
-                (segment.get("style_prompt") or "").strip()
-                or profile.style_prompt
-            )
-            voice_name = profile.voice_name
-            if voice_name is None and isinstance(self.config.get("voice_name"), str):
-                voice_name = self.config.get("voice_name")
-            if self.config.get("debug_info", False):
-                self.debug_data.setdefault("voices", {})[chronological_index] = {
-                    "speaker": speaker,
-                    "voice": voice_name,
-                    "style_prompt": style_prompt,
-                    "tts_system": tts_system,
-                    "model": profile.model,
-                }
-            base_args: Dict[str, Any] = {
-                "speaker": speaker,
-                "text": segment.get("translation", ""),
-                "emotion": segment.get("emotion", "Neutral"),
-                "style_prompt": style_prompt,
-                "reference_audio_path": profile.reference_audio,
-                "reference_text": profile.reference_text,
-                "reference_mode": profile.reference_mode,
-                "segment_index": original_index,
-                "voice": voice_name,
-                "speed": 1.0,
-                "target_duration": segment["_timing_available_window"],
-            }
-            provider_capability = getattr(
-                tts_instance, "reference_capability", "unsupported"
-            )
-            try:
-                base_args, original_audio_segment = self._resolve_segment_reference(
-                    tts_segment_data_args=base_args,
-                    segment_dict=segment,
-                    profile=profile,
-                    provider_capability=provider_capability,
-                    speaker=speaker,
-                    segment_index=original_index,
-                    original_audio_segment=original_audio_segment,
-                    segment_reference_min_duration=segment_reference_min_duration,
-                    processed_source_path=audio_file,
-                    decoded_audio_cache=segment_reference_audio_cache,
-                )
-            except Exception as exc:
-                reference_issues.append(
-                    (
-                        original_index,
-                        f"provider={tts_system} speaker={speaker} segment={original_index} "
-                        f"mode={profile.reference_mode or '<missing>'}: {exc}",
-                    )
-                )
-
-            final_path = str(self.audio_chunks_dir / f"{chronological_index}.wav")
-            initial_data = TTSSegmentData(
-                **{
-                    **base_args,
-                    "text": segment.get("translation", ""),
-                    "output_path": final_path,
-                }
-            )
-            preflight_segments.setdefault(pool_key, []).append(initial_data)
-            preflight_clients[pool_key] = tts_instance
-            prepared.append(
-                {
-                    "index": chronological_index,
-                    "segment": segment,
-                    "profile": profile,
-                    "pool_key": pool_key,
-                    "tts_instance": tts_instance,
-                    "tts_system": tts_system,
-                    "base_args": base_args,
-                    "base_cache_prefix": base_cache_prefix,
-                    "segment_cache_dir": segment_cache_dir,
-                    "final_path": final_path,
-                    "style_prompt": style_prompt,
-                }
-            )
-
-        self._preflight_tts_pools(
-            preflight_segments,
-            preflight_clients,
-            reference_issues,
-        )
-
-        for metadata in prepared:
-            self._synthesize_measured_candidates(metadata, policy)
-
-        combined_audio, real_segment_positions = self._adjust_and_combine_audio_grouped(
-            segments
-        )
-        combined_audio.export(output_path, format="wav")
-        self.real_segment_positions = real_segment_positions
-
-        if self.cache_manager.use_cache and self._plan_dependent_cache_allowed:
-            shutil.copy(output_path, cached_audio_path)
-
-        track_usage: Dict[str, int] = {}
-        for segment in segments:
-            variant = segment.get("selected_variant", "missing")
-            track_usage[variant] = track_usage.get(variant, 0) + 1
-        logger.debug("Measured TTS candidate usage: %s", track_usage)
-        self.performance_tracker.end_timing("speech_synthesis")
-        return output_path
+        return synthesis_helpers.synthesize_speech(self, segments, speakers_rolls, audio_file)
 
     def _tts_selection_cache_fingerprint(self, segments: List[Dict[str, Any]]) -> str:
-        payload = {
-            "selection_policy": "sequential_measured_v1",
-            "tts_prompt_prefix": self.config.get("tts_prompt_prefix"),
-            "voice_prompt": self.config.get("voice_prompt"),
-            "segments": [
-                {
-                    "start": segment.get("start"),
-                    "end": segment.get("end"),
-                    "original_index": self._canonical_segment_index(segment, index),
-                    "speaker": segment.get("speaker"),
-                    "reference_text": segment.get("text"),
-                    "emotion": segment.get("emotion", "Neutral"),
-                    "style_prompt": segment.get("style_prompt", ""),
-                    "translation": segment.get("translation", ""),
-                    "long_translation": segment.get("long_translation", ""),
-                    "short_translation": segment.get("short_translation", ""),
-                    "very_short_translation": segment.get(
-                        "very_short_translation", ""
-                    ),
-                }
-                for index, segment in enumerate(segments)
-            ],
-        }
-        return hashlib.sha256(
-            json.dumps(
-                payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            ).encode("utf-8")
-        ).hexdigest()[:16]
+        return cache_key_helpers.tts_selection_cache_fingerprint(self, segments)
 
     def _synthesize_measured_candidates(
         self,
         metadata: Dict[str, Any],
         policy,
     ) -> None:
-        segment = metadata["segment"]
-        target_duration = float(segment["_timing_available_window"])
-        generated: List[Dict[str, Any]] = []
-        tried_texts: set[str] = set()
-        try:
-            Path(metadata["final_path"]).unlink()
-        except OSError:
-            pass
-
-        def generate(variant: str, attempts: int = 1) -> Optional[Dict[str, Any]]:
-            value = segment.get(variant, "")
-            text = value.strip() if isinstance(value, str) else ""
-            if not text or text in tried_texts:
-                return None
-            tried_texts.add(text)
-            candidate = self._load_or_synthesize_candidate(
-                metadata,
-                variant=variant,
-                text=text,
-                attempts=attempts,
-            )
-            if candidate is not None:
-                generated.append(candidate)
-            return candidate
-
-        normal = generate("translation", attempts=3)
-        if normal is None:
-            segment["synthesized_speech_len"] = 0.0
-            segment["synthesized_speech_file"] = None
-            segment["selected_variant"] = "missing"
-            return
-
-        if normal["duration"] < target_duration:
-            generate("long_translation")
-        elif normal["duration"] > target_duration + policy.max_overflow:
-            short = generate("short_translation")
-            if (
-                short is not None
-                and short["duration"] > target_duration + policy.max_overflow
-            ):
-                generate("very_short_translation")
-
-        winner = generated[0]
-        best_difference = abs(winner["duration"] - target_duration)
-        for candidate in generated[1:]:
-            difference = abs(candidate["duration"] - target_duration)
-            if difference + 1e-9 < best_difference:
-                winner = candidate
-                best_difference = difference
-        final_path = metadata["final_path"]
-        shutil.copy(winner["path"], final_path)
-        segment["_tts_cache_contract"] = "anchor_raw_v2"
-        segment["synthesized_speech_len"] = winner["duration"]
-        segment["synthesized_speech_file"] = final_path
-        segment["synthesized_text"] = winner["text"]
-        segment["selected_variant"] = winner["variant"]
-
-        for candidate in generated:
-            try:
-                Path(candidate["path"]).unlink()
-            except OSError:
-                pass
+        return synthesis_helpers.synthesize_measured_candidates(self, metadata, policy)
 
     def _load_or_synthesize_candidate(
         self,
@@ -2857,111 +1035,9 @@ class SmartDubbing:
         text: str,
         attempts: int,
     ) -> Optional[Dict[str, Any]]:
-        from tts.models import TTSSegmentData
-
-        segment = metadata["segment"]
-        index = metadata["index"]
-        candidate_path = str(
-            self.audio_chunks_dir / f"candidate_{index}_{variant}.wav"
+        return synthesis_helpers.load_or_synthesize_candidate(
+            self, metadata, variant=variant, text=text, attempts=attempts
         )
-        cache_key = self._raw_tts_segment_cache_key(
-            base_cache_prefix=metadata["base_cache_prefix"],
-            tts_system=metadata["tts_system"],
-            segment=segment,
-            speaker=segment["speaker"],
-            translation=text,
-            style_prompt=metadata["style_prompt"],
-            reference_audio_path=metadata["base_args"].get("reference_audio_path"),
-            reference_mode=metadata["base_args"].get("reference_mode"),
-            reference_text=metadata["base_args"].get("reference_text"),
-            client_pool_settings=metadata["pool_key"],
-            legacy_index=segment.get("_timing_original_index", index),
-            emotion=segment.get("emotion", "Neutral"),
-            tts_prompt_prefix=self.config.get("tts_prompt_prefix"),
-            voice_prompt=self.config.get("voice_prompt"),
-        )
-        cache_path = metadata["segment_cache_dir"] / f"{cache_key}.wav"
-
-        if (
-            self.cache_manager.use_cache
-            and self._plan_dependent_cache_allowed
-            and cache_path.exists()
-        ):
-            try:
-                shutil.copy(cache_path, candidate_path)
-                duration = self._measure_raw_tts_for_timing(candidate_path, index)
-                if duration > 0:
-                    return {
-                        "variant": variant,
-                        "text": text,
-                        "path": candidate_path,
-                        "duration": duration,
-                    }
-            except Exception as exc:
-                logger.warning("Could not reuse cached TTS candidate %s: %s", variant, exc)
-            try:
-                cache_path.unlink()
-                self._segment_cache_metadata_path(cache_path).unlink()
-            except OSError:
-                pass
-
-        segment_data = TTSSegmentData(
-            **{
-                **metadata["base_args"],
-                "text": text,
-                "output_path": candidate_path,
-            }
-        )
-        last_error = None
-        for attempt in range(max(1, attempts)):
-            try:
-                Path(candidate_path).unlink()
-            except OSError:
-                pass
-            try:
-                metadata["tts_instance"].synthesize(
-                    segments_data=[segment_data],
-                    language=self.config.get("target_language"),
-                )
-                if not os.path.exists(candidate_path):
-                    continue
-                duration = self._measure_raw_tts_for_timing(candidate_path, index)
-                if duration <= 0:
-                    continue
-                if self.cache_manager.use_cache and self._plan_dependent_cache_allowed:
-                    self._cache_raw_tts_segment(
-                        candidate_path,
-                        cache_path,
-                        synthesized_text=text,
-                    )
-                return {
-                    "variant": variant,
-                    "text": text,
-                    "path": candidate_path,
-                    "duration": duration,
-                }
-            except Exception as exc:
-                last_error = exc
-                logger.warning(
-                    "TTS candidate %s failed for segment %d (attempt %d/%d): %s",
-                    variant,
-                    index,
-                    attempt + 1,
-                    max(1, attempts),
-                    exc,
-                )
-        if last_error is not None:
-            logger.error(
-                "No usable %s candidate for segment %d: %s",
-                variant,
-                index,
-                last_error,
-            )
-        try:
-            Path(candidate_path).unlink()
-        except OSError:
-            pass
-        return None
 
     def resynthesize_one_segment(
         self,
@@ -2969,223 +1045,15 @@ class SmartDubbing:
         segment_index: int,
         override_text: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Resynthesize a single segment (in-place) with the currently
-        configured TTS and reference audio.
-
-        Args:
-            segments: The full list of cached translation segments.
-            segment_index: Index of the segment to resynthesize.
-            override_text: Optional text used instead of ``segment.translation``.
-
-        Returns:
-            The updated segment dict (also mutated in-place inside ``segments``).
-        """
-        from tts.models import TTSSegmentData
-
-        if not (0 <= segment_index < len(segments)):
-            raise IndexError(f"segment_index {segment_index} out of range (0..{len(segments)-1})")
-
-        segment_dict = segments[segment_index]
-        original_segment_index = self._canonical_segment_index(
-            segment_dict, segment_index
-        )
-        speaker = segment_dict.get("speaker") or "SPEAKER_00"
-
-        profile = self._resolve_voice_profile(speaker)
-        pool_key = self._profile_pool_key(profile)
-        tts_instance = self.tts_clients.get(pool_key) or self.default_tts
-        if tts_instance is None:
-            raise RuntimeError(
-                f"TTS client for '{profile.tts_system or self._default_tts_system()}' is not initialised"
-            )
-        tts_system = profile.tts_system or self._default_tts_system()
-
-        text_to_synthesize = (override_text or segment_dict.get("translation") or "").strip()
-        if not text_to_synthesize:
-            raise ValueError("Cannot resynthesize a segment with empty text")
-
-        voice_name = profile.voice_name
-        if voice_name is None:
-            voice_cfg = self.config.get('voice_name')
-            if isinstance(voice_cfg, str):
-                voice_name = voice_cfg
-
-        segment_style_override = (segment_dict.get("style_prompt") or "").strip()
-        segment_style_prompt = segment_style_override or profile.style_prompt
-
-        self.audio_chunks_dir.mkdir(parents=True, exist_ok=True)
-        output_path = str(self.audio_chunks_dir / f"{segment_index}.wav")
-
-        tts_segment_data_args: Dict[str, Any] = {
-            "speaker": speaker,
-            "text": text_to_synthesize,
-            "emotion": segment_dict.get("emotion", "Neutral"),
-            "style_prompt": segment_style_prompt,
-            "reference_audio_path": profile.reference_audio,
-            "reference_text": profile.reference_text,
-            "reference_mode": profile.reference_mode,
-            "segment_index": original_segment_index,
-            "voice": voice_name,
-            "speed": 1.0,
-            "target_duration": segment_dict.get(
-                "_timing_available_window",
-                max(segment_dict.get("end", 0) - segment_dict.get("start", 0), 0.0),
-            ),
-        }
-
-        segment_reference_min_duration = float(self.config.get('segment_reference_min_duration', 2.0) or 0.0)
-        provider_capability = getattr(
-            tts_instance, "reference_capability", "unsupported"
-        )
-        tts_segment_data_args, _ = self._resolve_segment_reference(
-            tts_segment_data_args=tts_segment_data_args,
-            segment_dict=segment_dict,
-            profile=profile,
-            provider_capability=provider_capability,
-            speaker=speaker,
-            segment_index=original_segment_index,
-            original_audio_segment=None,
-            segment_reference_min_duration=segment_reference_min_duration,
-            for_resynthesis=True,
-        )
-
-        segment_data = TTSSegmentData(**{**tts_segment_data_args, "text": text_to_synthesize, "output_path": output_path})
-        self._preflight_tts_pools(
-            {pool_key: [segment_data]},
-            {pool_key: tts_instance},
-        )
-
-        # Remove any stale zero-byte file so `os.path.exists` reflects reality.
-        try:
-            if os.path.exists(output_path):
-                os.remove(output_path)
-        except OSError:
-            pass
-
-        max_attempts = 3
-        last_error: Optional[Exception] = None
-        for attempt in range(max_attempts):
-            logger.info(
-                f"Resynthesizing segment {segment_index} (speaker={speaker}, tts={tts_system}) "
-                f"attempt {attempt + 1}/{max_attempts}"
-            )
-            try:
-                tts_instance.synthesize(
-                    segments_data=[segment_data],
-                    language=self.config.get('target_language'),
-                )
-            except Exception as exc:
-                last_error = exc
-                logger.error(f"Resynthesize attempt {attempt + 1} failed for segment {segment_index}: {exc}")
-                continue
-
-            if os.path.exists(output_path):
-                try:
-                    audio_info = AudioSegment.from_file(output_path)
-                except Exception as exc:
-                    last_error = exc
-                    logger.error(f"Resynthesize produced unreadable audio for segment {segment_index}: {exc}")
-                    try:
-                        os.remove(output_path)
-                    except OSError:
-                        pass
-                    continue
-                if len(audio_info) <= 0:
-                    try:
-                        os.remove(output_path)
-                    except OSError:
-                        pass
-                    continue
-
-                segment_dict['_tts_cache_contract'] = 'anchor_raw_v2'
-                segment_dict['synthesized_speech_len'] = self._measure_raw_tts_for_timing(
-                    output_path,
-                    segment_index,
-                )
-                if segment_dict['synthesized_speech_len'] <= 0:
-                    last_error = RuntimeError("TTS produced only silence")
-                    continue
-                segment_dict['synthesized_speech_file'] = output_path
-                segment_dict['synthesized_text'] = text_to_synthesize
-                if override_text:
-                    segment_dict['translation'] = text_to_synthesize
-                return segment_dict
-
-        raise RuntimeError(
-            f"TTS ({tts_system}) did not produce an audio file for segment {segment_index} "
-            f"after {max_attempts} attempts. Last error: {last_error!r}. "
-            f"Reference audio: {segment_data.reference_audio_path!r}"
+        return synthesis_helpers.resynthesize_one_segment(
+            self, segments, segment_index, override_text
         )
 
     def rebuild_translated_audio_from_chunks(self) -> Optional[str]:
-        """Rebuild the aggregate dubbed track from the latest editor snapshot.
-
-        ``Regenerate selected row`` deliberately updates only one raw chunk.
-        The combine-video step calls this method so its mux input reflects that
-        chunk without invoking TTS again for the other segments.
-        """
-        source_audio_path = Path(self.config.get("audio_artifacts_dir")) / "source.wav"
-        if not source_audio_path.is_file():
-            logger.warning(
-                "Cannot rebuild translated audio from chunks because source audio is missing: %s",
-                source_audio_path,
-            )
-            return None
-
-        snapshot_key = self._build_dubbing_text_snapshot_key(str(source_audio_path))
-        if not self.cache_manager.cache_exists("dubbing_texts", snapshot_key):
-            logger.info(
-                "No Dubbing Texts snapshot found; reusing the existing translated audio track."
-            )
-            return None
-
-        snapshot = self.cache_manager.load_from_cache("dubbing_texts", snapshot_key)
-        if isinstance(snapshot, list):
-            segments = snapshot
-        elif isinstance(snapshot, dict) and snapshot.get("version") == 1:
-            segments = snapshot.get("segments")
-        else:
-            raise ValueError("Unexpected Dubbing Texts snapshot payload")
-
-        if not isinstance(segments, list) or not segments:
-            raise ValueError("Dubbing Texts snapshot has no segments to combine")
-
-        self._timing_source_audio_file = str(source_audio_path)
-        self._timing_source_duration = len(AudioSegment.from_file(source_audio_path)) / 1000.0
-        combined_audio, real_segment_positions = self._adjust_and_combine_audio_grouped(
-            segments
-        )
-
-        output_path = Path(self.config.get("translated_audio_path"))
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        combined_audio.export(output_path, format="wav")
-        self.real_segment_positions = real_segment_positions
-        logger.info("Rebuilt translated audio from current chunks: %s", output_path)
-        return str(output_path)
+        return audio_assembly_helpers.rebuild_translated_audio_from_chunks(self)
 
     def _save_transcription_file(self, transcription: List[Dict]) -> None:
-        """Save transcription to a readable text file."""
-        from src.utils.time_utils import format_seconds_to_hms
-        
-        transcription_output_path = self.config.get("transcription_path")
-        os.makedirs(os.path.dirname(transcription_output_path), exist_ok=True)
-        
-        try:
-            with open(transcription_output_path, 'w', encoding='utf-8') as f:
-                for segment in transcription:
-                    start_seconds = segment['start']
-                    end_seconds = segment['end']
-                    formatted_time = format_seconds_to_hms(
-                        start_seconds, include_milliseconds=True
-                    )
-                    formatted_time_end = format_seconds_to_hms(
-                        end_seconds, include_milliseconds=True
-                    )
-                    
-                    f.write(f"[{formatted_time}-{formatted_time_end}] {segment['speaker']}: {segment['text']}\n")
-            logger.info(f"Transcription saved to {transcription_output_path}")
-        except Exception as e:
-            logger.warning(f"Failed to save transcription to file: {e}")
+        return artifact_helpers.save_transcription_file(self, transcription)
     
     def _cleanup(self) -> None:
         """Clean up temporary files and TTS systems."""
@@ -3215,123 +1083,23 @@ class SmartDubbing:
             logger.warning(f"Warning: Error during cleanup: {e}")
     
     def _get_tts_system_for_speaker(self, speaker_id: str) -> str:
-        """Return the TTS backend name a speaker is routed to.
-
-        Preserved for callers/tests that only need the backend name; new code
-        should use :meth:`_resolve_voice_profile` to get the full profile.
-        """
-        return self._resolve_voice_profile(speaker_id).tts_system or self._default_tts_system()
+        return synthesis_helpers.get_tts_system_for_speaker(self, speaker_id)
 
     def _resolve_segment_reference(
-        self,
-        *,
-        tts_segment_data_args: Dict[str, Any],
-        segment_dict: Dict[str, Any],
-        profile: VoiceProfile,
-        provider_capability: str,
-        speaker: str,
-        segment_index: int,
-        original_audio_segment: Optional[AudioSegment],
-        segment_reference_min_duration: float,
-        for_resynthesis: bool = False,
-        processed_source_path: Optional[str] = None,
-        decoded_audio_cache: Optional[
-            Dict[tuple[str, float], AudioSegment]
-        ] = None,
+        self, *, tts_segment_data_args: Dict[str, Any], segment_dict: Dict[str, Any],
+        profile: VoiceProfile, provider_capability: str, speaker: str, segment_index: int,
+        original_audio_segment: Optional[AudioSegment], segment_reference_min_duration: float,
+        for_resynthesis: bool = False, processed_source_path: Optional[str] = None,
+        decoded_audio_cache: Optional[Dict[tuple[str, float], AudioSegment]] = None,
     ) -> tuple[Dict[str, Any], Optional[AudioSegment]]:
-        """Resolve exactly one configured reference source without fallbacks."""
-        mode = profile.reference_mode
-        tts_segment_data_args["reference_mode"] = mode
-        tts_segment_data_args["segment_index"] = segment_index
-
-        if provider_capability == "unsupported" or mode not in {
-            "configured", "segment", "speaker", "none"
-        }:
-            return tts_segment_data_args, original_audio_segment
-
-        if mode == "none":
-            tts_segment_data_args["reference_audio_path"] = None
-            tts_segment_data_args["reference_text"] = None
-            return tts_segment_data_args, original_audio_segment
-
-        if mode == "configured":
-            configured = profile.reference_audio
-            reference_path = (
-                Path(configured).expanduser().resolve(strict=False)
-                if configured
-                else None
-            )
-            if reference_path is None or not reference_path.is_file():
-                raise ValueError(
-                    f"reference file does not exist: {configured or '<missing>'}"
-                )
-            tts_segment_data_args["reference_audio_path"] = str(reference_path)
-            tts_segment_data_args["reference_text"] = profile.reference_text
-            return tts_segment_data_args, original_audio_segment
-
-        if mode == "speaker":
-            reference_path = self.speakers_audio_dir / f"{speaker}.wav"
-            if not reference_path.is_file():
-                raise ValueError(f"reference file does not exist: {reference_path}")
-            tts_segment_data_args["reference_audio_path"] = str(reference_path)
-            tts_segment_data_args["reference_text"] = profile.reference_text
-            return tts_segment_data_args, original_audio_segment
-
-        if processed_source_path is not None or original_audio_segment is None:
-            reference_path, reference_text = self._prepare_segment_reference(
-                segment_dict=segment_dict,
-                speaker=speaker,
-                chronological_index=segment_index,
-                reuse_existing=for_resynthesis,
-                processed_source_path=processed_source_path,
-                decoded_audio_cache=decoded_audio_cache,
-            )
-            tts_segment_data_args["reference_audio_path"] = reference_path
-            tts_segment_data_args["reference_text"] = reference_text
-            tts_segment_data_args["segment_index"] = self._canonical_segment_index(
-                segment_dict, segment_index
-            )
-            return tts_segment_data_args, original_audio_segment
-
-        # Compatibility for direct callers that supply an already-decoded source.
-        segment_ref_path = self.speakers_audio_dir / "segments" / f"{speaker}_{segment_index}.wav"
-
-        try:
-            start = float(segment_dict["start"])
-            end = float(segment_dict["end"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("segment reference requires valid start and end timestamps") from exc
-        duration = end - start
-        if duration <= 0:
-            raise ValueError("segment reference requires end to be greater than start")
-        if duration < segment_reference_min_duration:
-            raise ValueError(
-                f"recognized segment duration {duration:.2f}s is below the configured "
-                f"minimum {segment_reference_min_duration:.2f}s"
-            )
-        if original_audio_segment is None:
-            raise ValueError("selected reference-audio source could not be loaded")
-
-        start_ms = max(int(start * 1000), 0)
-        end_ms = min(int(end * 1000), len(original_audio_segment))
-        if end_ms <= start_ms:
-            raise ValueError("segment interval is outside the selected reference-audio source")
-        segment_audio = original_audio_segment[start_ms:end_ms]
-        if len(segment_audio) < int(segment_reference_min_duration * 1000):
-            raise ValueError(
-                f"exported segment duration {len(segment_audio) / 1000.0:.2f}s is below "
-                f"the configured minimum {segment_reference_min_duration:.2f}s"
-            )
-        segment_ref_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            segment_audio.export(segment_ref_path, format="wav")
-        except Exception as exc:
-            raise ValueError(f"could not export segment reference: {exc}") from exc
-        if not segment_ref_path.is_file():
-            raise ValueError(f"reference file does not exist after export: {segment_ref_path}")
-        tts_segment_data_args["reference_audio_path"] = str(segment_ref_path)
-        tts_segment_data_args["reference_text"] = segment_dict.get("text")
-        return tts_segment_data_args, original_audio_segment
+        return reference_helpers.resolve_segment_reference(
+            self, tts_segment_data_args=tts_segment_data_args, segment_dict=segment_dict,
+            profile=profile, provider_capability=provider_capability, speaker=speaker,
+            segment_index=segment_index, original_audio_segment=original_audio_segment,
+            segment_reference_min_duration=segment_reference_min_duration,
+            for_resynthesis=for_resynthesis, processed_source_path=processed_source_path,
+            decoded_audio_cache=decoded_audio_cache,
+        )
 
     @staticmethod
     def _preflight_tts_pools(
@@ -3339,27 +1107,10 @@ class SmartDubbing:
         clients: Dict[tuple, Any],
         initial_issues: Optional[List[tuple[int, str]]] = None,
     ) -> None:
-        """Validate every active pool before the first synthesis request."""
-        issues = list(initial_issues or [])
-        resolved_error_indices = {index for index, _ in issues}
-        for pool_key, segments_data in segments_by_pool.items():
-            if not segments_data:
-                continue
-            client = clients.get(pool_key)
-            if client is None:
-                continue
-            validator = getattr(client, "validate_segments", None)
-            if validator is None:
-                continue
-            for issue in validator(segments_data):
-                if issue[0] not in resolved_error_indices:
-                    issues.append(issue)
+        return synthesis_helpers.preflight_tts_pools(
+            segments_by_pool, clients, initial_issues
+        )
 
-        if issues:
-            issues.sort(key=lambda item: item[0])
-            details = "\n".join(f"- {message}" for _, message in issues)
-            raise ValueError(f"TTS reference validation failed before synthesis:\n{details}")
-    
     @staticmethod
     def _trim_trailing_silence(
         audio_path: str,
@@ -3367,124 +1118,38 @@ class SmartDubbing:
         keep_tail_ms: int = 100,
         window_ms: int = 10,
     ) -> None:
-        """Trim silence at the end of a synthesized WAV in place.
-
-        Applied to every TTS backend right after the segment file is
-        written and before ``synthesized_speech_len`` is computed.
-        Without this, tail silence from the TTS is counted as speech,
-        which:
-          - makes ``ratio = original / actual`` look closer to 1 than
-            it really is, so the comfort-zone check skips alternative-
-            text resynthesis;
-          - leaves the group-level ``atempo`` stretching a hunk of
-            silence, producing the "audio ends early, then a pause"
-            artefact in the final track.
-        """
-        if not audio_path or not os.path.exists(audio_path):
-            return
-        try:
-            seg = AudioSegment.from_file(audio_path)
-        except Exception as exc:
-            logger.debug(f"Trailing silence trim skipped for {audio_path}: {exc}")
-            return
-        total_ms = len(seg)
-        if total_ms == 0:
-            return
-        last_active_end_ms = 0
-        for start in range(0, total_ms, window_ms):
-            window = seg[start:start + window_ms]
-            level = window.dBFS
-            if level == float('-inf'):
-                continue
-            if level > silence_threshold_db:
-                last_active_end_ms = start + window_ms
-        if last_active_end_ms == 0:
-            return
-        end_ms = min(total_ms, last_active_end_ms + keep_tail_ms)
-        if total_ms - end_ms < window_ms:
-            return
-        try:
-            seg[:end_ms].export(audio_path, format="wav")
-        except Exception as exc:
-            logger.debug(f"Trailing silence trim export failed for {audio_path}: {exc}")
-            return
-        logger.debug(
-            f"Trimmed {total_ms - end_ms}ms trailing silence from {audio_path} "
-            f"(kept {end_ms}ms of {total_ms}ms)"
+        return audio_assembly_helpers.trim_trailing_silence(
+            audio_path, silence_threshold_db, keep_tail_ms, window_ms
         )
 
     def _measure_raw_tts_for_timing(self, audio_path: str, segment_index: int) -> float:
-        """Measure audible duration without modifying the raw synthesized WAV."""
-        from .timing import trim_audio_edges
-
-        self.su_audio_chunks_dir.mkdir(parents=True, exist_ok=True)
-        measured_path = self.su_audio_chunks_dir / f"measure_{segment_index}.wav"
-        result = trim_audio_edges(audio_path, measured_path)
-        if result.error:
-            logger.warning("Could not trim TTS edges for %s: %s", audio_path, result.error)
-        return result.trimmed_duration if result.usable else 0.0
+        return audio_assembly_helpers.measure_raw_tts_for_timing(
+            self, audio_path, segment_index
+        )
 
     @staticmethod
     def _segment_cache_metadata_path(cache_path: Path) -> Path:
-        return cache_path.with_suffix(cache_path.suffix + ".json")
+        return cache_key_helpers.segment_cache_metadata_path(cache_path)
 
     @staticmethod
     def _raw_tts_segment_cache_key(
-        *,
-        base_cache_prefix: str,
-        tts_system: str,
-        segment: Dict[str, Any],
-        speaker: str,
-        translation: str,
-        style_prompt: str,
-        reference_audio_path: Optional[str],
-        reference_mode: Optional[str] = None,
-        reference_text: Optional[str] = None,
-        client_pool_settings: Any = None,
-        legacy_index: Any = 0,
-        emotion: Optional[str] = "Neutral",
-        tts_prompt_prefix: Optional[str] = None,
-        voice_prompt: Any = None,
+        *, base_cache_prefix: str, tts_system: str, segment: Dict[str, Any],
+        speaker: str, translation: str, style_prompt: str,
+        reference_audio_path: Optional[str], reference_mode: Optional[str] = None,
+        reference_text: Optional[str] = None, client_pool_settings: Any = None,
+        legacy_index: Any = 0, emotion: Optional[str] = "Neutral",
+        tts_prompt_prefix: Optional[str] = None, voice_prompt: Any = None,
     ) -> str:
-        """Build a raw-unit cache identity without timing-policy settings."""
-        translation_hash = hashlib.md5(translation.encode()).hexdigest()[:8]
-        target_duration = round(
-            float(segment.get("_timing_available_window", 0.0)), 6
-        )
-        target_hash = hashlib.md5(str(target_duration).encode()).hexdigest()[:8]
-        instruction_hash = hashlib.md5(
-            SmartDubbing._cache_fingerprint(
-                {
-                    "style_prompt": style_prompt,
-                    "emotion": emotion or "Neutral",
-                    "tts_prompt_prefix": tts_prompt_prefix,
-                    "voice_prompt": voice_prompt,
-                }
-            ).encode("utf-8")
-        ).hexdigest()[:8]
-        reference_identity = SmartDubbing._file_content_identity(
-            reference_audio_path
-        )
-        ref_audio_hash = hashlib.md5(reference_identity.encode()).hexdigest()[:8]
-        reference_contract_hash = hashlib.md5(
-            SmartDubbing._cache_fingerprint(
-                {
-                    "reference_mode": reference_mode,
-                    "reference_audio_path": reference_audio_path,
-                    "reference_text": reference_text,
-                    "segment_start": segment.get("start"),
-                    "segment_end": segment.get("end"),
-                    "client_pool_settings": client_pool_settings,
-                }
-            ).encode("utf-8")
-        ).hexdigest()[:8]
-        semantic_unit_identity = segment.get("semantic_unit_id", legacy_index)
-        semantic_plan_identity = segment.get("semantic_plan_fingerprint", "legacy")
-        return (
-            f"{base_cache_prefix}_{tts_system}_{semantic_plan_identity}_"
-            f"{semantic_unit_identity}_{speaker}_{translation_hash}_raw_candidate_v4_"
-            f"{target_hash}_"
-            f"{instruction_hash}_{ref_audio_hash}_{reference_contract_hash}"
+        return cache_key_helpers.raw_tts_segment_cache_key(
+            base_cache_prefix=base_cache_prefix, tts_system=tts_system,
+            segment=segment, speaker=speaker, translation=translation,
+            style_prompt=style_prompt, reference_audio_path=reference_audio_path,
+            reference_mode=reference_mode, reference_text=reference_text,
+            client_pool_settings=client_pool_settings, legacy_index=legacy_index,
+            emotion=emotion, tts_prompt_prefix=tts_prompt_prefix,
+            voice_prompt=voice_prompt,
+            cache_fingerprint=SmartDubbing._cache_fingerprint,
+            file_content_identity=SmartDubbing._file_content_identity,
         )
 
     def _cache_raw_tts_segment(
@@ -3494,630 +1159,30 @@ class SmartDubbing:
         *,
         synthesized_text: str = "",
     ) -> None:
-        """Cache raw TTS plus a version marker, independent of timing policy."""
-        shutil.copy(source_path, cache_path)
-        metadata_path = self._segment_cache_metadata_path(cache_path)
-        metadata_path.write_text(
-            json.dumps(
-                {
-                    "audio_contract": "anchor_raw_v2",
-                    "synthesized_text": synthesized_text,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            ),
-            encoding="utf-8",
+        return synthesis_helpers.cache_raw_tts_segment(
+            self, source_path, cache_path, synthesized_text=synthesized_text
         )
 
     def _cached_segment_metadata(self, cache_path: Path) -> Dict[str, Any]:
-        metadata_path = self._segment_cache_metadata_path(cache_path)
-        try:
-            data = json.loads(metadata_path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-        except (OSError, ValueError, TypeError):
-            return {}
+        return synthesis_helpers.cached_segment_metadata(self, cache_path)
 
     def _cached_segment_contract(self, cache_path: Path) -> str:
-        contract = self._cached_segment_metadata(cache_path).get("audio_contract")
-        if contract in {"anchor_raw_v1", "anchor_raw_v2"}:
-            return contract
-        return "legacy"
+        return synthesis_helpers.cached_segment_contract(self, cache_path)
 
     def _adjust_and_combine_audio_grouped_legacy(self, segments: List[Dict]) -> Tuple[AudioSegment, List[Dict]]:
-        """
-        Adjusts timing and combines audio segments with optimizations for speaker continuity.
-        
-        This method:
-        1. Groups segments by speaker
-        2. Optimizes each speaker's segments in continuous groups
-        3. Creates separate audio tracks for each speaker
-        4. Mixes all speaker tracks together
-        
-        Args:
-            segments: List of transcript segments with translations and speaker info
-            
-        Returns:
-            Tuple of (Combined AudioSegment with proper timing, List of real segment positions)
-        """
-        logger.warning("Legacy group timing is disabled; using anchor-based timing instead.")
-        return self._adjust_and_combine_audio_grouped(segments)
-
-        # Retained unreachable for one compatibility cycle as implementation
-        # history; all callers are routed to the active anchor assembler.
-        if not segments:
-            return AudioSegment.empty(), []
-        
-        logger.info("Grouping segments by speaker and optimizing timing...")
-        
-        SPLITTING_PAUSE_THRESHOLD_SECONDS = 3
-        MAX_GROUP_DURATION_SECONDS = 60
-        LIMIT_MIN_ADJUSTMENT_RATIO = 0.5
-        LIMIT_MAX_ADJUSTMENT_RATIO = 1.15
-        
-        # Get all unique speakers
-        all_speakers = set(segment["speaker"] for segment in segments)
-        logger.debug(f"Found {len(all_speakers)} unique speakers")
-        
-        # Create empty audio tracks for each speaker (full duration)
-        total_duration_ms = int(max(segment["end"] for segment in segments) * 1000) + 1000  # Add 1s padding
-        speaker_tracks = {speaker: AudioSegment.silent(duration=total_duration_ms) for speaker in all_speakers}
-        
-        # Track real segment positions for pause calculation
-        real_segment_positions = []
-        
-        # For debug: store all speaker groups for later use in debug video
-        speaker_groups_info = {}
-        
-        # Process each speaker's segments separately
-        for speaker in sorted(all_speakers):
-            # Get segments for this speaker
-            speaker_segments = [segment for segment in segments if segment["speaker"] == speaker]
-            logger.debug(f"Processing {len(speaker_segments)} segments for speaker {speaker}")
-            
-            # Group segments by continuous speech
-            speaker_groups = []
-            current_group = []
-            
-            for i, segment in enumerate(speaker_segments):
-                start_new_group = False
-                
-                if not current_group:
-                    start_new_group = True
-                elif i > 0:
-                    prev_segment = speaker_segments[i-1]
-                    pause_duration = segment["start"] - prev_segment["end"]
-                    
-                    if pause_duration > SPLITTING_PAUSE_THRESHOLD_SECONDS:
-                        start_new_group = True
-                
-                if current_group and segment["end"] - current_group[0]["start"] > MAX_GROUP_DURATION_SECONDS:
-                    start_new_group = True
-                
-                if start_new_group and current_group:
-                    speaker_groups.append(current_group)
-                    current_group = []
-                
-                current_group.append(segment)
-            
-            # Add the last group
-            if current_group:
-                speaker_groups.append(current_group)
-            
-            logger.debug(f"Divided speaker {speaker} into {len(speaker_groups)} continuous groups")
-            
-            # Store groups information for debug
-            if self.config.get('debug_info', False):
-                speaker_groups_info[speaker] = speaker_groups
-            self.debug_data["speaker_groups"] = speaker_groups_info
-            
-            # Process each group for this speaker
-            for group_idx, group in enumerate(speaker_groups):
-                group_start_time_ms = group[0]["start"] * 1000
-                group_end_time_ms = group[-1]["end"] * 1000
-                target_duration_ms = int(group_end_time_ms - group_start_time_ms)
-                
-                # Combine all synthesized audio in this group
-                combined_group_audio = AudioSegment.empty()
-                group_segment_positions = []  # Track individual segment positions within the group
-                
-                for i, segment in enumerate(group):
-                    # Add pause between segments if not the first segment
-                    segment_start_in_group_ms = len(combined_group_audio)
-                    
-                    if i > 0:
-                        prev_segment_end = group[i-1]["end"]
-                        current_segment_start = segment["start"]
-                        pause_duration_ms = int((current_segment_start - prev_segment_end) * 1000)
-                        if pause_duration_ms > 0:
-                            combined_group_audio += AudioSegment.silent(duration=pause_duration_ms)
-                            segment_start_in_group_ms = len(combined_group_audio)
-                    
-                    # Load segment audio
-                    segment_file = segment.get('synthesized_speech_file')
-                    if not segment_file:
-                        segment_file = str(self.audio_chunks_dir / f"{segments.index(segment)}.wav")
-                    segment_audio = None
-                    if segment_file and os.path.exists(segment_file):
-                        try:
-                            candidate = AudioSegment.from_file(segment_file)
-                            if len(candidate) > 0:
-                                segment_audio = candidate
-                        except Exception as e:
-                            logger.warning(
-                                f"Could not read segment audio {segment_file}: {e}. Substituting silence."
-                            )
-                    if segment_audio is None:
-                        # Fallback: create silence with original duration when no
-                        # usable audio was produced. This preserves timing for the
-                        # rest of the track while making the gap obvious.
-                        duration_ms = int((segment["end"] - segment["start"]) * 1000)
-                        segment_audio = AudioSegment.silent(duration=max(duration_ms, 1))
-                        logger.warning(
-                            f"Segment #{segments.index(segment)} has no synthesized audio; "
-                            f"inserting {duration_ms}ms of silence."
-                        )
-                    
-                    combined_group_audio += segment_audio
-                    segment_end_in_group_ms = len(combined_group_audio)
-                    
-                    # Store the segment position within the group (before speed adjustment)
-                    group_segment_positions.append({
-                        "segment": segment,
-                        "start_in_group_ms": segment_start_in_group_ms,
-                        "end_in_group_ms": segment_end_in_group_ms,
-                        "original_index": segments.index(segment)
-                    })
-                
-                # Calculate required speed adjustment for the entire group
-                actual_duration_ms = len(combined_group_audio)
-                ratio = target_duration_ms / actual_duration_ms if actual_duration_ms > 0 else 1.0
-                
-                # Clamp ratio to maintain natural speech
-                ratio_clamped = min(max(ratio, LIMIT_MIN_ADJUSTMENT_RATIO), LIMIT_MAX_ADJUSTMENT_RATIO)
-                
-                # Apply speed adjustment to the entire group if needed
-                adjusted_group_audio = combined_group_audio
-                if abs(ratio_clamped - 1.0) > 0.01:
-                    try:
-                        # Save the combined group audio to a temporary file
-                        tmp_in = str(self.audio_chunks_dir / f"group_{speaker}_{group_idx}.wav")
-                        tmp_out = str(self.su_audio_chunks_dir / f"group_{speaker}_{group_idx}.wav")
-                        os.makedirs(os.path.dirname(tmp_out), exist_ok=True)
-                        combined_group_audio.export(tmp_in, format="wav")
-                        
-                        # Store ratio for debugging
-                        if self.config.get('debug_info', False):
-                            for segment in group:
-                                self.debug_data.setdefault("speed_ratios", {})[segments.index(segment)] = ratio_clamped
-                        
-                        # Apply tempo filter — pass argv as a list so paths
-                        # with spaces (e.g. "prj/My Video/artifacts/...") do
-                        # not break the shell split and silently skip the
-                        # tempo adjustment, which would otherwise leave the
-                        # group short and pad the tail with silence.
-                        tempo = 1.0 / ratio_clamped
-                        cmd = [
-                            "ffmpeg", "-y",
-                            "-i", tmp_in,
-                            "-filter:a", f"atempo={tempo}",
-                            "-vn", tmp_out,
-                        ]
-                        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        if result.returncode == 0:
-                            adjusted_group_audio = AudioSegment.from_file(tmp_out)
-                        else:
-                            stderr_tail = (result.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()[-3:]
-                            logger.warning(
-                                f"Warning: Speed adjustment failed for group {speaker}_{group_idx}: "
-                                + " | ".join(stderr_tail)
-                            )
-                    except Exception as exc:
-                        logger.warning(f"Warning: Speed adjustment failed for group {speaker}_{group_idx}: {exc}")
-                
-                # Enforce allowed overflow beyond the group's original timeframe
-                overflow_tolerance = 1.0
-                overflow_tolerance = max(0.0, min(1.0, overflow_tolerance))
-
-                original_group_span_ms = target_duration_ms
-                adjusted_len_ms = len(adjusted_group_audio)
-                if adjusted_len_ms > original_group_span_ms:
-                    overflow_ms = adjusted_len_ms - original_group_span_ms
-                    allowed_len_ms = original_group_span_ms + int(overflow_ms * overflow_tolerance)
-                    if adjusted_len_ms > allowed_len_ms:
-                        adjusted_group_audio = adjusted_group_audio[:allowed_len_ms]
-                
-                # Calculate real segment positions after speed adjustment
-                final_group_duration_ms = len(adjusted_group_audio)
-                position_ms = int(group_start_time_ms)
-                
-                for seg_pos in group_segment_positions:
-                    # Apply speed ratio to get actual positions in final audio
-                    real_start_ms = position_ms + (seg_pos["start_in_group_ms"] * ratio_clamped)
-                    real_end_ms = position_ms + (seg_pos["end_in_group_ms"] * ratio_clamped)
-                    # Clamp to the trimmed group end if overflow was restricted
-                    group_final_end_ms = position_ms + final_group_duration_ms
-                    if real_end_ms > group_final_end_ms:
-                        real_end_ms = group_final_end_ms
-                    if real_start_ms > group_final_end_ms:
-                        real_start_ms = group_final_end_ms
-                    
-                    real_segment_positions.append({
-                        "start": real_start_ms / 1000.0,
-                        "end": real_end_ms / 1000.0,
-                        "speaker": seg_pos["segment"]["speaker"],
-                        "text": seg_pos["segment"]["text"],
-                        "translation": seg_pos["segment"]["translation"],
-                        "original_index": seg_pos["original_index"],
-                        "original_start": seg_pos["segment"]["start"],
-                        "original_end": seg_pos["segment"]["end"]
-                    })
-                
-                # Place the adjusted group at the correct position in the speaker's track
-                speaker_track = speaker_tracks[speaker]
-                
-                # Extend track if needed
-                if position_ms + len(adjusted_group_audio) > len(speaker_track):
-                    extension = position_ms + len(adjusted_group_audio) - len(speaker_track)
-                    speaker_track += AudioSegment.silent(duration=extension)
-                
-                # Overlay the adjusted group audio at the correct position
-                speaker_tracks[speaker] = speaker_track.overlay(
-                    adjusted_group_audio,
-                    position=position_ms
-                )
-                
-                from src.utils.time_utils import format_seconds_to_srt
-                duration_ms = len(adjusted_group_audio)
-                duration_minutes = duration_ms / (1000 * 60)
-                logger.debug(f"Processed group {group_idx+1}/{len(speaker_groups)} for speaker {speaker}: "
-                      f"{len(group)} segments, Speed ratio: {ratio_clamped:.2f}, "
-                      f"Time: {format_seconds_to_srt(group_start_time_ms / 1000)}-{format_seconds_to_srt((group_start_time_ms + duration_ms) / 1000)}, "
-                      f"Duration: {duration_minutes:.2f} minutes")
-        
-        # Mix all speaker tracks together
-        logger.info("Mixing all speaker tracks together...")
-        final_audio = AudioSegment.silent(duration=total_duration_ms)
-        
-        for speaker, track in speaker_tracks.items():
-            # Overlay each speaker track onto the final audio
-            final_audio = final_audio.overlay(track)
-            logger.debug(f"Added speaker {speaker}'s track to the mix")
-        
-        # If we processed the full video, pad to match original length if necessary
-        input_path = self.config.get('input')
-        if input_path and os.path.exists(str(input_path)) and self.config.get('start_time') is None and self.config.get('duration') is None:
-            try:
-                total_original_ms = len(AudioSegment.from_file(input_path))
-                if len(final_audio) < total_original_ms:
-                    final_audio += AudioSegment.silent(duration=total_original_ms - len(final_audio))
-            except Exception as e:
-                logger.warning(f"Warning: Could not pad audio to match original length: {e}")
-        
-        # Sort real segment positions by start time
-        real_segment_positions.sort(key=lambda x: x["start"])
-        
-        return final_audio, real_segment_positions 
+        return audio_assembly_helpers.adjust_and_combine_audio_grouped_legacy(
+            self, segments
+        )
 
     def _adjust_and_combine_audio_grouped(self, segments: List[Dict]) -> Tuple[AudioSegment, List[Dict]]:
-        """Place speech at immutable recognized starts using per-clip tempo only."""
-        if not segments:
-            return AudioSegment.empty(), []
-
-        from .timing import TimingPolicy, calculate_segment_timing, plan_anchor_windows, trim_audio_edges
-
-        source_duration = getattr(self, "_timing_source_duration", None)
-        if source_duration is None:
-            source_path = getattr(self, "_timing_source_audio_file", None)
-            if source_path and os.path.exists(str(source_path)):
-                source_duration = len(AudioSegment.from_file(source_path)) / 1000.0
-            else:
-                # Compatibility for direct callers that predate the source-duration
-                # contract. Normal synthesis always sets the exact processed length.
-                source_duration = max(float(segment["end"]) for segment in segments) + 1.0
-
-        policy = TimingPolicy.from_config(self.config)
-        planned = plan_anchor_windows(segments, source_duration)
-        for item in planned:
-            item.segment["_timing_original_index"] = item.original_index
-            item.segment["_timing_available_window"] = item.available_window
-            item.segment.pop("_timing_next_anchor", None)
-        segments[:] = [item.segment for item in planned]
-
-        source_duration_ms = max(0, round(float(source_duration) * 1000))
-        final_audio = AudioSegment.silent(duration=source_duration_ms)
-        real_segment_positions: List[Dict[str, Any]] = []
-        diagnostics: List[Dict[str, Any]] = []
-        self.su_audio_chunks_dir.mkdir(parents=True, exist_ok=True)
-
-        speaker_groups = {}
-        for item in planned:
-            speaker_groups.setdefault(item.segment.get("speaker", "UNKNOWN"), []).append(item.segment)
-        self.debug_data["speaker_groups"] = {
-            speaker: [speaker_segments] for speaker, speaker_segments in speaker_groups.items()
-        }
-
-        for chronological_index, item in enumerate(planned):
-            segment = item.segment
-            segment_file = segment.get("synthesized_speech_file")
-            if not segment_file:
-                candidate_path = self.audio_chunks_dir / f"{chronological_index}.wav"
-                segment_file = str(candidate_path) if candidate_path.exists() else None
-
-            raw_duration = None
-            leading_removed = None
-            trailing_removed = None
-            trim_error = None
-            used_fallback = False
-            clip = None
-
-            if segment_file and os.path.exists(str(segment_file)):
-                try:
-                    raw_clip = AudioSegment.from_file(segment_file)
-                    if len(raw_clip) > 0:
-                        if segment.get("_tts_cache_contract") in {
-                            "anchor_raw_v1",
-                            "anchor_raw_v2",
-                        }:
-                            timing_path = self.su_audio_chunks_dir / f"timed_{item.original_index}.wav"
-                            trim_result = trim_audio_edges(segment_file, timing_path)
-                            raw_duration = trim_result.raw_duration
-                            leading_removed = trim_result.leading_removed
-                            trailing_removed = trim_result.trailing_removed
-                            trim_error = trim_result.error
-                            if trim_result.usable:
-                                if timing_path.exists():
-                                    clip = AudioSegment.from_file(timing_path)
-                                else:
-                                    clip = raw_clip
-                                    leading_removed = 0.0
-                                    trailing_removed = 0.0
-                            elif trim_result.error:
-                                clip = raw_clip
-                                leading_removed = 0.0
-                                trailing_removed = 0.0
-                            else:
-                                logger.warning(
-                                    "Segment #%d contains no usable synthesized speech; inserting silence.",
-                                    item.original_index,
-                                )
-                        else:
-                            # Legacy cache entries may already have been tail-trimmed.
-                            # Their current readable duration is authoritative, while
-                            # unavailable raw/removed-edge values stay explicitly unknown.
-                            if raw_clip.dBFS != float("-inf"):
-                                clip = raw_clip
-                except Exception as exc:
-                    trim_error = str(exc)
-                    logger.warning("Could not read segment audio %s: %s", segment_file, exc)
-
-            if clip is None:
-                fallback_ms = max(0, round((item.end - item.start) * 1000))
-                clip = AudioSegment.silent(duration=fallback_ms)
-                used_fallback = True
-                logger.warning(
-                    "Segment #%d has no synthesized audio; inserting %dms of silence.",
-                    item.original_index,
-                    fallback_ms,
-                )
-
-            trimmed_duration = len(clip) / 1000.0
-            timing = calculate_segment_timing(
-                start=item.start,
-                end=item.end,
-                next_start=None,
-                source_duration=float(source_duration),
-                audio_duration=trimmed_duration,
-                policy=policy,
-            )
-
-            actual_tempo = timing.tempo
-            adjusted_clip = clip
-            tempo_error = None
-            if abs(timing.tempo - 1.0) > 0.0005 and len(clip) > 0 and not used_fallback:
-                input_path = self.su_audio_chunks_dir / f"tempo_in_{item.original_index}.wav"
-                output_path = self.su_audio_chunks_dir / f"tempo_{item.original_index}.wav"
-                try:
-                    clip.export(input_path, format="wav")
-                    result = subprocess.run(
-                        [
-                            "ffmpeg", "-y", "-i", str(input_path),
-                            "-filter:a", f"atempo={timing.tempo:.8f}",
-                            "-vn", str(output_path),
-                        ],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                    )
-                    if result.returncode != 0:
-                        stderr = (result.stderr or b"").decode("utf-8", errors="replace")
-                        raise RuntimeError(stderr.strip().splitlines()[-1] if stderr.strip() else "ffmpeg failed")
-                    adjusted_clip = AudioSegment.from_file(output_path)
-                except Exception as exc:
-                    tempo_error = str(exc)
-                    actual_tempo = 1.0
-                    adjusted_clip = clip
-                    logger.warning(
-                        "Tempo adjustment failed for segment #%d; using natural speed: %s",
-                        item.original_index,
-                        exc,
-                    )
-
-            actual_duration = len(adjusted_clip) / 1000.0
-            actual_overflow = max(0.0, actual_duration - item.available_window)
-            within_policy = actual_overflow <= policy.max_overflow + 0.002
-            if not within_policy:
-                logger.warning(
-                    "Segment #%d remains %.3fs beyond its anchor window after %.3fx tempo.",
-                    item.original_index,
-                    actual_overflow,
-                    actual_tempo,
-                )
-
-            start_ms = round(item.start * 1000)
-            final_audio = final_audio.overlay(adjusted_clip, position=start_ms)
-            natural_end_ms = start_ms + len(adjusted_clip)
-            clipped_end_ms = min(natural_end_ms, source_duration_ms)
-            boundary_truncated_ms = max(0, natural_end_ms - source_duration_ms)
-            if boundary_truncated_ms:
-                logger.warning(
-                    "Segment #%d is truncated by %dms at the processed source boundary.",
-                    item.original_index,
-                    boundary_truncated_ms,
-                )
-
-            position = {
-                "start": round(start_ms / 1000.0, 3),
-                "end": round(clipped_end_ms / 1000.0, 3),
-                "speaker": segment.get("speaker", "UNKNOWN"),
-                "text": segment.get("text", ""),
-                "translation": segment.get("translation", ""),
-                "original_index": item.original_index,
-                "original_start": item.start,
-                "original_end": item.end,
-                "tempo": actual_tempo,
-                "overflow": actual_overflow,
-                "within_policy": within_policy,
-                "boundary_truncated_ms": boundary_truncated_ms,
-            }
-            real_segment_positions.append(position)
-            diagnostics.append(
-                {
-                    "segment_index": item.original_index,
-                    "speaker": segment.get("speaker", "UNKNOWN"),
-                    "recognized_start": item.start,
-                    "recognized_end": item.end,
-                    "available_window": item.available_window,
-                    "raw_tts_duration": "" if raw_duration is None else raw_duration,
-                    "trimmed_tts_duration": trimmed_duration,
-                    "leading_silence_removed": "" if leading_removed is None else leading_removed,
-                    "trailing_silence_removed": "" if trailing_removed is None else trailing_removed,
-                    "tempo": actual_tempo,
-                    "actual_final_duration": max(0.0, (clipped_end_ms - start_ms) / 1000.0),
-                    "final_start": start_ms / 1000.0,
-                    "final_end": clipped_end_ms / 1000.0,
-                    "overflow": actual_overflow,
-                    "within_policy": within_policy,
-                    "boundary_truncated_ms": boundary_truncated_ms,
-                    "trim_error": trim_error or "",
-                    "tempo_error": tempo_error or "",
-                    "cache_contract": segment.get("_tts_cache_contract", "legacy"),
-                    "selected_variant": segment.get("selected_variant", ""),
-                    "semantic_unit_id": segment.get("semantic_unit_id", ""),
-                    "semantic_plan_fingerprint": segment.get("semantic_plan_fingerprint", ""),
-                    "continuation_id": segment.get("continuation_id", ""),
-                }
-            )
-
-        real_segment_positions.sort(key=lambda value: (value["start"], value["original_index"]))
-        self.debug_data["timing_alignment"] = diagnostics
-        self.debug_data["speed_ratios"] = {
-            row["segment_index"]: row["tempo"] for row in diagnostics
-        }
-
-        if self.config.get("debug_info", False):
-            debug_dir = Path(self.config.get("debug_dir") or ".")
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            diagnostics_path = debug_dir / "timing_alignment.tsv"
-            with diagnostics_path.open("w", encoding="utf-8", newline="") as diagnostics_file:
-                writer = csv.DictWriter(
-                    diagnostics_file,
-                    fieldnames=list(diagnostics[0].keys()),
-                    delimiter="\t",
-                )
-                writer.writeheader()
-                writer.writerows(diagnostics)
-
-        # Overlay uses a source-sized base, so this remains exactly the rounded
-        # processed source duration even when the last clip crosses the boundary.
-        if len(final_audio) < source_duration_ms:
-            final_audio += AudioSegment.silent(duration=source_duration_ms - len(final_audio))
-        elif len(final_audio) > source_duration_ms:
-            final_audio = final_audio[:source_duration_ms]
-        return final_audio, real_segment_positions
+        return audio_assembly_helpers.adjust_and_combine_audio_grouped(self, segments)
 
     def _get_subtitle_path(self, subtitle_type: str, input_path: str, language: str) -> str:
-        """Generate subtitle path based on input file and language.
-        
-        Args:
-            subtitle_type: "original" or "translation"
-            input_path: Path to the input video file
-            language: Language code (source for original, target for translation)
-            
-        Returns:
-            Path for the subtitle file in current working directory
-        """
-        input_file = Path(input_path)
-        project_dir = Path(self.config.get("project_dir"))
-        name_base = project_dir.name if self.config.get("project_name") else input_file.stem
-        # Base filenames for source and target
-        source_lang = self.config.get('source_language')
-        target_lang = self.config.get('target_language')
-        source_name = f"{name_base}_{source_lang}.srt"
-        target_name = f"{name_base}_{target_lang}.srt"
-
-        # If names coincide, disambiguate with explicit prefixes
-        if source_name == target_name:
-            if subtitle_type == "original":
-                return str(project_dir / f"source_{source_name}")
-            else:
-                return str(project_dir / f"target_{target_name}")
-
-        # Default: use requested language-specific filename
-        return str(project_dir / f"{name_base}_{language}.srt")
+        return artifact_helpers.get_subtitle_path(
+            self, subtitle_type, input_path, language
+        )
 
     def adjust_subtitle_timestamps(self, segments: List[Dict], pause_adjustments: List[Dict[str, float]]) -> List[Dict]:
-        """Adjust subtitle timestamps based on pause adjustments from video processing.
-        
-        Args:
-            segments: List of subtitle segments with start/end times
-            pause_adjustments: List of pause adjustments from video processing
-            
-        Returns:
-            List of segments with adjusted timestamps
-        """
-        if not pause_adjustments:
-            logger.debug("No pause adjustments to apply to subtitles")
-            return segments
-        
-        logger.info(f"Adjusting subtitle timestamps based on {len(pause_adjustments)} pause modifications")
-        
-        adjusted_segments = []
-        for segment in segments:
-            adjusted_segment = segment.copy()
-            
-            # Calculate cumulative time offset for this segment's timestamps
-            start_offset = 0.0
-            end_offset = 0.0
-            
-            for adjustment in pause_adjustments:
-                # If the segment starts after this pause was shortened, apply the full offset
-                if segment['start'] >= adjustment['original_end']:
-                    start_offset = adjustment['cumulative_offset']
-                # If the segment starts during this pause, apply partial offset
-                elif segment['start'] >= adjustment['original_start']:
-                    # Segment starts within the pause - calculate partial offset
-                    if segment['start'] <= adjustment['original_start'] + (adjustment['original_end'] - adjustment['original_start'] - adjustment['time_removed']):
-                        # Segment starts in the preserved part of the pause
-                        start_offset = adjustment['cumulative_offset'] - adjustment['time_removed']
-                    else:
-                        # Segment would have started in the removed part - move to end of preserved pause
-                        start_offset = adjustment['cumulative_offset'] - adjustment['time_removed']
-                        adjusted_segment['start'] = adjustment['original_start'] + (adjustment['original_end'] - adjustment['original_start'] - adjustment['time_removed'])
-                
-                # Apply same logic for end time
-                if segment['end'] >= adjustment['original_end']:
-                    end_offset = adjustment['cumulative_offset']
-                elif segment['end'] >= adjustment['original_start']:
-                    if segment['end'] <= adjustment['original_start'] + (adjustment['original_end'] - adjustment['original_start'] - adjustment['time_removed']):
-                        end_offset = adjustment['cumulative_offset'] - adjustment['time_removed']
-                    else:
-                        end_offset = adjustment['cumulative_offset'] - adjustment['time_removed']
-                        adjusted_segment['end'] = adjustment['original_start'] + (adjustment['original_end'] - adjustment['original_start'] - adjustment['time_removed'])
-            
-            # Apply the calculated offsets
-            adjusted_segment['start'] = max(0, adjusted_segment['start'] - start_offset)
-            adjusted_segment['end'] = max(adjusted_segment['start'], adjusted_segment['end'] - end_offset)
-            
-            adjusted_segments.append(adjusted_segment)
-        
-        logger.debug(f"Adjusted timestamps for {len(adjusted_segments)} subtitle segments")
-        return adjusted_segments 
+        return artifact_helpers.adjust_subtitle_timestamps(
+            self, segments, pause_adjustments
+        )

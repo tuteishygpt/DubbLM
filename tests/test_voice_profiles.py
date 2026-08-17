@@ -8,8 +8,10 @@ import dubbing.core.config as config_module
 from dubbing.core.runner import build_config_from_overrides
 from dubbing.core.voice_profiles import (
     FALLBACK_SPEAKER,
+    LegacyVoiceConfigError,
     VoiceProfile,
     normalize_voices,
+    reject_legacy_voice_config,
     resolve_profile,
 )
 
@@ -58,32 +60,37 @@ def test_normalize_new_style_voices_block_parses_params_bag():
     assert voices["SPEAKER_01"].params == {"instruct": "", "num_steps": 32}
 
 
-def test_normalize_legacy_mappings_emits_deprecation_and_folds_into_voices():
-    config = {
-        "tts_system_mapping": {"SPEAKER_00": "gemini", "SPEAKER_01": "omnivoice"},
-        "voice_name": {"SPEAKER_00": "Kore"},
-        "voice_prompt": {"SPEAKER_00": "calm narrator"},
-        "reference_audio_mapping": {"SPEAKER_01": "D:/voice.wav"},
-        "reference_text_mapping": {"SPEAKER_01": "sample"},
-    }
+@pytest.mark.parametrize(
+    ("config", "key"),
+    [
+        ({"tts_system_mapping": {}}, "tts_system_mapping"),
+        ({"voice_prompt": None}, "voice_prompt"),
+        ({"reference_audio_mapping": {}}, "reference_audio_mapping"),
+        ({"reference_text_mapping": {}}, "reference_text_mapping"),
+        ({"voice_name": {"SPEAKER_00": "Kore"}}, "voice_name"),
+        ({"voice_name": "SPEAKER_00:Kore,SPEAKER_01:Aoede"}, "voice_name"),
+    ],
+)
+def test_reject_legacy_voice_config_has_exact_migration_error(config, key):
+    with pytest.raises(
+        LegacyVoiceConfigError,
+        match=(
+            rf"^Legacy per-speaker TTS setting '{key}' is no longer supported in direct test; "
+            r"migrate speaker configuration to 'voices:'\.$"
+        ),
+    ):
+        reject_legacy_voice_config(config, source="direct test")
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        voices = normalize_voices(config)
 
-    assert any(issubclass(w.category, DeprecationWarning) for w in caught), (
-        "Legacy fields must trigger a DeprecationWarning"
-    )
-
-    assert voices["SPEAKER_00"].tts_system == "gemini"
-    assert voices["SPEAKER_00"].voice_name == "Kore"
-    assert voices["SPEAKER_00"].style_prompt == "calm narrator"
-    assert voices["SPEAKER_00"].reference_audio is None
-
-    assert voices["SPEAKER_01"].tts_system == "omnivoice"
-    assert voices["SPEAKER_01"].voice_name is None
-    assert voices["SPEAKER_01"].reference_audio == "D:/voice.wav"
-    assert voices["SPEAKER_01"].reference_text == "sample"
+def test_normalize_voices_rejects_legacy_config_at_direct_library_boundary():
+    with pytest.raises(
+        LegacyVoiceConfigError,
+        match=(
+            r"^Legacy per-speaker TTS setting 'voice_prompt' is no longer supported in "
+            r"normalize_voices; migrate speaker configuration to 'voices:'\.$"
+        ),
+    ):
+        normalize_voices({"voice_prompt": {"SPEAKER_00": "calm narrator"}})
 
 
 def test_normalize_string_voice_name_becomes_fallback_voice():
@@ -134,21 +141,18 @@ def test_removed_fallback_models_are_ignored_and_warned():
     assert sum("fallback_model" in str(item.message) for item in caught) == 1
 
 
-def test_new_style_voices_takes_precedence_over_legacy_for_same_speaker():
-    config = {
-        "voices": {
-            "SPEAKER_00": {"tts_system": "gemini", "voice_name": "Kore"},
-        },
-        "tts_system_mapping": {
-            "SPEAKER_00": "omnivoice",  # legacy — should be ignored for SPEAKER_00
-            "SPEAKER_01": "openai",     # legacy — still picked up (partial migration)
-        },
-    }
-    voices = normalize_voices(config)
+def test_scalar_global_and_nested_voice_names_remain_allowed():
+    voices = normalize_voices(
+        {
+            "voice_name": "nova",
+            "voices": {
+                "SPEAKER_00": {"tts_system": "gemini", "voice_name": "Kore"},
+            },
+        }
+    )
 
-    assert voices["SPEAKER_00"].tts_system == "gemini"
+    assert voices[FALLBACK_SPEAKER].voice_name == "nova"
     assert voices["SPEAKER_00"].voice_name == "Kore"
-    assert voices["SPEAKER_01"].tts_system == "openai"
 
 
 def test_reference_mode_is_parsed_inherited_and_excluded_from_pool_identity():
@@ -206,31 +210,6 @@ def test_provider_switch_clears_mode_when_wildcard_provider_comes_from_global_de
     assert resolved.reference_mode is None
 
 
-def test_new_style_speaker_does_not_reuse_same_speaker_legacy_reference():
-    voices = normalize_voices(
-        {
-            "voices": {
-                "SPEAKER_00": {"tts_system": "higgs", "reference_mode": "segment"},
-            },
-            "reference_audio_mapping": {
-                "SPEAKER_00": "D:/legacy-zero.wav",
-                "SPEAKER_01": "D:/legacy-one.wav",
-            },
-            "reference_text_mapping": {
-                "SPEAKER_00": "legacy zero",
-                "SPEAKER_01": "legacy one",
-            },
-        }
-    )
-
-    assert voices["SPEAKER_00"].reference_audio is None
-    assert voices["SPEAKER_00"].reference_text is None
-    assert voices["SPEAKER_00"].reference_mode == "segment"
-    assert voices["SPEAKER_01"].reference_audio == "D:/legacy-one.wav"
-    assert voices["SPEAKER_01"].reference_text == "legacy one"
-    assert voices["SPEAKER_01"].reference_mode is None
-
-
 def test_resolve_profile_uses_star_fallback_and_default_system():
     profiles = {
         FALLBACK_SPEAKER: VoiceProfile(tts_system="omnivoice", voice_name="default"),
@@ -286,14 +265,19 @@ def test_build_config_from_overrides_parses_voices_json_string(tmp_path, monkeyp
     assert voices[FALLBACK_SPEAKER].tts_system == "omnivoice"
 
 
-def test_build_config_from_overrides_folds_legacy_fields_into_voices(tmp_path, monkeypatch):
+def test_build_config_from_overrides_rejects_raw_legacy_override(tmp_path, monkeypatch):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"video")
     _patch_projects_root(monkeypatch, tmp_path)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        config = build_config_from_overrides(
+    with pytest.raises(
+        LegacyVoiceConfigError,
+        match=(
+            r"^Legacy per-speaker TTS setting 'tts_system_mapping' is no longer supported in "
+            r"runner overrides; migrate speaker configuration to 'voices:'\.$"
+        ),
+    ):
+        build_config_from_overrides(
             {
                 "config": "",  # don't inherit repo dubbing_config.yml
                 "input": str(video_path),
@@ -306,9 +290,34 @@ def test_build_config_from_overrides_folds_legacy_fields_into_voices(tmp_path, m
             }
         )
 
-    voices = config.get("voices")
-    assert isinstance(voices, dict)
-    assert voices["SPEAKER_00"].tts_system == "gemini"
-    assert voices["SPEAKER_00"].style_prompt == "calm"
-    assert voices["SPEAKER_00"].reference_audio == "D:/voice.wav"
-    assert voices["SPEAKER_00"].reference_text == "sample"
+
+def test_load_from_yaml_rejects_raw_legacy_mapping_before_merge(tmp_path):
+    config_path = tmp_path / "legacy.yml"
+    config_path.write_text("voice_prompt: null\ntarget_language: be\n", encoding="utf-8")
+    config = config_module.DubbingConfig()
+    original = config.to_dict()
+
+    with pytest.raises(
+        LegacyVoiceConfigError,
+        match=(
+            r"^Legacy per-speaker TTS setting 'voice_prompt' is no longer supported in "
+            r"YAML config; migrate speaker configuration to 'voices:'\.$"
+        ),
+    ):
+        config.load_from_yaml(str(config_path))
+
+    assert config.to_dict() == original
+
+
+def test_process_special_parameters_rejects_legacy_config_safety_net():
+    config = config_module.DubbingConfig()
+    config.set("reference_text_mapping", {"SPEAKER_00": "sample"})
+
+    with pytest.raises(
+        LegacyVoiceConfigError,
+        match=(
+            r"^Legacy per-speaker TTS setting 'reference_text_mapping' is no longer supported in "
+            r"merged config; migrate speaker configuration to 'voices:'\.$"
+        ),
+    ):
+        config.process_special_parameters()
