@@ -6,8 +6,9 @@ import { WorkflowView } from './views/WorkflowView'
 import { SettingsView } from './views/SettingsView'
 import { VoicesView } from './views/VoicesView'
 import { DubbingTextsView } from './views/DubbingTextsView'
-import { HukFlowStudioView } from './views/HukFlowStudioView'
+import { HukFlowStudioView, type StudioMediaInfo } from './views/HukFlowStudioView'
 import { JobProgressView } from './views/JobProgressView'
+import { ExportDropdown } from './components/ExportDropdown'
 
 const views = ['HukFlow Studio', 'Workflow', 'Jobs', 'Settings', 'Voice Profiles', 'Dubbing Texts'] as const
 type View = (typeof views)[number]
@@ -38,6 +39,7 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
   const [openingProject, setOpeningProject] = useState<string | null>(null)
   const [openProjectError, setOpenProjectError] = useState('')
   const [pendingOpenJobId, setPendingOpenJobId] = useState<string | null>(null)
+  const [studioMedia, setStudioMedia] = useState<StudioMediaInfo | null>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -145,14 +147,20 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
           <button className="header-icon-btn" title="settings">
             <span className="material-symbols-outlined">settings</span>
           </button>
-          {!isStudio && <button className="export-btn">Export</button>}
           {isStudio && (
             <>
               <button className="header-nav-btn-secondary" type="button">Share</button>
               <div id="studio-header-run-slot" className="studio-header-run-slot" />
-              <button className="export-btn">Export</button>
             </>
           )}
+          <ExportDropdown
+            client={client}
+            activeJobId={isStudio ? (studioMedia?.jobId ?? pendingOpenJobId) : (activeProgressJobId || pendingOpenJobId || studioMedia?.jobId)}
+            activeProjectName={isStudio ? (studioMedia?.projectName ?? null) : (activeProgressProjectName || studioMedia?.projectName)}
+            videoSrc={isStudio ? studioMedia?.videoSrc : undefined}
+            audioSrc={isStudio ? studioMedia?.audioSrc : undefined}
+            files={isStudio ? studioMedia?.files : undefined}
+          />
           <div className="user-avatar" title="User profile">
             <span className="material-symbols-outlined" style={{ fontSize: '18px', color: '#cbc3d7' }}>person</span>
           </div>
@@ -294,6 +302,7 @@ export default function App({ client = apiClient }: { client?: ApiClient }) {
                   pendingOpenJobId={pendingOpenJobId}
                   onPendingOpenJobConsumed={() => setPendingOpenJobId(null)}
                   onJobStarted={handleJobStarted}
+                  onActiveMediaChange={setStudioMedia}
                 />
               )}
 

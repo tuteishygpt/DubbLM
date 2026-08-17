@@ -101,18 +101,28 @@ export const RUN_STEPS: RunStepOption[] = [
   },
 ]
 
+export interface StudioMediaInfo {
+  jobId?: string | null
+  projectName?: string | null
+  videoSrc?: string | null
+  audioSrc?: string | null
+  files?: JobFile[]
+}
+
 export function HukFlowStudioView({
   client,
   onNavigate,
   pendingOpenJobId,
   onPendingOpenJobConsumed,
   onJobStarted,
+  onActiveMediaChange,
 }: {
   client?: ApiClient
   onNavigate?: (view: NavigateView) => void
   pendingOpenJobId?: string | null
   onPendingOpenJobConsumed?: () => void
   onJobStarted?: (jobId: string, projectName?: string) => void
+  onActiveMediaChange?: (info: StudioMediaInfo) => void
 }) {
   // ── jobs / document state ─────────────────────────────────────────────────
   const [jobs, setJobs] = useState<Job[]>([])
@@ -300,6 +310,16 @@ export function HukFlowStudioView({
       tempAudio.addEventListener('loadedmetadata', onLoaded)
     })
   }, [musicFiles, selectedJobId])
+
+  // ── inform parent about active media context for export ───────────────────
+  useEffect(() => {
+    onActiveMediaChange?.({
+      jobId: selectedJobId || null,
+      projectName: selectedProjectName || null,
+      videoSrc,
+      files: musicFiles,
+    })
+  }, [selectedJobId, selectedProjectName, videoSrc, musicFiles, onActiveMediaChange])
 
   // ── edit translation ───────────────────────────────────────────────────────
   const handleTranslationChange = (id: string, value: string) => {
