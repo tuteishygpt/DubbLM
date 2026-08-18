@@ -382,6 +382,16 @@ class DubbingTextService:
                     record = self._media_store.get(owner_id=owner, media_id=media_id)
                 except Exception:
                     record = None
+            if record is not None:
+                try:
+                    src_stat = Path(audio_path).stat()
+                    rec_path = getattr(record, "path", None)
+                    if rec_path and Path(rec_path).is_file():
+                        rec_stat = Path(rec_path).stat()
+                        if src_stat.st_size != rec_stat.st_size or src_stat.st_mtime > rec_stat.st_mtime:
+                            record = None
+                except Exception:
+                    record = None
             if record is None:
                 record = self._media_store.register(
                     owner_id=owner,
@@ -692,13 +702,11 @@ class DubbingTextService:
         chunks_dir = Path(str(DubbingTextService._config_get(config, "audio_chunks_dir", "") or ""))
 
         for idx, seg in enumerate(segments):
-            if seg.get("synthesized_speech_file") and Path(str(seg["synthesized_speech_file"])).is_file():
-                continue
             candidates = [
+                chunks_dir / f"{idx}.wav",
                 su_chunks_dir / f"timed_{idx}.wav",
                 su_chunks_dir / f"measure_{idx}.wav",
                 su_chunks_dir / f"tempo_{idx}.wav",
-                chunks_dir / f"{idx}.wav",
             ]
             for cand in candidates:
                 if cand.is_file():
@@ -877,7 +885,20 @@ class DubbingTextService:
 
         if not isinstance(overrides, Mapping):
             raise DubbingTextValidationError("Dubbing text configuration must be a mapping.")
-        config = build_config_from_overrides(dict(overrides))
+        clean_overrides = dict(overrides)
+        for legacy_key in (
+            "tts_system_mapping",
+            "voice_prompt",
+            "reference_audio_mapping",
+            "reference_text_mapping",
+        ):
+            clean_overrides.pop(legacy_key, None)
+        voice_name_val = clean_overrides.get("voice_name")
+        if isinstance(voice_name_val, Mapping) or (
+            isinstance(voice_name_val, str) and "," in voice_name_val and ":" in voice_name_val
+        ):
+            clean_overrides.pop("voice_name", None)
+        config = build_config_from_overrides(clean_overrides)
 
         # Dynamically merge speaker_map from project_metadata.json if available
         artifacts_dir = Path(str(config.get("artifacts_dir", "")))

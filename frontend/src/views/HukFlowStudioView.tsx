@@ -170,6 +170,7 @@ export function HukFlowStudioView({
   const [videoDuration, setVideoDuration] = useState(0)
   const [musicFiles, setMusicFiles] = useState<JobFile[]>([])
   const [backgroundDurations, setBackgroundDurations] = useState<Record<string, number>>({})
+  const [audioDurations, setAudioDurations] = useState<Record<string, number>>({})
 
   // ── studio tools state ───────────────────────────────────────────────────
   const [zoomLevel, setZoomLevel] = useState(50)
@@ -343,6 +344,22 @@ export function HukFlowStudioView({
       tempAudio.addEventListener('loadedmetadata', onLoaded)
     })
   }, [musicFiles, selectedJobId])
+
+  // ── fetch actual duration of each segment's dubbed audio file ─────────────
+  useEffect(() => {
+    setAudioDurations({})
+    if (!selectedJobId) return
+    segments.forEach((seg) => {
+      if (!seg.audio?.url) return
+      const tempAudio = new Audio(seg.audio.url)
+      const onLoaded = () => {
+        if (Number.isFinite(tempAudio.duration) && tempAudio.duration > 0) {
+          setAudioDurations((prev) => ({ ...prev, [seg.segment_id]: tempAudio.duration }))
+        }
+      }
+      tempAudio.addEventListener('loadedmetadata', onLoaded)
+    })
+  }, [segments, selectedJobId])
 
   // ── inform parent about active media context for export ───────────────────
   useEffect(() => {
@@ -552,8 +569,11 @@ export function HukFlowStudioView({
 
   const clipStyle = (s: Segment) => {
     const start = Math.min(Math.max(0, s.start), duration)
-    const end = Math.min(Math.max(start, s.end), duration)
-    const clipLen = end - start
+    // Use actual dubbed audio duration when available; fall back to original segment length
+    const actualLen = audioDurations[s.segment_id]
+    const clipLen = actualLen != null
+      ? Math.min(actualLen, duration - start)
+      : Math.min(Math.max(0, s.end - s.start), duration - start)
     return {
       left: `${(start / duration) * 100}%`,
       width: `${Math.max(0.5, (clipLen / duration) * 100)}%`,

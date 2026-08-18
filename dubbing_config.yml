@@ -79,11 +79,3 @@ semantic_split_enabled: true
 tts_preferred_segment_duration: 15
 tts_hard_segment_duration: 35
 semantic_split_search_window: 10
-reference_audio_mapping:
-  SPEAKER_07: D:\CodexPRJ\DubbLM\.worktrees\higgs-reference-modes\speaker_reference_library\SPEAKER_07\reference.mp3
-reference_text_mapping:
-  SPEAKER_07: С директорами работать особо не надо, это следует понимать. Ты встречаешься
-    раз в квартал по видео, там 2-3 часа, 4, иногда 5, иногда полчаса даже, кстати.
-    Раз в квартал смотришь отчёт, и ты там, наверное, оказался, потому что у тебя
-    уже опыта за свою жизнь столько, что тебе не надо на это тратить время. Эти 3
-    часа раз в квартал — это и есть основное время, которое ты тратишь на эту работу

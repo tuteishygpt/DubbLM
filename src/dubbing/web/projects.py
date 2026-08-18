@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .contracts import MediaStore
 from .jobs import FileJobRepository, Job
@@ -128,26 +128,21 @@ class ProjectService:
         project_dir = self._validate_project_dir(project_name)
         job_id = self.job_id_for_project(project_name)
 
-        # Check if already opened and valid
-        try:
-            existing_job = self._job_repository.get(owner_id, job_id)
-            if existing_job and existing_job.status == "succeeded" and existing_job.files:
-                return existing_job
-        except Exception:
-            pass
-
         # Build configuration and register files
         config = self._build_project_config(project_dir)
         registered_files = self._register_project_files(owner_id, job_id, project_dir, config)
 
         # Create or update Job in repository
-        self._job_repository.create(
-            owner_id,
-            config,
-            job_id=job_id,
-            state={"status": "succeeded", "message": f"Loaded ready project '{project_name}'"},
-            files=registered_files,
-        )
+        try:
+            self._job_repository.create(
+                owner_id,
+                config,
+                job_id=job_id,
+                state={"status": "succeeded", "message": f"Loaded ready project '{project_name}'"},
+                files=registered_files,
+            )
+        except Exception:
+            pass
         self._job_repository.update(
             owner_id,
             job_id,
@@ -477,9 +472,24 @@ class ProjectService:
 
         metadata = self._read_project_metadata(artifacts_dir)
         saved_cfg = metadata.get("config")
+        legacy_voice_keys = {
+            "tts_system_mapping",
+            "voice_prompt",
+            "reference_audio_mapping",
+            "reference_text_mapping",
+        }
         if isinstance(saved_cfg, dict):
             for k, v in saved_cfg.items():
-                if k not in ("run_step", "output", "project_dir", "artifacts_dir", "speaker_map") and v is not None:
+                if (
+                    k not in ("run_step", "output", "project_dir", "artifacts_dir", "speaker_map")
+                    and k not in legacy_voice_keys
+                    and v is not None
+                ):
+                    if k == "voice_name" and (
+                        isinstance(v, Mapping)
+                        or (isinstance(v, str) and "," in v and ":" in v)
+                    ):
+                        continue
                     config[k] = v
 
         # Resolve speaker_map: SPEAKER_XX → profile-name → full profile from global voices

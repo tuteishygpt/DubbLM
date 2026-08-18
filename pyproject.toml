@@ -20,7 +20,7 @@ classifiers = [
 ]
 dependencies = [
     "json-repair==0.41.0",
-    "google-genai==1.16.1",
+    "google-genai>=1.52.0",
     "llama-index-llms-google-genai==0.9.1",
     "deepgram-sdk==5.3.2",
 ]
@@ -29,7 +29,6 @@ dependencies = [
 Homepage = "https://github.com/ArteusAI/DubbLM"
 
 [project.scripts]
-dubblm = "dubbing.cli.main:main"
 dubblm-web = "dubbing.web.app:main"
 
 [tool.setuptools]

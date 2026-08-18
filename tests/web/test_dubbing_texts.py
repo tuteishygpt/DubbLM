@@ -31,7 +31,7 @@ class StoredMedia:
 
 class FakeMediaStore:
     def __init__(self) -> None:
-        self.records: dict[tuple[str, str], StoredMedia] = {}
+        self.records: dict[str, StoredMedia] = {}
         self.registered: list[tuple[str, str, str | None]] = []
 
     def register(
@@ -39,27 +39,21 @@ class FakeMediaStore:
         job_id: str | None = None,
     ) -> StoredMedia:
         assert kind == "dubbing_segment"
-        key = (owner_id, str(Path(path).resolve()))
         media_id = f"audio-{len(self.records) + 1}"
-        record = self.records.setdefault(
-            key,
-            StoredMedia(media_id, name, f"/media/{media_id}", Path(path)),
-        )
+        copy_path = Path(path).parent / f".registered_{media_id}_{Path(path).name}"
+        copy_path.write_bytes(Path(path).read_bytes())
+        record = StoredMedia(media_id, name, f"/media/{media_id}", copy_path)
+        self.records[media_id] = record
         self.registered.append((owner_id, str(Path(path)), job_id))
         return record
 
     def get(self, *, owner_id: str, media_id: str) -> StoredMedia:
-        return next(
-            record for (record_owner, _path), record in self.records.items()
-            if record_owner == owner_id and record.id == media_id
-        )
+        if media_id in self.records:
+            return self.records[media_id]
+        raise ValueError("Media not found")
 
     def delete(self, *, owner_id: str, media_id: str) -> None:
-        matching = next(
-            key for key, record in self.records.items()
-            if key[0] == owner_id and record.id == media_id
-        )
-        self.records.pop(matching)
+        self.records.pop(media_id, None)
 
 
 class ConcreteShapeMediaStore(FakeMediaStore):
@@ -604,3 +598,53 @@ def test_same_dubbing_revision_cannot_succeed_in_two_processes(
 
     assert outcomes.count("success") == 1
     assert outcomes.count("DubbingTextConflictError") == 1
+
+
+def test_build_context_sanitizes_legacy_voice_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("dubbing.core.config.DEFAULT_PROJECTS_ROOT", tmp_path / "prj")
+
+    video_path = tmp_path / "input.mp4"
+    video_path.write_bytes(b"video")
+
+    legacy_config = {
+        "config": "",
+        "input": str(video_path),
+        "source_language": "en",
+        "target_language": "be",
+        "reference_audio_mapping": {"SPEAKER_00": "ref.mp3"},
+        "reference_text_mapping": {"SPEAKER_00": "sample"},
+        "tts_system_mapping": {"SPEAKER_00": "gemini"},
+        "voice_prompt": {"SPEAKER_00": "calm"},
+        "voice_name": {"SPEAKER_00": "Kore"},
+    }
+    context = DubbingTextService._build_context(legacy_config)
+    assert context is not None
+    assert Path(str(context.config.get("input"))).resolve() == video_path.resolve()
+
+
+def test_load_refreshes_audio_refs_when_audio_chunk_file_modified(
+    text_fixture: Fixture, tmp_path: Path
+) -> None:
+    fixture = text_fixture
+    chunk_file = tmp_path / "0.wav"
+    chunk_file.write_bytes(b"initial audio content")
+
+    segment = _segment()
+    segment["synthesized_speech_file"] = str(chunk_file)
+    _write_pickle(fixture.context.cache_path, [segment])
+
+    # Initial load registers the audio
+    loaded1 = fixture.service.load(owner_id="alice", job_id="job-1", config=fixture.config)
+    assert loaded1.segments[0].audio is not None
+    initial_id = loaded1.segments[0].audio.id
+
+    # Modify audio file on disk
+    time.sleep(0.01)
+    chunk_file.write_bytes(b"new freshly synthesized audio content with different length")
+
+    # Second load must detect the changed audio and refresh media_id
+    loaded2 = fixture.service.load(owner_id="alice", job_id="job-1", config=fixture.config)
+    assert loaded2.segments[0].audio is not None
+    assert loaded2.segments[0].audio.id != initial_id
+
+

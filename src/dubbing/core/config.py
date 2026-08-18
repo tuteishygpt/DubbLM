@@ -3,9 +3,8 @@
 import os
 import sys
 import json
-import argparse
 import re
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
 import yaml
 from .log_config import get_logger
@@ -13,27 +12,15 @@ from .log_config import get_logger
 logger = get_logger(__name__)
 
 
-def _semantic_bool_argument(value: Any) -> Any:
-    """Parse supported bool spellings while preserving invalid values for normalization."""
-    normalized = str(value).strip().lower()
-    if normalized in {"true", "1"}:
-        return True
-    if normalized in {"false", "0"}:
-        return False
-    return value
-
-
 DEFAULT_PROJECTS_ROOT = Path(__file__).resolve().parents[3] / "prj"
 
 _UNSAFE_PROJECT_DIR_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
 
 def sanitize_project_dir_name(name: str) -> str:
     """Sanitize user-provided project name to be safe for directory names across OSes."""
     if not name:
         return ""
     return _UNSAFE_PROJECT_DIR_CHARS.sub("_", str(name)).strip(" .")
-
 
 def _parse_time_to_seconds(time_str: str) -> float:
     """Parse time string (HH:MM:SS, MM:SS, or SS) into seconds."""
@@ -93,18 +80,14 @@ class DubbingConfig:
             'save_translated_subtitles': False,
             'reference_audio': None,
             'reference_text': None,
-            'reference_audio_mapping': None,
-            'reference_text_mapping': None,
             'watermark_path': None,
             'watermark_text': None,
             'glossary': None,
-            'voice_prompt': None,
             'voice_auto_selection': True,
             'enable_emotion_analysis': False,
             'include_original_audio': False,
             'output': None, 
             'keep_original_audio_ranges': None,
-            'tts_system_mapping': None,
             'voices': None,
             'tts_prompt_prefix': None,
             'remove_pauses': False,
@@ -129,7 +112,7 @@ class DubbingConfig:
             'project_name': None,
         }
         
-        # Required parameters that must come from CLI
+        # Required runtime parameters supplied by the active caller.
         self.required_params = ['input', 'source_language', 'target_language']
         
         # Configuration data
@@ -141,65 +124,37 @@ class DubbingConfig:
             with open(config_path, 'r', encoding='utf-8') as config_file:
                 yaml_config = yaml.safe_load(config_file)
                 if yaml_config:
-                    # Remove input from YAML config if present - it must come from CLI
+                    from .voice_profiles import reject_legacy_voice_config
+                    reject_legacy_voice_config(yaml_config, source="YAML config")
+                    # Runtime input is supplied by the caller rather than persisted.
                     if 'input' in yaml_config:
-                        logger.warning("Warning: 'input' parameter found in YAML config will be ignored. Input must be provided via CLI argument --input")
+                        logger.warning("Warning: 'input' parameter found in YAML config will be ignored. Input must be provided at runtime.")
                         del yaml_config['input']
                     self.config.update(yaml_config)
             logger.info(f"Loaded configuration from {config_path}")
         elif config_path:
-            logger.warning(f"Config file {config_path} not found, using defaults and CLI arguments")
+            logger.warning(f"Config file {config_path} not found, using defaults and runtime overrides")
     
-    def load_from_cli(self, args: argparse.Namespace) -> None:
-        """Load configuration from CLI arguments."""
-        # Override config with CLI arguments that are not None and actually present
-        arg_dict = vars(args)
-        for key, value in arg_dict.items():
+    def load_overrides(self, overrides: Dict[str, Any]) -> None:
+        """Apply non-null runtime overrides."""
+        for key, value in overrides.items():
             if key == 'config':
                 continue
-            if key == '_isolated_track_pairs':
-                # Parsed separately below
-                continue
-            if hasattr(args, key) and value is not None:
+            if value is not None:
                 self.config[key] = value
-
-        # Fold --isolated_track LABEL=PATH pairs into a dict. Overrides YAML
-        # only when at least one pair is provided on the CLI.
-        pairs = arg_dict.get('_isolated_track_pairs')
-        if pairs:
-            tracks: Dict[str, str] = {}
-            for pair in pairs:
-                if '=' not in pair:
-                    logger.warning(
-                        "Warning: --isolated_track expects LABEL=PATH, got '%s'. Skipping.",
-                        pair,
-                    )
-                    continue
-                label, path = pair.split('=', 1)
-                label = label.strip()
-                path = path.strip()
-                if not label or not path:
-                    logger.warning(
-                        "Warning: --isolated_track has empty label or path in '%s'. Skipping.",
-                        pair,
-                    )
-                    continue
-                tracks[label] = path
-            if tracks:
-                self.config['isolated_tracks'] = tracks
     
     def validate(self) -> None:
         """Validate required configuration parameters."""
-        # Check that input is provided via CLI
+        # Check that runtime input is provided.
         if not self.config.get('input'):
-            logger.error("Error: Input video file must be specified via --input argument")
+            logger.error("Error: Input video file must be specified")
             sys.exit(1)
         
         # Check other required parameters  
         for param in ['source_language', 'target_language']:
             if not self.config.get(param):
                 logger.error(f"Error: {param.replace('_', ' ').title()} not specified")
-                logger.error(f"Please provide it in the config file or with --{param}")
+                logger.error(f"Please provide '{param}' in the config file or runtime overrides")
                 sys.exit(1)
         
         # Check if video file exists
@@ -243,6 +198,7 @@ class DubbingConfig:
             artifacts_dir = Path(self.config["artifacts_dir"])
         else:
             artifacts_dir = project_dir / "artifacts"
+        
         project_dir.mkdir(parents=True, exist_ok=True)
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -285,6 +241,9 @@ class DubbingConfig:
     
     def process_special_parameters(self) -> None:
         """Process special parameters that need parsing."""
+        from .voice_profiles import reject_legacy_voice_config
+        reject_legacy_voice_config(self.config, source="merged config")
+
         def _parse_mapping_parameter(name: str) -> None:
             value = self.config.get(name)
             if isinstance(value, str):
@@ -317,16 +276,8 @@ class DubbingConfig:
                 logger.warning("Warning: Invalid duration value. Ignoring it.")
                 self.config['duration'] = None
 
-        # Process voice_name parameter
-        voice_name = self.config['voice_name']
-        if isinstance(voice_name, str) and ',' in voice_name and ':' in voice_name:
-            # Parse as a mapping of speakers to voices
-            voice_mapping = {pair.split(':')[0]: pair.split(':')[1] for pair in voice_name.split(',') if ':' in pair}
-            self.config['voice_name'] = voice_mapping
-            logger.info(f"Using multiple voices: {voice_mapping}")
-        elif isinstance(voice_name, dict):
-            logger.info(f"Using multiple voices from config: {voice_name}")
-        elif voice_name:
+        voice_name = self.config.get('voice_name')
+        if voice_name:
             # Single voice for all speakers
             logger.info(f"Using single voice: {voice_name}")
         
@@ -347,24 +298,6 @@ class DubbingConfig:
             
             self.config['keep_original_audio_ranges'] = parsed_ranges if parsed_ranges else None
         
-        # Process tts_system_mapping parameter
-        tts_system_mapping = self.config.get('tts_system_mapping')
-        if isinstance(tts_system_mapping, str):
-            # Parse JSON string from command line
-            try:
-                tts_system_mapping = json.loads(tts_system_mapping)
-                logger.info(f"Parsed TTS system mapping from JSON: {tts_system_mapping}")
-                self.config['tts_system_mapping'] = tts_system_mapping
-            except json.JSONDecodeError as e:
-                logger.warning(f"Warning: Could not parse tts_system_mapping JSON '{tts_system_mapping}': {e}. Ignoring.")
-                self.config['tts_system_mapping'] = None
-        elif isinstance(tts_system_mapping, dict):
-            logger.info(f"Using TTS system mapping from config: {tts_system_mapping}")
-        else:
-            self.config['tts_system_mapping'] = None
-
-        _parse_mapping_parameter('reference_audio_mapping')
-        _parse_mapping_parameter('reference_text_mapping')
         _parse_mapping_parameter('isolated_tracks')
 
         # Validate isolated_tracks: strip empties, verify files exist
@@ -405,8 +338,7 @@ class DubbingConfig:
             )
             self.config['inner_transcription_system'] = 'deepgram'
 
-        # Consolidate per-speaker fields (legacy mappings + new `voices` block)
-        # into a single dict[str, VoiceProfile].
+        # Normalize the modern `voices` block into VoiceProfile objects.
         raw_voices = self.config.get('voices')
         if isinstance(raw_voices, str):
             try:
@@ -467,138 +399,3 @@ class DubbingConfig:
     def to_dict(self) -> Dict[str, Any]:
         """Return configuration as dictionary."""
         return self.config.copy()
-    
-    def _create_parser(self) -> argparse.ArgumentParser:
-        """Create argument parser with all CLI options."""
-        parser = argparse.ArgumentParser(description='Smart Video Dubbing Tool')
-        
-        parser.add_argument('--config', type=str, help='Path to YAML configuration file', default='dubbing_config.yml')
-        parser.add_argument('--input', type=str, required=True, help='Path to the video file (required)')
-        parser.add_argument('--source_language', type=str, help='Video source language')
-        parser.add_argument('--target_language', type=str, help='Video target language')
-        parser.add_argument('--whisper_model', type=str, help='Whisper model size for transcription')
-        parser.add_argument('--keep_background', action='store_true', default=argparse.SUPPRESS, help='Keep the background audio in the output')
-        parser.add_argument('--start_time', type=float, help='Start time in seconds to begin processing')
-        parser.add_argument('--duration', type=float, help='Duration in seconds to process')
-        parser.add_argument('--no_cache', action='store_true', default=argparse.SUPPRESS, help='Disable caching of pipeline steps')
-        parser.add_argument('--tts_system', type=str, choices=['coqui', 'xtts', 'openai', 'f5_tts', 'gemini', 'bextts', 'omnivoice'], help='Text-to-speech system to use')
-        parser.add_argument('--tts_model', type=str, help='Model name for the selected TTS provider')
-        parser.add_argument('--omnivoice_space_id', type=str, help='Hugging Face Space ID for OmniVoice')
-        parser.add_argument('--omnivoice_api_name', type=str, help='Gradio API endpoint for OmniVoice synthesis')
-        parser.add_argument('--omnivoice_lang', type=str, help='Language setting for OmniVoice (default: Belarusian)')
-        parser.add_argument('--omnivoice_instruct', type=str, default='', help='Instruct text for OmniVoice synthesis (required by k2-fsa/OmniVoice, empty string = no instruction)')
-        parser.add_argument('--omnivoice_num_steps', type=int, help='Number of OmniVoice generation steps')
-        parser.add_argument('--omnivoice_guidance_scale', type=float, help='Guidance scale for OmniVoice synthesis')
-        parser.add_argument('--omnivoice_denoise', type=lambda x: (str(x).lower() == 'true'), help='Enable OmniVoice denoising (True/False)')
-        parser.add_argument('--omnivoice_speed', type=float, help='Default speaking speed for OmniVoice synthesis')
-        parser.add_argument('--omnivoice_duration', type=float, help='Default OmniVoice duration control value')
-        parser.add_argument('--omnivoice_preprocess_prompt', type=lambda x: (str(x).lower() == 'true'), help='Enable OmniVoice prompt preprocessing (True/False)')
-        parser.add_argument('--omnivoice_postprocess_output', type=lambda x: (str(x).lower() == 'true'), help='Enable OmniVoice audio postprocessing (True/False)')
-        parser.add_argument('--transcription_system', type=str, choices=['whisper', 'openai', 'pyannote_openai', 'whisperx', 'assemblyai', 'gemini', 'deepgram'], help='Transcription system to use')
-        parser.add_argument('--transcription_model', type=str, help='Model name for the selected transcription system')
-        parser.add_argument('--gemini_transcription_model', type=str, help='Model name for Gemini transcription backend')
-        parser.add_argument('--deepgram_model', type=str, help='Model name for Deepgram transcription backend (default: nova-3)')
-        parser.add_argument('--translator_type', type=str, choices=['llm'], help='Translator type to use')
-        parser.add_argument('--llm_provider', type=str, choices=['gemini', 'openrouter'], help='LLM provider to use')
-        parser.add_argument('--llm_model_name', type=str, help='Model name for the LLM')
-        parser.add_argument('--llm_temperature', type=float, help='Temperature for LLM generation')
-        parser.add_argument('--refinement_llm_provider', type=str, choices=['gemini', 'openrouter'], help='LLM provider to use for refinement')
-        parser.add_argument('--refinement_model_name', type=str, help='Model name for refinement')
-        parser.add_argument('--refinement_temperature', type=float, help='Temperature for refinement')
-        parser.add_argument('--refinement_max_tokens', type=int, help='Maximum tokens for OpenRouter refinement')
-        parser.add_argument('--refinement_persona', type=str, choices=['normal', 'casual_manager', 'child', 'housewife'], help='Persona for refinement prompt')
-        parser.add_argument('--translation_prompt_prefix', type=str, help='Additional context to prepend to LLM translation prompts')
-        parser.add_argument('--voice_name', type=str, help='Voice to use for TTS')
-        parser.add_argument('--debug_info', action='store_true', default=argparse.SUPPRESS, help='Generate a debug video with speaker labels')
-        parser.add_argument('--debug_tts', action='store_true', default=argparse.SUPPRESS, help='Enable TTS debugging (e.g., save rejected/silent attempts)')
-        parser.add_argument('--save_original_subtitles', action='store_true', default=argparse.SUPPRESS, help='Save original language subtitles')
-        parser.add_argument('--save_translated_subtitles', action='store_true', default=argparse.SUPPRESS, help='Save translated language subtitles')
-        parser.add_argument('--reference_audio', type=str, help='Path to a reference audio file for f5_tts system')
-        parser.add_argument('--reference_text', type=str, help='Text corresponding to the reference audio for f5_tts system')
-        parser.add_argument('--reference_audio_mapping', type=str, help='JSON string mapping speakers to reference audio file paths')
-        parser.add_argument('--reference_text_mapping', type=str, help='JSON string mapping speakers to reference transcript text')
-        parser.add_argument('--watermark_path', type=str, help='Path to the watermark PNG image')
-        parser.add_argument('--watermark_text', type=str, help='Text to display under the watermark')
-        parser.add_argument('--voice_auto_selection', type=lambda x: (str(x).lower() == 'true'), help='Enable automatic voice selection for TTS (True/False)')
-        parser.add_argument('--enable_emotion_analysis', type=lambda x: (str(x).lower() == 'true'), help='Enable emotion analysis for speech synthesis (True/False)')
-        parser.add_argument('--run_step', type=str,
-                            choices=['full_pipeline', 'from_scratch', 'transcribe_only', 'translate_only', 'combine_video', 'tts_to_end'],
-                            help='Run only a specific, advanced pipeline step. This is intended for debugging or resuming a failed run where prior steps have successfully created their expected output files in the default locations. \
-                                  Example: --run_step full_pipeline (Normal end-to-end run). \
-                                  Example: --run_step from_scratch (Clear cached artifacts and rerun the entire pipeline from zero). \
-                                  Example: --run_step transcribe_only (Diarize and transcribe only; save original subtitles if requested and exit). \
-                                  Example: --run_step translate_only (Reuse cached diarization+transcription from a previous transcribe_only or full run, then translate; save subtitles if requested and exit. Fails if no cached transcription exists.). \
-                                  Example: --run_step combine_video (Assumes audio/output.wav and potentially audio/background.wav exist from prior steps). \
-                                  Example: --run_step tts_to_end (Assumes cached translation artifacts from a previous full run in the same project directory, then regenerates TTS and finishes the video). \
-                                  Note: For most users, running the full pipeline or using --generate_speaker_report is recommended.')
-        parser.add_argument('--include_original_audio', action='store_true', default=argparse.SUPPRESS, help='Include the original audio track in the final video')
-        parser.add_argument('--output', type=str, help='Path to the output video file (default: input_name + target_language + extension in current directory)')
-        parser.add_argument('--generate_speaker_report', action='store_true', default=argparse.SUPPRESS, help='Generate a report of identified speakers and their voice samples, then exit.')
-        parser.add_argument('--tts_system_mapping', type=str, help='JSON string mapping speakers to TTS systems')
-        parser.add_argument('--tts_prompt_prefix', type=str, help='Global prompt prefix for TTS generation instructions (mainly for Gemini TTS)')
-        parser.add_argument('--remove_pauses', type=lambda x: (str(x).lower() == 'true'), help='Remove small pauses from video while preserving keyframes (True/False)')
-        parser.add_argument('--min_pause_duration', default=300, type=float, help='Minimum pause duration to consider for removal (seconds)')
-        parser.add_argument('--keyframe_buffer', default=0.2, type=float, help='Buffer around keyframes to preserve during pause removal (seconds)')
-        parser.add_argument('--use_two_pass_encoding', type=lambda x: (str(x).lower() == 'true'), help='Use two-pass encoding for better video quality during re-encoding (True/False)')
-        parser.add_argument('--dubbed_volume', type=float, help='Gain multiplier for translated track (e.g., 1.2 for +1.6 dB)')
-        parser.add_argument('--background_volume', type=float, help='Gain multiplier for background track when keep_background=true (e.g., 0.56 ≈ -5 dB)')
-        parser.add_argument('--group_overflow_tolerance', type=float, help='Deprecated and ignored; use --timing_max_overflow')
-        parser.add_argument('--timing_short_segment_threshold', type=float, help='Recognized duration below which the short-segment speed limit applies (default: 1.5)')
-        parser.add_argument('--timing_short_segment_max_speed', type=float, help='Maximum tempo multiplier for short segments (default: 1.08)')
-        parser.add_argument('--timing_max_speed', type=float, help='Maximum tempo multiplier for other segments (default: 1.15)')
-        parser.add_argument('--timing_max_stretch', type=float, help='Maximum duration multiplier used to slow short audio into its anchor window (default: 1.15)')
-        parser.add_argument('--timing_max_overflow', type=float, help='Allowed speech overflow beyond an anchor window in seconds (default: 0.25)')
-        parser.add_argument('--semantic_split_enabled', type=_semantic_bool_argument, help='Use semantic planning for isolated speaker tracks (default: true)')
-        parser.add_argument('--tts_preferred_segment_duration', type=float, help='Soft target duration for semantic TTS units (default: 15.0)')
-        parser.add_argument('--tts_hard_segment_duration', type=float, help='Hard maximum duration for semantic TTS units (default: 35.0)')
-        parser.add_argument('--semantic_split_search_window', type=float, help='Semantic boundary search radius around the soft target (default: 10.0)')
-        parser.add_argument('--segment_reference_min_duration', type=float, help='Minimum segment length in seconds required to export dedicated reference audio clips')
-        parser.add_argument(
-            '--isolated_track',
-            action='append',
-            dest='_isolated_track_pairs',
-            metavar='LABEL=PATH',
-            help='Provide an isolated per-speaker audio track. May be repeated: '
-                 '--isolated_track SPEAKER_00=path/spk0.wav --isolated_track SPEAKER_01=path/spk1.wav. '
-                 'When any tracks are supplied, diarization/transcription switches to the '
-                 'isolated-tracks path (see --inner_transcription_system). Speaker labels '
-                 'flow through to the standard voices: mapping unchanged.',
-        )
-        parser.add_argument(
-            '--inner_transcription_system',
-            type=str,
-            choices=['deepgram', 'assemblyai', 'gemini'],
-            help='Transcription backend used per isolated track (default: deepgram). Ignored if no --isolated_track is provided.',
-        )
-        parser.add_argument(
-            '--project_name',
-            type=str,
-            help='Custom project name used for folder and output naming in prj/',
-        )
-
-        return parser
-
-
-def create_config_from_args(args: argparse.Namespace) -> DubbingConfig:
-    """Create and configure DubbingConfig from CLI arguments."""
-    config = DubbingConfig()
-    
-    # Load YAML config first
-    config.load_from_yaml(args.config)
-    
-    # Override with CLI arguments
-    config.load_from_cli(args)
-    
-    # Validate configuration
-    config.validate()
-    
-    # Process special parameters
-    config.process_special_parameters()
-    
-    return config
-
-
-def create_argument_parser() -> argparse.ArgumentParser:
-    """Create the main argument parser."""
-    config = DubbingConfig()
-    return config._create_parser() 

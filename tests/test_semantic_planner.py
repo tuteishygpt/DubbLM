@@ -63,27 +63,10 @@ def test_semantic_config_normalizes_all_entry_point_values():
     assert len(warnings) == 3
 
 
-def test_semantic_config_cli_and_web_settings_surface_all_fields(tmp_path):
-    from dubbing.core.config import create_argument_parser
+def test_semantic_config_web_settings_surface_all_fields(tmp_path):
     from dubbing.web import schema
     from dubbing.web.settings import SettingsService
     import yaml
-
-    args = create_argument_parser().parse_args(
-        [
-            "--input", "clip.mp4",
-            "--source_language", "en",
-            "--target_language", "be",
-            "--semantic_split_enabled", "false",
-            "--tts_preferred_segment_duration", "12.5",
-            "--tts_hard_segment_duration", "30",
-            "--semantic_split_search_window", "7.5",
-        ]
-    )
-    assert args.semantic_split_enabled is False
-    assert args.tts_preferred_segment_duration == 12.5
-    assert args.tts_hard_segment_duration == 30.0
-    assert args.semantic_split_search_window == 7.5
 
     semantic_fields = [
         "semantic_split_enabled",

@@ -251,3 +251,26 @@ def test_projects_api_update_speaker_map_endpoint(prj_fixture: Path, tmp_path: P
     detail_res = client.get("/api/projects/sample_project_1")
     assert detail_res.status_code == 200
     assert detail_res.json()["saved_config"]["speaker_map"] == {"SPEAKER_00": "John Male"}
+
+
+def test_build_project_config_excludes_legacy_voice_keys(prj_fixture: Path, tmp_path: Path):
+    art1 = prj_fixture / "sample_project_1" / "artifacts"
+    meta = {
+        "project_name": "sample_project_1",
+        "config": {
+            "reference_audio_mapping": {"SPEAKER_00": "ref.wav"},
+            "reference_text_mapping": {"SPEAKER_00": "sample"},
+            "tts_system_mapping": {"SPEAKER_00": "gemini"},
+            "voice_prompt": {"SPEAKER_00": "calm"},
+            "voice_name": {"SPEAKER_00": "Kore"},
+            "source_language": "en",
+            "target_language": "be",
+        },
+    }
+    (art1 / "project_metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    service = ProjectService(prj_fixture)
+    cfg = service._build_project_config(prj_fixture / "sample_project_1")
+    for legacy_key in ("reference_audio_mapping", "reference_text_mapping", "tts_system_mapping", "voice_prompt", "voice_name"):
+        assert legacy_key not in cfg
+
