@@ -39,6 +39,12 @@ def put_profile(
 ):
     """Save a voice profile, resolving reference_audio from the library when reference_mode='configured'."""
     profile = dict(payload.profile)
+    
+    existing = settings.list_profiles().profiles.get(speaker_id)
+    if existing and not profile.get("reference_text") and existing.get("reference_text"):
+        if profile.get("reference_audio") == existing.get("reference_audio"):
+            profile["reference_text"] = existing.get("reference_text")
+            
     if profile.get("reference_audio") and profile.get("reference_mode") not in {"speaker", "segment", "none"}:
         profile["reference_mode"] = "configured"
 

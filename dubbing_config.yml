@@ -1,85 +1,93 @@
-source_language: en
-target_language: ru
-debug_info: false
+background_volume: 0.762341
 debug_diarize_only: false
+debug_info: false
 debug_tts: true
-whisper_model: large-v3
-keep_background: true
-no_cache: false
-remove_pauses: false
-normalize_audio: true
 dubbed_volume: 1
-use_two_pass_encoding: false
-tts_system: higgs
-omnivoice_space_id: k2-fsa/OmniVoice
-segment_reference_min_duration: 1.3
-transcription_system: assemblyai
-translator_type: llm
-llm_provider: gemini
+duration: 29
+emotion_model: gemini-3.1-flash-lite
+emotion_provider: gemini
+enable_emotion_analysis: false
+gemini_transcription_model: gemini-3.1-pro-preview
+include_original_audio: false
+inner_transcription_system: assemblyai
+keep_background: true
+keyframe_buffer: 0.2
 llm_model_name: gemini-3.1-pro-preview
+llm_provider: gemini
 llm_temperature: 1
+min_pause_duration: 300
+no_cache: false
+normalize_audio: true
+omnivoice_space_id: k2-fsa/OmniVoice
 refinement_llm_provider: gemini
+refinement_max_tokens: 0
 refinement_model_name: gemini-3.5-flash
-refinement_temperature: 1
 refinement_persona: normal
+refinement_temperature: 1
+remove_pauses: false
 save_original_subtitles: false
 save_translated_subtitles: true
-voice_auto_selection: false
-include_original_audio: false
+segment_reference_min_duration: 1.3
+semantic_split_enabled: true
+semantic_split_search_window: 10
+source_language: en
 start_time: 0
-refinement_max_tokens: 0
-enable_emotion_analysis: false
-min_pause_duration: 300
-keyframe_buffer: 0.2
-background_volume: 0.762341
-gemini_transcription_model: gemini-3.1-pro-preview
+target_language: ru
+timing_max_overflow: 0.25
+timing_max_speed: 1.15
+timing_max_stretch: 1.15
+timing_short_segment_max_speed: 1.08
+timing_short_segment_threshold: 1.5
+transcription_model: best
+transcription_system: assemblyai
+translator_type: llm
+tts_hard_segment_duration: 35
+tts_preferred_segment_duration: 15
+tts_system: higgs
+use_two_pass_encoding: false
+voice_auto_selection: false
 voices:
   SPEAKER_00:
-    tts_system: gemini
     model: gemini-3.1-flash-tts-preview
+    tts_system: gemini
     voice_name: Achird
   SPEAKER_01:
-    tts_system: higgs
-    reference_mode: configured
     reference_audio: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_07\reference.mp3
+    reference_mode: configured
     reference_text: С директорами работать особо не надо, это следует понимать. Ты
       встречаешься раз в квартал по видео, там 2-3 часа, 4, иногда 5, иногда полчаса
       даже, кстати. Раз в квартал смотришь отчёт, и ты там, наверное, оказался, потому
       что у тебя уже опыта за свою жизнь столько, что тебе не надо на это тратить
       время. Эти 3 часа раз в квартал — это и есть основное время, которое ты тратишь
       на эту работу
+    tts_system: higgs
   SPEAKER_02:
-    tts_system: omnivoice
-    reference_mode: configured
     reference_audio: D:\CodexPRJ\DubbLM\speaker_reference_library\SPEAKER_03\reference.mp3
+    reference_mode: configured
     reference_text: И тут прямо какие-то Анадырь, Чита, и с этой стороны какие-то
       американские города, стоят печати аэропортов. Очень живописно выглядит, где-то
       по-русски...
-  SPEAKER_09:
-    tts_system: higgs
-    reference_mode: segment
+    tts_system: omnivoice
   SPEAKER_04:
-    tts_system: higgs
     reference_mode: speaker
+    tts_system: higgs
+  SPEAKER_09:
+    reference_mode: segment
+    tts_system: higgs
+  test_voice:
+    reference_audio: D:\CodexPRJ\DubbLM\server_data\media\local\a53ae0b7-ee19-4d1b-a1a6-6a7a2c6a570c\a53ae0b7-ee19-4d1b-a1a6-6a7a2c6a570c.mp3
+    reference_mode: configured
+    reference_text: стромкай лесвіцы на самую вяршыню вежы. Стоячы там, у бялюткай
+      начной сарочцы, яна ўскідала рукі ўгару і радасна вітала ўвесь белы свет
+    tts_system: higgs
   жыгамонт:
-    tts_system: higgs
-    reference_mode: configured
     reference_audio: D:\CodexPRJ\DubbLM\server_data\media\local\8c6edf44-e6e6-4a9c-a037-caf94990a150\8c6edf44-e6e6-4a9c-a037-caf94990a150.mp3
-  жыгамонт цмокі:
-    tts_system: higgs
     reference_mode: configured
-    reference_audio: D:\CodexPRJ\DubbLM\server_data\media\local\a53ae0b7-ee19-4d1b-a1a6-6a7a2c6a570c\media.mp3
-duration: 29
-transcription_model: best
-inner_transcription_system: assemblyai
-emotion_provider: gemini
-emotion_model: gemini-3.1-flash-lite
-timing_short_segment_threshold: 1.5
-timing_short_segment_max_speed: 1.08
-timing_max_speed: 1.15
-timing_max_stretch: 1.15
-timing_max_overflow: 0.25
-semantic_split_enabled: true
-tts_preferred_segment_duration: 15
-tts_hard_segment_duration: 35
-semantic_split_search_window: 10
+    tts_system: higgs
+  жыгамонт цмокі:
+    reference_audio: D:\CodexPRJ\DubbLM\server_data\media\local\a53ae0b7-ee19-4d1b-a1a6-6a7a2c6a570c\a53ae0b7-ee19-4d1b-a1a6-6a7a2c6a570c.mp3
+    reference_mode: configured
+    reference_text: стромкай лесвіцы на самую вяршыню вежы. Стоячы там, у бялюткай
+      начной сарочцы, яна ўскідала рукі ўгару і радасна вітала ўвесь белы свет
+    tts_system: higgs
+whisper_model: large-v3
