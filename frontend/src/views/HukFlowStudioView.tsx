@@ -47,6 +47,114 @@ interface TextDocument { revision: string; source: string; segments: Segment[] }
 
 const SPEAKER_COLOURS = ['speaker-0', 'speaker-1', 'speaker-2', 'speaker-3'] as const
 
+// ── Waveform rendering ────────────────────────────────────────────────────────
+
+/** Cache decoded waveform bar arrays by URL so we only fetch + decode each file once */
+const waveformCache = new Map<string, number[]>()
+
+/**
+ * Decodes an audio URL via Web Audio API and returns an array of `bars` RMS
+ * amplitude values (0‥1) suitable for SVG rendering.
+ */
+function useWaveform(url: string | null | undefined, bars = 80): number[] {
+  const [peaks, setPeaks] = useState<number[]>([])
+
+  useEffect(() => {
+    if (!url) { setPeaks([]); return }
+
+    // Return cached result immediately if available
+    const cached = waveformCache.get(url)
+    if (cached) { setPeaks(cached); return }
+
+    let cancelled = false
+    const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)()
+
+    fetch(url)
+      .then((r) => r.arrayBuffer())
+      .then((buf) => audioCtx.decodeAudioData(buf))
+      .then((decoded) => {
+        if (cancelled) return
+        // Mix all channels into mono
+        const channelData = decoded.getChannelData(0)
+        const blockSize = Math.floor(channelData.length / bars)
+        const result: number[] = []
+        for (let i = 0; i < bars; i++) {
+          const offset = i * blockSize
+          let sum = 0
+          for (let j = 0; j < blockSize; j++) {
+            sum += channelData[offset + j] ** 2
+          }
+          result.push(Math.sqrt(sum / blockSize))
+        }
+        // Normalise to 0‥1
+        const max = Math.max(...result, 1e-6)
+        const normalised = result.map((v) => v / max)
+        waveformCache.set(url, normalised)
+        if (!cancelled) setPeaks(normalised)
+      })
+      .catch(() => { if (!cancelled) setPeaks([]) })
+      .finally(() => { void audioCtx.close() })
+
+    return () => { cancelled = true }
+  }, [url, bars])
+
+  return peaks
+}
+
+interface SegmentWaveformProps {
+  url: string | null | undefined
+  /** SVG viewBox width (bars count) */
+  bars?: number
+}
+
+/** Renders a real audio waveform — discrete rounded vertical bars, mirrored from centre */
+function SegmentWaveform({ url, bars = 80 }: SegmentWaveformProps) {
+  const peaks = useWaveform(url, bars)
+
+  // viewBox: each bar occupies 3 units (1 bar + 2 gap) → thinner look
+  const vbW = bars * 3
+  const vbH = 20
+  const cx  = vbH / 2   // 10 — vertical centre
+  const maxH = 8.5       // max half-height
+
+  if (peaks.length === 0) {
+    // Placeholder: row of tiny dim stubs while audio is loading
+    return (
+      <svg className="waveform-svg" viewBox={`0 0 ${vbW} ${vbH}`} preserveAspectRatio="none">
+        {Array.from({ length: bars }, (_, i) => (
+          <line
+            key={i}
+            x1={i * 3 + 1.5} y1={cx - 0.8}
+            x2={i * 3 + 1.5} y2={cx + 0.8}
+            stroke="currentColor" strokeWidth="0.5" strokeLinecap="round"
+            opacity="0.25"
+          />
+        ))}
+      </svg>
+    )
+  }
+
+  return (
+    <svg className="waveform-svg" viewBox={`0 0 ${vbW} ${vbH}`} preserveAspectRatio="none">
+      {peaks.map((amp, i) => {
+        const h = Math.max(0.5, amp * maxH)
+        const x = i * 3 + 1.5   // centre x of bar (1 unit wide, 2 units gap)
+        return (
+          <line
+            key={i}
+            x1={x} y1={cx - h}
+            x2={x} y2={cx + h}
+            stroke="currentColor"
+            strokeWidth="0.5"
+            strokeLinecap="round"
+            opacity="0.85"
+          />
+        )
+      })}
+    </svg>
+  )
+}
+
 function formatTime(seconds: number): string {
   const rounded = Math.round(seconds)
   const m = Math.floor(rounded / 60)
@@ -1279,12 +1387,7 @@ export function HukFlowStudioView({
                           role="button"
                           tabIndex={-1}
                         >
-                          <svg className="waveform-svg" viewBox="0 0 100 20" preserveAspectRatio="none">
-                            <path
-                              d="M0,10 L5,4 L10,16 L15,6 L20,14 L25,8 L30,12 L35,4 L40,16 L45,10 L50,7 L55,13 L60,4 L65,16 L70,9 L75,11 L80,6 L85,14 L90,8 L95,12 L100,10"
-                              fill="none" stroke="currentColor" strokeWidth="1.5"
-                            />
-                          </svg>
+                          <SegmentWaveform url={seg.audio?.url ?? null} />
                           {isActiveClip && (
                             <span className="clip-subtitle">
                               {seg.translation || seg.text}
