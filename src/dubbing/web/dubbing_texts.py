@@ -702,16 +702,25 @@ class DubbingTextService:
         chunks_dir = Path(str(DubbingTextService._config_get(config, "audio_chunks_dir", "") or ""))
 
         for idx, seg in enumerate(segments):
-            candidates = [
-                chunks_dir / f"{idx}.wav",
-                su_chunks_dir / f"timed_{idx}.wav",
-                su_chunks_dir / f"measure_{idx}.wav",
-                su_chunks_dir / f"tempo_{idx}.wav",
-            ]
-            for cand in candidates:
-                if cand.is_file():
-                    seg["synthesized_speech_file"] = str(cand)
-                    break
+            raw_chunk = chunks_dir / f"{idx}.wav"
+            tempo_chunk = su_chunks_dir / f"tempo_{idx}.wav"
+            timed_chunk = su_chunks_dir / f"timed_{idx}.wav"
+            measure_chunk = su_chunks_dir / f"measure_{idx}.wav"
+
+            selected = None
+            if tempo_chunk.is_file():
+                if not raw_chunk.is_file() or tempo_chunk.stat().st_mtime >= raw_chunk.stat().st_mtime:
+                    selected = tempo_chunk
+            if selected is None and timed_chunk.is_file():
+                if not raw_chunk.is_file() or timed_chunk.stat().st_mtime >= raw_chunk.stat().st_mtime:
+                    selected = timed_chunk
+            if selected is None and raw_chunk.is_file():
+                selected = raw_chunk
+            if selected is None and measure_chunk.is_file():
+                selected = measure_chunk
+
+            if selected is not None:
+                seg["synthesized_speech_file"] = str(selected)
 
     @staticmethod
     def _seed_from_transcription(config: object) -> list[dict[str, Any]]:

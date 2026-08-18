@@ -67,7 +67,13 @@ function useWaveform(url: string | null | undefined, bars = 80): number[] {
     if (cached) { setPeaks(cached); return }
 
     let cancelled = false
-    const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)()
+    const AudioContextClass =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!AudioContextClass) {
+      return
+    }
+    const audioCtx = new AudioContextClass()
 
     fetch(url)
       .then((r) => r.arrayBuffer())
@@ -457,15 +463,38 @@ export function HukFlowStudioView({
   useEffect(() => {
     setAudioDurations({})
     if (!selectedJobId) return
+    const AudioContextClass =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    
     segments.forEach((seg) => {
       if (!seg.audio?.url) return
-      const tempAudio = new Audio(seg.audio.url)
-      const onLoaded = () => {
-        if (Number.isFinite(tempAudio.duration) && tempAudio.duration > 0) {
-          setAudioDurations((prev) => ({ ...prev, [seg.segment_id]: tempAudio.duration }))
+      
+      if (AudioContextClass) {
+        const ctx = new AudioContextClass()
+        fetch(seg.audio.url)
+          .then((r) => r.arrayBuffer())
+          .then((buf) => ctx.decodeAudioData(buf))
+          .then((decoded) => {
+            if (decoded.duration > 0) {
+              setAudioDurations((prev) => ({ ...prev, [seg.segment_id]: decoded.duration }))
+            }
+          })
+          .catch((err) => console.warn('Failed to decode audio duration:', err))
+      } else {
+        // Fallback for environments without AudioContext
+        const tempAudio = new Audio(seg.audio.url)
+        const onLoaded = () => {
+          if (Number.isFinite(tempAudio.duration) && tempAudio.duration > 0) {
+            setAudioDurations((prev) => ({ ...prev, [seg.segment_id]: tempAudio.duration }))
+          }
+        }
+        if (tempAudio.readyState >= 1) {
+          onLoaded()
+        } else {
+          tempAudio.addEventListener('loadedmetadata', onLoaded)
         }
       }
-      tempAudio.addEventListener('loadedmetadata', onLoaded)
     })
   }, [segments, selectedJobId])
 

@@ -678,6 +678,16 @@ def resynthesize_one_segment(
             os.remove(output_path)
     except OSError:
         pass
+    if hasattr(facade, "su_audio_chunks_dir") and facade.su_audio_chunks_dir is not None:
+        for stale_name in (
+            f"tempo_{segment_index}.wav",
+            f"tempo_in_{segment_index}.wav",
+            f"timed_{segment_index}.wav",
+        ):
+            try:
+                (facade.su_audio_chunks_dir / stale_name).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     max_attempts = 3
     last_error: Optional[Exception] = None
