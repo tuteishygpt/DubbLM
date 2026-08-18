@@ -208,6 +208,19 @@ def test_job_materialization_preserves_sanitized_original_basename_and_stem(tmp_
     assert materialized.path.resolve().is_relative_to(tmp_path.resolve())
 
 
+def test_save_preserves_unicode_and_cyrillic_audio_filenames(tmp_path):
+    store = FileMediaStore(tmp_path, probe=lambda *_: True)
+    saved = store.save("alice", "жыгамонт_цмокі.mp3", BytesIO(b"audio"))
+
+    assert saved.name == "жыгамонт_цмокі.mp3"
+    assert saved.path.name == "жыгамонт_цмокі.mp3"
+    assert saved.path.is_file()
+
+    retrieved = store.get("alice", saved.id)
+    assert retrieved.name == "жыгамонт_цмокі.mp3"
+    assert retrieved.path.name == "жыгамонт_цмокі.mp3"
+
+
 def test_materialization_rejects_traversal_job_reference(tmp_path):
     store = FileMediaStore(tmp_path, probe=lambda *_: True)
     saved = store.save("alice", "clip.mp4", BytesIO(b"video"))

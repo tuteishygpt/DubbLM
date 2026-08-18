@@ -39,17 +39,47 @@ def put_profile(
 ):
     """Save a voice profile, resolving reference_audio from the library when reference_mode='configured'."""
     profile = dict(payload.profile)
+    if profile.get("reference_audio") and profile.get("reference_mode") not in {"speaker", "segment", "none"}:
+        profile["reference_mode"] = "configured"
+
     if profile.get("reference_mode") == "configured" and profile.get("reference_audio"):
-        ref_name = profile["reference_audio"]
+        ref_name = str(profile["reference_audio"]).strip()
         snapshot = references.list(owner_id=user.id)
+        norm_ref = ref_name.replace("_", " ").lower()
         entry = next((e for e in snapshot.entries if e.speaker_id == ref_name), None)
         if entry is None:
-            raise HTTPException(status_code=422, detail=f"Reference not found in library: {ref_name!r}")
-        record = media.get(owner_id=user.id, media_id=entry.audio.id)
-        # Replace the symbolic library name with the real filesystem path
-        profile["reference_audio"] = str(getattr(record, "path", record) or "").strip()
-        if not profile["reference_audio"]:
-            raise HTTPException(status_code=422, detail="Reference audio has no resolvable path.")
+            entry = next(
+                (
+                    e
+                    for e in snapshot.entries
+                    if e.speaker_id.replace("_", " ").lower() == norm_ref
+                ),
+                None,
+            )
+        if entry is None:
+            entry = next(
+                (
+                    e
+                    for e in snapshot.entries
+                    if e.audio.id == ref_name
+                    or e.audio.url == ref_name
+                    or e.audio.name == ref_name
+                ),
+                None,
+            )
+        if entry is not None:
+            record = media.get(owner_id=user.id, media_id=entry.audio.id)
+            # Replace the symbolic library name with the real filesystem path
+            profile["reference_audio"] = str(getattr(record, "path", record) or "").strip()
+            if not profile["reference_audio"]:
+                raise HTTPException(status_code=422, detail="Reference audio has no resolvable path.")
+            if not profile.get("reference_text") and entry.reference_text:
+                profile["reference_text"] = entry.reference_text
+        else:
+            from pathlib import Path
+
+            if not Path(ref_name).is_file():
+                raise HTTPException(status_code=422, detail=f"Reference not found in library: {ref_name!r}")
     return public(settings.put_profile(speaker_id, profile, revision=payload.revision))
 
 

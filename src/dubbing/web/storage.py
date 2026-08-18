@@ -18,7 +18,7 @@ DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024**3
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi"})
 AUDIO_EXTENSIONS = frozenset({".wav", ".mp3", ".m4a", ".flac", ".ogg"})
 _SAFE_OWNER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
-_UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
+_UNSAFE_FILENAME = re.compile(r"[^\w.-]+", re.UNICODE)
 
 
 class MediaStoreError(Exception):
@@ -114,7 +114,7 @@ class FileMediaStore:
             raise MediaValidationError("A readable upload stream is required.")
         media_id = str(uuid4())
         media_dir = self._root / "media" / owner / media_id
-        media_path = media_dir / f"{media_id}{suffix.lower()}"
+        media_path = media_dir / safe_name
         metadata_path = media_dir / "metadata.json"
         size = 0
         try:

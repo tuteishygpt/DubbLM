@@ -65,6 +65,10 @@ voices:
     tts_system: higgs
     reference_mode: configured
     reference_audio: D:\CodexPRJ\DubbLM\server_data\media\local\8c6edf44-e6e6-4a9c-a037-caf94990a150\8c6edf44-e6e6-4a9c-a037-caf94990a150.mp3
+  жыгамонт цмокі:
+    tts_system: higgs
+    reference_mode: configured
+    reference_audio: D:\CodexPRJ\DubbLM\server_data\media\local\a53ae0b7-ee19-4d1b-a1a6-6a7a2c6a570c\media.mp3
 duration: 29
 transcription_model: best
 inner_transcription_system: assemblyai

@@ -22,6 +22,22 @@ interface VoiceOptions {
 
 const emptyProfile: VoiceProfile = { tts_system: '' }
 
+function findMatchingReference(savedRef: string | undefined, refs: ReferenceEntry[]): string {
+  if (!savedRef || refs.length === 0) return ''
+  const normSaved = savedRef.replace(/_/g, ' ').trim().toLowerCase()
+  const exact = refs.find(e => e.speaker_id === savedRef)
+  if (exact) return exact.speaker_id
+  const byNorm = refs.find(e => e.speaker_id.replace(/_/g, ' ').trim().toLowerCase() === normSaved)
+  if (byNorm) return byNorm.speaker_id
+  const byUrl = refs.find(e => e.audio.url === savedRef)
+  if (byUrl) return byUrl.speaker_id
+  const byId = refs.find(e => e.audio.id && savedRef.includes(e.audio.id))
+  if (byId) return byId.speaker_id
+  const byName = refs.find(e => e.audio.name && (savedRef === e.audio.name || savedRef.endsWith('/' + e.audio.name) || savedRef.endsWith('\\' + e.audio.name)))
+  if (byName) return byName.speaker_id
+  return ''
+}
+
 export function VoicesView({ client }: { client: ApiClient }) {
   const [profiles, setProfiles] = useState<Record<string, VoiceProfile>>({})
   const [profilesRevision, setProfilesRevision] = useState('')
@@ -52,20 +68,18 @@ export function VoicesView({ client }: { client: ApiClient }) {
     ]).then(([profileData, referenceData, optionData]) => {
       setProfiles(profileData.profiles ?? {})
       setProfilesRevision(profileData.revision)
-      setReferences(Array.isArray(referenceData.entries) ? referenceData.entries : [])
+      const entries = Array.isArray(referenceData.entries) ? referenceData.entries : []
+      setReferences(entries)
       setReferencesRevision(referenceData.revision)
       setOptions(optionData)
       const first = Object.entries(profileData.profiles ?? {})[0]
       if (first) {
         setProfileId(first[0]); setProfile(first[1])
-        // pre-select the reference that's saved in the profile, or fall back to first entry
         const savedRef = first[1].reference_audio
-        const entries = referenceData.entries ?? []
-        const matched = savedRef ? entries.find(e => e.speaker_id === savedRef) : null
-        setSelectedReference(matched?.speaker_id ?? entries[0]?.speaker_id ?? '')
+        const matched = findMatchingReference(savedRef, entries)
+        setSelectedReference(matched || (first[1].reference_mode === 'configured' ? entries[0]?.speaker_id ?? '' : ''))
       } else {
-        const firstReference = referenceData.entries?.[0]
-        if (firstReference) setSelectedReference(firstReference.speaker_id)
+        setSelectedReference('')
       }
     }).catch(showError)
   }, [client])
@@ -76,14 +90,18 @@ export function VoicesView({ client }: { client: ApiClient }) {
     setProfileId(id); setProfile(p)
     // sync selectedReference with the profile's saved reference_audio
     const savedRef = p.reference_audio
-    if (savedRef && references.some(e => e.speaker_id === savedRef)) {
-      setSelectedReference(savedRef)
-    } else if (references.length > 0) {
+    const matched = findMatchingReference(savedRef, references)
+    if (matched) {
+      setSelectedReference(matched)
+    } else if (p.reference_mode === 'configured' && references.length > 0) {
       setSelectedReference(references[0].speaker_id)
+    } else {
+      setSelectedReference('')
     }
   }
   function startNewProfile() {
     setError('')
+    setSelectedReference('')
     const count = Object.keys(profiles).length
     let nextId = `SPEAKER_${String(count).padStart(2, '0')}`
     let i = count
@@ -112,8 +130,8 @@ export function VoicesView({ client }: { client: ApiClient }) {
       tts_system: provider,
       model: models[0] || undefined,
       voice_name: voices[0] || undefined,
-      reference_mode: cap === 'required' ? (profile.reference_mode && profile.reference_mode !== 'none' ? profile.reference_mode : 'speaker') : cap === 'optional' ? (profile.reference_mode ?? 'none') : undefined,
-      reference_audio: cap !== 'unsupported' ? profile.reference_audio : undefined,
+      reference_mode: cap === 'required' ? (profile.reference_mode && profile.reference_mode !== 'none' ? profile.reference_mode : (selectedReference ? 'configured' : 'speaker')) : cap === 'optional' ? (profile.reference_mode ?? (selectedReference ? 'configured' : 'none')) : undefined,
+      reference_audio: cap !== 'unsupported' ? (selectedReference || profile.reference_audio) : undefined,
     })
   }
 
@@ -153,10 +171,11 @@ export function VoicesView({ client }: { client: ApiClient }) {
       voice_name: profile.voice_name || undefined,
     }
     if (cap !== 'unsupported') {
-      payloadProfile.reference_mode = profile.reference_mode || (cap === 'required' ? 'speaker' : 'none')
-      if (payloadProfile.reference_mode === 'configured') {
-        // selectedReference is the speaker_id chosen in the "Reference Audio" dropdown.
-        // Fall back to whatever was previously stored in the profile.
+      const mode = selectedReference
+        ? 'configured'
+        : (profile.reference_mode || (cap === 'required' ? 'speaker' : 'none'))
+      payloadProfile.reference_mode = mode
+      if (mode === 'configured') {
         const refAudio = selectedReference || profile.reference_audio
         if (refAudio) payloadProfile.reference_audio = refAudio
       }
@@ -274,16 +293,38 @@ export function VoicesView({ client }: { client: ApiClient }) {
             {referenceCapability !== 'unsupported' && (
               <label className="voices-label">
                 <span className="voices-label-text">Reference Mode</span>
-                <select value={profile.reference_mode ?? (referenceCapability === 'required' ? 'speaker' : 'none')} onChange={(e) => setProfile({ ...profile, reference_mode: e.target.value })}>
+                <select
+                  value={profile.reference_mode ?? (selectedReference ? 'configured' : (referenceCapability === 'required' ? 'speaker' : 'none'))}
+                  onChange={(e) => {
+                    const mode = e.target.value
+                    setProfile({ ...profile, reference_mode: mode })
+                    if (mode === 'configured' && !selectedReference && references.length > 0) {
+                      setSelectedReference(references[0].speaker_id)
+                    } else if (mode !== 'configured') {
+                      setSelectedReference('')
+                    }
+                  }}
+                >
                   {referenceModes.map(opt)}
                 </select>
               </label>
             )}
             <label className="voices-label">
               <span className="voices-label-text">Reference Audio</span>
-              <select value={selectedReference} onChange={(e) => setSelectedReference(e.target.value)}>
+              <select
+                value={selectedReference}
+                onChange={(e) => {
+                  const ref = e.target.value
+                  setSelectedReference(ref)
+                  if (ref) {
+                    setProfile((prev) => ({ ...prev, reference_mode: 'configured', reference_audio: ref }))
+                  } else {
+                    setProfile((prev) => ({ ...prev, reference_mode: referenceCapability === 'required' ? 'speaker' : 'none', reference_audio: undefined }))
+                  }
+                }}
+              >
                 <option value="">None</option>
-                {references.map((item) => <option key={item.speaker_id} value={item.speaker_id}>{item.audio.name}</option>)}
+                {references.map((item) => <option key={item.speaker_id} value={item.speaker_id}>{item.speaker_id}</option>)}
               </select>
             </label>
           </div>

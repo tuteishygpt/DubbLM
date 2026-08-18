@@ -73,6 +73,32 @@ describe('VoicesView', () => {
       profile: { tts_system: 'higgs', reference_mode: 'speaker' },
     })
   })
+
+  it('renders reference audio options by reference name and saves configured reference audio', async () => {
+    const user = userEvent.setup()
+    const client = api()
+    render(<VoicesView client={client} />)
+    expect(await screen.findByLabelText(/Profile name/i)).toHaveValue('SPEAKER_00')
+
+    await user.selectOptions(screen.getByLabelText('Provider'), 'higgs')
+    expect(screen.getByLabelText('Reference Mode')).toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Reference Mode'), 'configured')
+
+    const refSelect = screen.getByLabelText('Reference Audio')
+    expect(refSelect).toBeInTheDocument()
+    // Should display Reference Name ('Narrator'), not filename ('sample.wav')
+    expect(screen.getByRole('option', { name: 'Narrator' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'sample.wav' })).not.toBeInTheDocument()
+
+    await user.selectOptions(refSelect, 'Narrator')
+    await user.click(screen.getByRole('button', { name: /Save profile/i }))
+
+    expect(client.put).toHaveBeenCalledWith('/api/voice-profiles/SPEAKER_00', {
+      revision: 'settings-1',
+      profile: { tts_system: 'higgs', reference_mode: 'configured', reference_audio: 'Narrator' },
+    })
+  })
 })
+
 
 
