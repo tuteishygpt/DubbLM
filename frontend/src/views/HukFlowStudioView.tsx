@@ -471,13 +471,18 @@ export function HukFlowStudioView({
 
   // ── inform parent about active media context for export ───────────────────
   useEffect(() => {
+    const resolvedProjectName =
+      selectedProjectName ||
+      projects.find((p) => p.job_id === selectedJobId)?.name ||
+      jobs.find((j) => j.id === selectedJobId)?.project_name ||
+      null
     onActiveMediaChange?.({
       jobId: selectedJobId || null,
-      projectName: selectedProjectName || null,
+      projectName: resolvedProjectName,
       videoSrc,
       files: musicFiles,
     })
-  }, [selectedJobId, selectedProjectName, videoSrc, musicFiles, onActiveMediaChange])
+  }, [selectedJobId, selectedProjectName, projects, jobs, videoSrc, musicFiles, onActiveMediaChange])
 
   // ── edit translation ───────────────────────────────────────────────────────
   const handleTranslationChange = (id: string, value: string) => {
@@ -799,11 +804,11 @@ export function HukFlowStudioView({
         await handleSave()
       }
 
-      let projectName = selectedProjectName
-      if (!projectName && selectedJobId) {
-        const foundProj = projects.find((p) => p.job_id === selectedJobId)
-        if (foundProj) projectName = foundProj.name
-      }
+      const projectName =
+        selectedProjectName ||
+        projects.find((p) => p.job_id === selectedJobId)?.name ||
+        jobs.find((j) => j.id === selectedJobId)?.project_name ||
+        ''
 
       if (projectName) {
         const res = await client.post<{ project_name: string; job: Job }>(
