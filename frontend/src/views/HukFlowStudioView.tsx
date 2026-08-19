@@ -6,27 +6,18 @@ import { SchemaField } from '../components/SchemaField'
 // ── API types ─────────────────────────────────────────────────────────────
 import type { Job, VoiceProfile, ProfilesSnapshot, ProjectSummary, JobFile, SegmentAudio, Segment, TextDocument } from '../types/models'
 
-const SPEAKER_COLOURS = ['speaker-0', 'speaker-1', 'speaker-2', 'speaker-3'] as const
 
 
 
+import { SegmentItem } from '../components/studio/SegmentItem'
 import { SegmentWaveform } from '../components/studio/SegmentWaveform'
+import { SettingsModal } from '../components/studio/SettingsModal'
+import { TimelineCanvas } from '../components/studio/TimelineCanvas'
+import { VideoPlayerCanvas } from '../components/studio/VideoPlayerCanvas'
 
-import { formatTime, formatTimecode, parseTimeInput } from '../utils/time'
+import { parseTimeInput } from '../utils/time'
 
-function normalizeOptions(value: unknown): SelectOption[] {
-  return Array.isArray(value) ? value.map((item) => typeof item === 'string' ? { value: item, label: item } : item as SelectOption) : []
-}
 
-function getFieldSection(fieldName: string): string {
-  if (fieldName.includes('llm') || fieldName.includes('translator') || fieldName.includes('refinement') || fieldName === 'translation_prompt_prefix' || fieldName === 'glossary') return 'LLM & Translation';
-  if (fieldName.includes('transcription')) return 'Transcription & Diarization';
-  if (fieldName.includes('tts') || fieldName.includes('voice') || fieldName === 'segment_reference_min_duration') return 'Voice Generation (TTS)';
-  if (fieldName.includes('emotion')) return 'Emotions & Context';
-  if (fieldName.includes('timing') || fieldName.includes('volume') || fieldName.includes('pause') || fieldName.includes('semantic_split') || fieldName === 'keyframe_buffer' || fieldName === 'use_two_pass_encoding' || fieldName === 'keep_original_audio_ranges') return 'Timing & Mixing';
-  if (fieldName.includes('debug') || fieldName.includes('watermark')) return 'Debug & Watermarks';
-  return 'General Execution';
-}
 
 type NavigateView = 'HukFlow Studio' | 'Workflow' | 'Jobs' | 'Settings' | 'Voice Profiles' | 'Dubbing Texts'
 
@@ -619,33 +610,7 @@ export function HukFlowStudioView({
   const rawDuration = videoDuration > 0 ? videoDuration : maxTime > 0 ? maxTime : 60
   const duration = Math.max(0.1, rawDuration)
 
-  // Zoom scale for voice and audio tracks (100% to 460% width)
-  const trackWidthPercent = Math.max(100, Math.round(100 + (zoomLevel - 10) * 4))
-  const rulerTicksCount = Math.max(5, Math.round(5 * (trackWidthPercent / 100)))
 
-  // Auto-scroll timeline to follow playhead during playback when zoomed
-  useEffect(() => {
-    if (!timelineCanvasRef.current || duration <= 0) return
-    const el = timelineCanvasRef.current
-    if (el.scrollWidth > el.clientWidth && isPlaying) {
-      const playheadX = (currentTime / duration) * el.scrollWidth
-      const target = playheadX - el.clientWidth / 2
-      el.scrollLeft = Math.max(0, target)
-    }
-  }, [currentTime, duration, isPlaying])
-
-  const clipStyle = (s: Segment) => {
-    const start = Math.min(Math.max(0, s.start), duration)
-    // Use actual dubbed audio duration when available; fall back to original segment length
-    const actualLen = audioDurations[s.segment_id]
-    const clipLen = actualLen != null
-      ? Math.min(actualLen, duration - start)
-      : Math.min(Math.max(0, s.end - s.start), duration - start)
-    return {
-      left: `${(start / duration) * 100}%`,
-      width: `${Math.max(0.5, (clipLen / duration) * 100)}%`,
-    }
-  }
 
   const seekToTime = (targetTime: number) => {
     const newTime = Math.max(0, Math.min(duration, targetTime))
@@ -955,190 +920,31 @@ export function HukFlowStudioView({
             {!isLoading &&
               visibleSegments.map((seg, idx) => {
                 const isActive = seg.segment_id === (currentActive?.segment_id ?? '')
-                const hasAudio = seg.audio !== null
                 const speakerIdx = displaySpeakers.indexOf(seg.speaker)
-                const speakerSlot = SPEAKER_COLOURS[speakerIdx % 4]
                 const isSourceExpanded = Boolean(expandedSources[seg.segment_id])
-                // Calculate dynamic row count based on text length and newlines
-                const explicitLines = seg.translation.split('\n').length
-                const estimatedLines = Math.ceil((seg.translation.length || 1) / 75)
-                const dynamicRows = Math.max(1, Math.min(8, Math.max(explicitLines, estimatedLines)))
 
                 return (
-                  <div
+                  <SegmentItem
                     key={seg.segment_id}
-                    id={`transcript-card-${seg.segment_id}`}
-                    onClick={() => handleSelectSegment(seg)}
-                    className={`transcript-card ${isActive ? 'active-card' : 'inactive-card'}`}
-                    data-testid={`transcript-card-${seg.segment_id}`}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSelectSegment(seg)}
-                  >
-                    <div className={`card-accent-line ${speakerSlot}`}></div>
-
-                    <div className="card-header">
-                      <div className="speaker-info">
-                        <span className={`speaker-dot speaker-dot-${speakerIdx % 4}`}></span>
-                        <select
-                          className="speaker-name-select"
-                          value={seg.speaker}
-                          onChange={(e) => { e.stopPropagation(); handleSpeakerChange(seg.segment_id, e.target.value) }}
-                          onClick={(e) => e.stopPropagation()}
-                          title="Change speaker"
-                        >
-                          {displaySpeakers.map((sp) => (
-                            <option key={sp} value={sp}>{sp}</option>
-                          ))}
-                        </select>
-                        <span className="time-badge editable-time-badge" onClick={(e) => e.stopPropagation()}>
-                          <input
-                            className="time-input"
-                            defaultValue={formatTime(seg.start)}
-                            key={`start-${seg.segment_id}-${seg.start}`}
-                            onBlur={(e) => {
-                              const v = parseTimeInput(e.target.value)
-                              if (v !== null) handleTimestampChange(seg.segment_id, 'start', v)
-                              else e.target.value = formatTime(seg.start)
-                            }}
-                            onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
-                            title="Start time (MM:SS)"
-                          />
-                          <span className="time-separator"> – </span>
-                          <input
-                            className="time-input"
-                            defaultValue={formatTime(seg.end)}
-                            key={`end-${seg.segment_id}-${seg.end}`}
-                            onBlur={(e) => {
-                              const v = parseTimeInput(e.target.value)
-                              if (v !== null) handleTimestampChange(seg.segment_id, 'end', v)
-                              else e.target.value = formatTime(seg.end)
-                            }}
-                            onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
-                            title="End time (MM:SS)"
-                          />
-                        </span>
-                        {visibleSegments.length > 1 && (
-                          <span className="segment-stepper-label">
-                            ({idx + 1}/{visibleSegments.length})
-                          </span>
-                        )}
-                        <span className="dubbed-tag">DUBBED (BE)</span>
-                        <span className="text-count-badge">{seg.translation.length} chars</span>
-                      </div>
-
-                      <div className="card-status-row">
-                        {/* Source text toggle icon button */}
-                        <button
-                          type="button"
-                          className={`source-toggle-btn ${isSourceExpanded ? 'active' : ''}`}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            toggleSource(seg.segment_id)
-                          }}
-                          title={`Source: ${seg.text}`}
-                          aria-label={`View source text for ${seg.speaker}`}
-                        >
-                          <span className="material-symbols-outlined source-icon">menu_book</span>
-                          <span className="source-toggle-label">EN</span>
-                        </button>
-
-                        {hasAudio ? (
-                          <span className="material-symbols-outlined status-completed" title="Audio ready">check_circle</span>
-                        ) : (
-                          <span className="material-symbols-outlined status-pending" title="Audio missing">pending</span>
-                        )}
-
-                        {seg.audio && (
-                          <button
-                            type="button"
-                            className={`audio-play-btn ${playingAudioSegmentId === seg.segment_id ? 'playing' : ''}`}
-                            title={playingAudioSegmentId === seg.segment_id ? `Stop ${seg.audio.name}` : `Play ${seg.audio.name}`}
-                            data-testid={`play-btn-${seg.segment_id}`}
-                            aria-label={playingAudioSegmentId === seg.segment_id ? `Stop audio for ${seg.speaker}` : `Play audio for ${seg.speaker}`}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              handlePlaySegmentAudio(seg.segment_id, seg.audio!.url)
-                            }}
-                          >
-                            <span className="material-symbols-outlined">
-                              {playingAudioSegmentId === seg.segment_id ? 'pause_circle' : 'play_circle'}
-                            </span>
-                          </button>
-                        )}
-
-                        <button
-                          type="button"
-                          className={`regenerate-btn ${regeneratingId === seg.segment_id ? 'spinning' : ''}`}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            void handleRegenerateAudio(seg.segment_id)
-                          }}
-                          title={`Regenerate Audio for ${seg.speaker}`}
-                          data-testid={`regenerate-btn-${seg.segment_id}`}
-                          aria-label={`Regenerate Audio for ${seg.speaker}`}
-                          disabled={Boolean(regeneratingId)}
-                        >
-                          <span className="material-symbols-outlined">autorenew</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          className="delete-segment-btn"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleDeleteSegment(seg.segment_id)
-                          }}
-                          title={`Delete segment ${seg.speaker}`}
-                          data-testid={`delete-btn-${seg.segment_id}`}
-                          aria-label={`Delete segment ${seg.speaker}`}
-                        >
-                          <span className="material-symbols-outlined">delete</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Expanded Source Text Drawer */}
-                    {isSourceExpanded && (
-                      <div className="source-drawer" onClick={(e) => e.stopPropagation()}>
-                        <div className="source-drawer-header">
-                          <span className="col-label">Source ({seg.speaker})</span>
-                          <button
-                            type="button"
-                            className="icon-btn close-source-btn"
-                            onClick={() => toggleSource(seg.segment_id)}
-                            title="Hide source text"
-                          >
-                            <span className="material-symbols-outlined">close</span>
-                          </button>
-                        </div>
-                        <textarea
-                          className={`source-text-textarea source-text-${speakerSlot.replace('speaker-', '')}`}
-                          value={seg.text}
-                          onChange={(e) => handleSourceTextChange(seg.segment_id, e.target.value)}
-                          rows={2}
-                          aria-label={`Source text for ${seg.speaker}`}
-                        />
-                      </div>
-                    )}
-
-                    {/* Dubbed Editor — full width with dynamic height */}
-                    <div className="editable-dubbed-wrapper">
-                      <textarea
-                        className="dubbed-textarea"
-                        value={seg.synthesized_text || seg.translation}
-                        onChange={(e) => handleTranslationChange(seg.segment_id, e.target.value)}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          handleSelectSegment(seg)
-                        }}
-                        onFocus={() => handleSelectSegment(seg)}
-                        rows={dynamicRows}
-                        aria-label={`Dubbed text ${seg.speaker}`}
-                        placeholder="Dubbed text in Belarusian..."
-                      />
-                    </div>
-                  </div>
+                    segment={seg}
+                    isActive={isActive}
+                    speakerIdx={speakerIdx}
+                    isSourceExpanded={isSourceExpanded}
+                    displaySpeakers={displaySpeakers}
+                    playingAudioSegmentId={playingAudioSegmentId}
+                    regeneratingId={regeneratingId}
+                    segmentIndex={idx}
+                    totalSegments={visibleSegments.length}
+                    onSelect={handleSelectSegment}
+                    onSpeakerChange={handleSpeakerChange}
+                    onTimestampChange={handleTimestampChange}
+                    onSourceTextChange={handleSourceTextChange}
+                    onTranslationChange={handleTranslationChange}
+                    onToggleSource={toggleSource}
+                    onPlayAudio={handlePlaySegmentAudio}
+                    onRegenerateAudio={handleRegenerateAudio}
+                    onDelete={handleDeleteSegment}
+                  />
                 )
               })}
           </div>
@@ -1147,133 +953,23 @@ export function HukFlowStudioView({
         {/* RIGHT PANE: Video Player + Voice Assignment ────────────────────── */}
         <div className="studio-right-pane">
 
-          <div className="video-preview-wrapper">
-            <div className="video-canvas">
-              <video
-                ref={videoRef}
-                src={videoSrc}
-                className="video-poster"
-                onTimeUpdate={() => {
-                  if (videoRef.current) setCurrentTime(videoRef.current.currentTime)
-                }}
-                onSeeking={() => {
-                  if (videoRef.current) setCurrentTime(videoRef.current.currentTime)
-                }}
-                onSeeked={() => {
-                  if (videoRef.current) setCurrentTime(videoRef.current.currentTime)
-                }}
-                onLoadedMetadata={() => {
-                  if (videoRef.current && Number.isFinite(videoRef.current.duration) && videoRef.current.duration > 0) {
-                    setVideoDuration(videoRef.current.duration)
-                  }
-                }}
-                onPause={() => {
-                  if (videoDuration > 0 && currentTime < videoDuration - 0.3) {
-                    setIsPlaying(false)
-                  } else if (videoDuration <= 0 && currentTime < duration - 0.3) {
-                    setIsPlaying(false)
-                  }
-                }}
-                onClick={togglePlayPause}
-              />
-
-              <div className="subtitle-overlay">
-                {liveSubSegment && (
-                  <span>
-                    {liveSubSegment.translation || liveSubSegment.text}
-                  </span>
-                )}
-              </div>
-
-              {/* Overlay transport controls */}
-              <div className="player-controls-bar">
-                <div className="timecode-display">
-                  <span>{formatTimecode(currentTime)}</span>
-                  <span>{formatTimecode(duration)}</span>
-                </div>
-
-                <div className="player-scrubber" onClick={handleScrubberClick}>
-                  <div className="scrubber-track">
-                    <div
-                      className="scrubber-progress"
-                      style={{
-                        width: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
-                      }}
-                    ></div>
-                    <div
-                      className="scrubber-handle"
-                      style={{
-                        left: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
-                      }}
-                    ></div>
-                  </div>
-                </div>
-
-                <div className="transport-buttons">
-                  <button
-                    type="button"
-                    className="transport-btn"
-                    title="Skip Previous"
-                    onClick={() => {
-                      const idx = displaySegments.findIndex((s) => s.segment_id === currentActive?.segment_id)
-                      if (idx > 0) handleSelectSegment(displaySegments[idx - 1])
-                    }}
-                  >
-                    <span className="material-symbols-outlined">skip_previous</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="transport-btn"
-                    title="Fast Rewind -5s"
-                    onClick={() => {
-                      if (videoRef.current) {
-                        const newTime = Math.max(0, videoRef.current.currentTime - 5)
-                        videoRef.current.currentTime = newTime
-                        setCurrentTime(newTime)
-                      }
-                    }}
-                  >
-                    <span className="material-symbols-outlined">fast_rewind</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="play-pause-btn"
-                    title={isPlaying ? 'Pause' : 'Play'}
-                    onClick={togglePlayPause}
-                  >
-                    <span className="material-symbols-outlined">
-                      {isPlaying ? 'pause' : 'play_arrow'}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="transport-btn"
-                    title="Fast Forward +5s"
-                    onClick={() => {
-                      if (videoRef.current) {
-                        const newTime = Math.min(duration, videoRef.current.currentTime + 5)
-                        videoRef.current.currentTime = newTime
-                        setCurrentTime(newTime)
-                      }
-                    }}
-                  >
-                    <span className="material-symbols-outlined">fast_forward</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="transport-btn"
-                    title="Skip Next"
-                    onClick={() => {
-                      const idx = displaySegments.findIndex((s) => s.segment_id === currentActive?.segment_id)
-                      if (idx < displaySegments.length - 1) handleSelectSegment(displaySegments[idx + 1])
-                    }}
-                  >
-                    <span className="material-symbols-outlined">skip_next</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
+          <VideoPlayerCanvas
+            videoRef={videoRef}
+            videoSrc={videoSrc}
+            currentTime={currentTime}
+            setCurrentTime={setCurrentTime}
+            duration={duration}
+            videoDuration={videoDuration}
+            setVideoDuration={setVideoDuration}
+            isPlaying={isPlaying}
+            setIsPlaying={setIsPlaying}
+            togglePlayPause={togglePlayPause}
+            liveSubSegment={liveSubSegment}
+            handleScrubberClick={handleScrubberClick}
+            displaySegments={displaySegments}
+            currentActive={currentActive}
+            handleSelectSegment={handleSelectSegment}
+          />
         </div>
       </div>
 
@@ -1310,387 +1006,74 @@ export function HukFlowStudioView({
           </button>
         </div>
 
-        {/* Timeline body */}
-        <div className="timeline-body">
-          {/* Track header column */}
-          <div className="track-headers-column">
-            <div className="ruler-corner"></div>
-            {displaySpeakers.map((speaker, idx) => (
-              <div key={speaker} className={`track-header border-speaker-${idx % 4}`}>
-                <span className="track-name" title={speaker}>
-                  V{idx + 1}: {speaker.replace('SPEAKER_', 'Spk ')}
-                </span>
-                <button
-                  type="button"
-                  className="mute-btn"
-                  onClick={() => toggleTrackMute(speaker)}
-                  title="Toggle Mute"
-                >
-                  <span className="material-symbols-outlined">
-                    {mutedTracks[speaker] ? 'volume_off' : 'volume_up'}
-                  </span>
-                </button>
-              </div>
-            ))}
-            {/* Music track */}
-            <div className="track-header border-music">
-              <span className="track-name">A1: Music</span>
-              <button type="button" className="mute-btn" onClick={() => toggleTrackMute('a1')} title="Toggle Mute">
-                <span className="material-symbols-outlined">{mutedTracks.a1 ? 'volume_off' : 'volume_up'}</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Timeline canvas with horizontal scroll & zoom */}
-          <div
-            ref={timelineCanvasRef}
-            className="timeline-tracks-canvas"
-          >
-            <div
-              className="timeline-tracks-inner"
-              style={{
-                width: `${trackWidthPercent}%`,
-                minWidth: `${trackWidthPercent}%`,
-              }}
-              onClick={(e) => {
-                if ((e.target as HTMLElement).closest('.clip-block')) return
-                const rect = e.currentTarget.getBoundingClientRect()
-                const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-                seekToTime(pct * duration)
-              }}
-            >
-              {/* Time ruler */}
-              <div className="time-ruler">
-                {Array.from({ length: rulerTicksCount }, (_, i) => (
-                  <span
-                    key={i}
-                    style={{
-                      position: 'absolute',
-                      left: `${(i / (rulerTicksCount - 1)) * 100}%`,
-                      transform: i === 0 ? 'none' : i === rulerTicksCount - 1 ? 'translateX(-100%)' : 'translateX(-50%)',
-                    }}
-                  >
-                    {formatTime((duration / (rulerTicksCount - 1)) * i)}
-                  </span>
-                ))}
-              </div>
-
-              {/* Playhead at video currentTime */}
-              <div
-                className="timeline-playhead"
-                style={{
-                  left: duration > 0 ? `${(currentTime / duration) * 100}%` : '0%',
-                }}
-              >
-                <div className="playhead-head"></div>
-              </div>
-
-              {/* Speaker track rows from real segments */}
-              {displaySpeakers.map((speaker, idx) => {
-                const speakerSegs = displaySegments.filter((s) => s.speaker === speaker)
-                return (
-                  <div key={speaker} className="track-row">
-                    {speakerSegs.map((seg) => {
-                      const isActiveClip = seg.segment_id === (currentActive?.segment_id ?? '')
-                      const clipClass = isActiveClip
-                        ? `clip-block primary-clip${seg.audio === null ? ' ai-shimmer' : ''}`
-                        : `clip-block speaker-clip-${idx % 4}`
-                      return (
-                        <div
-                          key={seg.segment_id}
-                          className={clipClass}
-                          style={clipStyle(seg)}
-                          title={seg.translation || seg.text}
-                          onClick={() => handleSelectSegment(seg)}
-                          role="button"
-                          tabIndex={-1}
-                        >
-                          <SegmentWaveform url={seg.audio?.url ?? null} />
-                          {isActiveClip && (
-                            <span className="clip-subtitle">
-                              {seg.translation || seg.text}
-                            </span>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-                )
-              })}
-
-              {/* Music track row */}
-              <div className="track-row">
-                {musicFiles.length > 0 ? (
-                  musicFiles.map((m) => {
-                    const audioDur = backgroundDurations[m.id]
-                    const widthPct = audioDur && duration > 0 ? Math.min(100, (audioDur / duration) * 100) : 100
-                    return (
-                      <div
-                        key={m.id}
-                        className="clip-block music-clip"
-                        style={{ left: '0%', width: `${widthPct}%` }}
-                        title={`${m.name}${audioDur ? ` (${formatTime(audioDur)})` : ''}`}
-                      >
-                        <svg className="waveform-svg" viewBox="0 0 200 20" preserveAspectRatio="none">
-                          <path d="M0,10 Q10,5 20,10 T40,10 T60,10 T80,10 T100,10 T120,10 T140,10 T160,10 T180,10 T200,10" fill="none" stroke="currentColor" strokeWidth="1" />
-                        </svg>
-                        <span className="clip-label">{m.name}</span>
-                      </div>
-                    )
-                  })
-                ) : (
-                  <div className="clip-block music-clip" style={{ left: '0%', width: '100%' }}>
-                    <svg className="waveform-svg" viewBox="0 0 200 20" preserveAspectRatio="none">
-                      <path d="M0,10 Q10,5 20,10 T40,10 T60,10 T80,10 T100,10 T120,10 T140,10 T160,10 T180,10 T200,10" fill="none" stroke="currentColor" strokeWidth="1" />
-                    </svg>
-                    <span className="clip-label">Background.wav</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
+        <TimelineCanvas
+          displaySpeakers={displaySpeakers}
+          displaySegments={displaySegments}
+          currentActive={currentActive}
+          musicFiles={musicFiles}
+          backgroundDurations={backgroundDurations}
+          audioDurations={audioDurations}
+          mutedTracks={mutedTracks}
+          onToggleTrackMute={toggleTrackMute}
+          zoomLevel={zoomLevel}
+          currentTime={currentTime}
+          duration={duration}
+          isPlaying={isPlaying}
+          onSeek={seekToTime}
+          onSelectSegment={handleSelectSegment}
+        />
       </div>
 
-      {/* ── Settings Modal (Voice Assignment) ─────────────────────────────── */}
-      {showSettingsPanel && (
-        <>
-          {/* Overlay */}
-          <div
-            className="settings-modal-overlay"
-            onClick={onCloseSettingsPanel}
-            aria-hidden="true"
-          />
-          {/* Drawer panel */}
-          <div className="settings-modal-panel" role="dialog" aria-label="Project Settings" aria-modal="true">
-            {/* Header */}
-            <div className="settings-modal-header">
-              <div className="settings-modal-title">
-                <span className="material-symbols-outlined" style={{ color: 'var(--primary)' }}>tune</span>
-                <span>Project & Pipeline Settings</span>
-              </div>
-              <button
-                type="button"
-                className="settings-modal-close"
-                onClick={onCloseSettingsPanel}
-                aria-label="Close settings"
-              >
-                <span className="material-symbols-outlined">close</span>
-              </button>
-            </div>
+      <SettingsModal
+        show={showSettingsPanel ?? false}
+        onClose={onCloseSettingsPanel ?? (() => {})}
+        activeTab={activeSettingsTab}
+        onTabChange={setActiveSettingsTab}
+        displaySpeakers={displaySpeakers}
+        voiceProfiles={voiceProfiles}
+        speakerMap={speakerMap}
+        onSpeakerMapChange={setSpeakerMap}
+        speakerMapStatus={speakerMapStatus}
+        globalConfig={globalConfig}
+        globalOptions={globalOptions}
+        globalSettingsValues={globalSettingsValues}
+        onGlobalSettingsValuesChange={setGlobalSettingsValues}
+        globalSettingsSaving={globalSettingsSaving}
+        globalSettingsStatus={globalSettingsStatus}
+        speakerMapSaving={speakerMapSaving}
+        onSaveSpeakerMap={handleSaveSpeakerMap}
+        onSaveGlobalSettings={async () => {
+          if (!client || !globalConfig) return
+          setGlobalSettingsSaving(true)
+          try {
+            const normalized = { ...globalSettingsValues }
+            for (const field of globalConfig.schema.fields) {
+              if (['list', 'object', 'structured'].includes(field.type) && typeof normalized[field.name] === 'string') {
+                try { normalized[field.name] = JSON.parse(normalized[field.name] as string) as JsonValue } catch (e) {}
+              }
+            }
+            const updated = await client.put<ConfigResponse>('/api/config', { revision: globalConfig.revision, values: normalized })
+            
+            const projectName = selectedProjectName || projects.find((p) => p.job_id === selectedJobId)?.name || jobs.find((j) => j.id === selectedJobId)?.project_name
+            if (projectName) {
+              try {
+                await client.put(`/api/projects/${encodeURIComponent(projectName)}/config`, { values: normalized })
+              } catch (err) {
+                console.warn('Failed to sync settings to project metadata:', err)
+              }
+            }
 
-            {/* Quick Filter Tabs */}
-            <div className="settings-modal-tabs" role="tablist">
-              {[
-                { id: 'all', label: 'All Stages', icon: 'apps' },
-                { id: 'voices', label: 'Voices', icon: 'manage_accounts' },
-                { id: 'LLM & Translation', label: 'LLM & Trans', icon: 'psychology' },
-                { id: 'Transcription & Diarization', label: 'Transcription', icon: 'subtitles' },
-                { id: 'Voice Generation (TTS)', label: 'TTS Engine', icon: 'record_voice_over' },
-                { id: 'Timing & Mixing', label: 'Timing & Mix', icon: 'tune' },
-                { id: 'Emotions & Context', label: 'Emotions', icon: 'mood' },
-                { id: 'Debug & Watermarks', label: 'Debug', icon: 'bug_report' },
-              ].map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={activeSettingsTab === tab.id}
-                  className={`settings-tab-btn${activeSettingsTab === tab.id ? ' active' : ''}`}
-                  onClick={() => setActiveSettingsTab(tab.id)}
-                >
-                  <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>{tab.icon}</span>
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-
-            {/* Modal Body */}
-            <div className="settings-modal-body">
-              {/* ── Voice Assignment Section ── */}
-              {(activeSettingsTab === 'all' || activeSettingsTab === 'voices') && (
-                <div className="settings-group-card settings-group-card--voice">
-                  <div className="settings-group-title">
-                    <span className="material-symbols-outlined">manage_accounts</span>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flex: 1 }}>
-                      <span>Voice Assignment</span>
-                      <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textTransform: 'none', fontWeight: 500 }}>
-                        {displaySpeakers.length} Detected Speakers
-                      </span>
-                    </div>
-                  </div>
-                  <p className="settings-section-desc" style={{ marginBottom: '1rem' }}>
-                    Map each detected speaker to a voice profile from the global library.
-                  </p>
-
-                  {displaySpeakers.length === 0 ? (
-                    <div className="settings-empty">
-                      <span className="material-symbols-outlined" style={{ fontSize: '28px', color: 'var(--text-muted)' }}>person_off</span>
-                      <span>No speakers detected. Open a project first.</span>
-                    </div>
-                  ) : (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '0.75rem' }}>
-                      {displaySpeakers.map((speaker, idx) => (
-                        <div
-                          key={speaker}
-                          style={{
-                            background: 'var(--bg-subtle, #1c1b1b)',
-                            border: '1px solid rgba(255,255,255,0.06)',
-                            borderRadius: '8px',
-                            padding: '0.625rem 0.875rem',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '0.75rem',
-                          }}
-                        >
-                          <span className={`speaker-dot speaker-dot-${idx % 4}`} style={{ width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0 }} />
-                          <span className="voice-assignment-speaker" style={{ fontWeight: 600, minWidth: '85px' }}>{speaker}</span>
-                          <select
-                            className="voice-assignment-select"
-                            style={{ flex: 1, padding: '0.35rem 0.5rem', fontSize: '0.8125rem' }}
-                            value={speakerMap[speaker] ?? ''}
-                            onChange={(e) => setSpeakerMap((prev) => ({ ...prev, [speaker]: e.target.value }))}
-                            aria-label={`Voice profile for ${speaker}`}
-                          >
-                            <option value="">— no override —</option>
-                            {Object.keys(voiceProfiles).map((name) => (
-                              <option key={name} value={name}>{name}</option>
-                            ))}
-                          </select>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {speakerMapStatus && (
-                    <div className={`settings-status-msg${speakerMapStatus.includes('fail') || speakerMapStatus.includes('Open') ? ' settings-status-msg--err' : ''}`} style={{ marginTop: '0.75rem' }}>
-                      {speakerMapStatus}
-                    </div>
-                  )}
-                </div>
-              )}
-              
-              {/* ── Pipeline Parameters ── */}
-              {globalConfig && (() => {
-                const grouped = globalConfig.schema.fields.reduce((acc, field) => {
-                  if (field.type === 'list' || field.type === 'object' || field.type === 'structured') return acc;
-                  const sec = field.section || getFieldSection(field.name);
-                  if (!acc[sec]) acc[sec] = [];
-                  acc[sec].push(field);
-                  return acc;
-                }, {} as Record<string, SchemaFieldDefinition[]>);
-
-                const filteredGroups = Object.entries(grouped).filter(([secName]) => {
-                  if (activeSettingsTab === 'all') return true;
-                  return activeSettingsTab === secName;
-                });
-
-                return (
-                  <div style={{ display: 'grid', gridTemplateColumns: filteredGroups.length === 1 ? '1fr' : 'repeat(auto-fit, minmax(360px, 1fr))', gap: '1rem' }}>
-                    {filteredGroups.map(([secName, fields]) => {
-                      let icon = 'settings_input_component';
-                      let cardClass = 'settings-group-card--general';
-                      if (secName.includes('LLM') || secName.includes('Translation')) { icon = 'psychology'; cardClass = 'settings-group-card--llm'; }
-                      else if (secName.includes('Transcription')) { icon = 'subtitles'; cardClass = 'settings-group-card--transcription'; }
-                      else if (secName.includes('Voice')) { icon = 'record_voice_over'; cardClass = 'settings-group-card--voice'; }
-                      else if (secName.includes('Emotion')) { icon = 'mood'; cardClass = 'settings-group-card--emotion'; }
-                      else if (secName.includes('Timing') || secName.includes('Mixing')) { icon = 'tune'; cardClass = 'settings-group-card--timing'; }
-                      else if (secName.includes('Debug')) { icon = 'bug_report'; cardClass = 'settings-group-card--debug'; }
-                      else if (secName.includes('Execution')) { icon = 'power_settings_new'; cardClass = 'settings-group-card--general'; }
-
-                      return (
-                        <div key={secName} className={`settings-group-card ${cardClass}`}>
-                          <div className="settings-group-title">
-                            <span className="material-symbols-outlined">{icon}</span>
-                            <span>{secName}</span>
-                          </div>
-                          <div className="settings-field-flow">
-                            {fields.map(field => (
-                              <SchemaField
-                                key={field.name}
-                                field={field}
-                                value={globalSettingsValues[field.name]}
-                                options={normalizeOptions(field.options ?? globalOptions[field.options_key ?? field.name])}
-                                onChange={(value) => setGlobalSettingsValues((prev) => ({ ...prev, [field.name]: value }))}
-                              />
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              })()}
-            </div>
-
-            {/* Sticky Action Footer */}
-            <div className="settings-modal-footer">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                {globalSettingsStatus && (
-                  <span className={`settings-status-msg${globalSettingsStatus.includes('fail') ? ' settings-status-msg--err' : ''}`} style={{ margin: 0 }}>
-                    {globalSettingsStatus}
-                  </span>
-                )}
-              </div>
-              <div className="settings-modal-footer-actions">
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={onCloseSettingsPanel}
-                  style={{ padding: '0.45rem 1rem' }}
-                >
-                  Close
-                </button>
-                <button
-                  type="button"
-                  className="btn-primary"
-                  onClick={async () => {
-                    if (displaySpeakers.length > 0) {
-                      handleSaveSpeakerMap();
-                    }
-                    if (client && globalConfig) {
-                      setGlobalSettingsSaving(true);
-                      try {
-                        const normalized = { ...globalSettingsValues };
-                        for (const field of globalConfig.schema.fields) {
-                          if (['list', 'object', 'structured'].includes(field.type) && typeof normalized[field.name] === 'string') {
-                            try { normalized[field.name] = JSON.parse(normalized[field.name] as string) as JsonValue; } catch (e) {}
-                          }
-                        }
-                        const updated = await client.put<ConfigResponse>('/api/config', { revision: globalConfig.revision, values: normalized });
-                        
-                        const projectName = selectedProjectName || projects.find((p) => p.job_id === selectedJobId)?.name || jobs.find((j) => j.id === selectedJobId)?.project_name;
-                        if (projectName) {
-                          try {
-                            await client.put(`/api/projects/${encodeURIComponent(projectName)}/config`, { values: normalized });
-                          } catch (err) {
-                            console.warn('Failed to sync settings to project metadata:', err);
-                          }
-                        }
-
-                        setGlobalConfig(updated);
-                        setGlobalSettingsValues(updated.values);
-                        setGlobalSettingsStatus(projectName ? 'Settings saved to global and active project.' : 'Settings applied & saved.');
-                      } catch (e) {
-                        setGlobalSettingsStatus(e instanceof Error ? e.message : 'Failed to save.');
-                      } finally {
-                        setGlobalSettingsSaving(false);
-                        setTimeout(() => setGlobalSettingsStatus(''), 3500);
-                      }
-                    }
-                  }}
-                  disabled={globalSettingsSaving || speakerMapSaving}
-                  style={{ display: 'flex', alignItems: 'center', gap: '0.375rem', padding: '0.45rem 1.25rem' }}
-                >
-                  {globalSettingsSaving || speakerMapSaving
-                    ? <><span className="material-symbols-outlined spin-anim" style={{ fontSize: '16px' }}>progress_activity</span> Applying…</>
-                    : <><span className="material-symbols-outlined" style={{ fontSize: '16px' }}>bolt</span> Save & Apply</>}
-                </button>
-              </div>
-            </div>
-          </div>
-        </>
-      )}
+            setGlobalConfig(updated)
+            setGlobalSettingsValues(updated.values)
+            setGlobalSettingsStatus(projectName ? 'Settings saved to global and active project.' : 'Settings applied & saved.')
+          } catch (e) {
+            setGlobalSettingsStatus(e instanceof Error ? e.message : 'Failed to save.')
+          } finally {
+            setGlobalSettingsSaving(false)
+            setTimeout(() => setGlobalSettingsStatus(''), 3500)
+          }
+        }}
+      />
     </section>
   )
 }
