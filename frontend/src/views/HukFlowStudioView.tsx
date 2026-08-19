@@ -701,6 +701,15 @@ export function HukFlowStudioView({
   }
 
   // ── audio preview for one segment ───────────────────────────────────────
+  useEffect(() => {
+    return () => {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause()
+        previewAudioRef.current = null
+      }
+    }
+  }, [])
+
   const handlePlaySegmentAudio = (segmentId: string, audioUrl: string) => {
     if (previewAudioRef.current) {
       previewAudioRef.current.pause()
@@ -710,8 +719,15 @@ export function HukFlowStudioView({
       setPlayingAudioSegmentId(null)
       return
     }
+    // Pause main video if it's playing so audios don't overlap
+    if (videoRef.current && !videoRef.current.paused) {
+      videoRef.current.pause()
+      setIsPlaying(false)
+    }
     try {
-      const audio = new Audio(audioUrl)
+      // Append a cache-buster so that if the audio was regenerated, we don't play the cached version
+      const urlWithBuster = audioUrl.includes('?') ? `${audioUrl}&t=${Date.now()}` : `${audioUrl}?t=${Date.now()}`
+      const audio = new Audio(urlWithBuster)
       previewAudioRef.current = audio
       setPlayingAudioSegmentId(segmentId)
       audio.onended = () => {
@@ -806,6 +822,13 @@ export function HukFlowStudioView({
       if (videoRef.current) videoRef.current.pause()
       setIsPlaying(false)
     } else {
+      // Pause segment audio preview if it's playing
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause()
+        previewAudioRef.current = null
+        setPlayingAudioSegmentId(null)
+      }
+      
       const startFrom = currentTime >= duration - 0.1 ? 0 : currentTime
       setCurrentTime(startFrom)
       if (videoRef.current) {
