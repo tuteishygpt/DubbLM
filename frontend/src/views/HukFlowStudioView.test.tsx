@@ -61,8 +61,8 @@ describe('HukFlowStudioView', () => {
     // Heading exists for a11y
     expect(screen.getByRole('heading', { name: 'HukFlow Studio', level: 1 })).toBeInTheDocument()
 
-    // Waits for first segment to load
-    expect(await screen.findByText('SPEAKER_00')).toBeInTheDocument()
+    // Waits for first segment to load (speaker is now inside a <select>)
+    expect(await screen.findByDisplayValue('SPEAKER_00')).toBeInTheDocument()
 
     // Jobs API called first
     expect(client.get).toHaveBeenCalledWith('/api/jobs')
@@ -108,8 +108,8 @@ describe('HukFlowStudioView', () => {
     const client = makeClient()
     render(<HukFlowStudioView client={client} />)
 
-    // Wait for segments
-    await screen.findByText('SPEAKER_00')
+    // Wait for segments (speaker is now inside a <select>)
+    await screen.findByDisplayValue('SPEAKER_00')
 
     // Audio play button present for segment1
     const playBtn = screen.getByTitle('Play seg-a1.wav')
@@ -134,25 +134,25 @@ describe('HukFlowStudioView', () => {
     const user = userEvent.setup()
     render(<HukFlowStudioView client={makeClient()} />)
 
-    await screen.findByText('SPEAKER_00')
+    await screen.findByDisplayValue('SPEAKER_00')
 
     const search = screen.getByLabelText('Search transcript')
     // Filter by text belonging to segment 2
     await user.type(search, 'ethical')
 
-    expect(screen.getByText('SPEAKER_01')).toBeInTheDocument()
-    expect(screen.queryByText('SPEAKER_00')).not.toBeInTheDocument()
+    expect(screen.getByDisplayValue('SPEAKER_01')).toBeInTheDocument()
+    expect(screen.queryByDisplayValue('SPEAKER_00')).not.toBeInTheDocument()
 
     await user.clear(search)
-    expect(screen.getByText('SPEAKER_00')).toBeInTheDocument()
-    expect(screen.getByText('SPEAKER_01')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('SPEAKER_00')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('SPEAKER_01')).toBeInTheDocument()
   })
 
   it('correctly updates subtitle overlay during video playback based on segment time bounds', async () => {
     const client = makeClient()
     const { container } = render(<HukFlowStudioView client={client} />)
 
-    await screen.findByText('SPEAKER_00')
+    await screen.findByDisplayValue('SPEAKER_00')
 
     const videoEl = container.querySelector('video') as HTMLVideoElement
     expect(videoEl).toBeInTheDocument()
@@ -194,7 +194,7 @@ describe('HukFlowStudioView', () => {
     })
     const { container } = render(<HukFlowStudioView client={client} />)
 
-    await screen.findByText('SPEAKER_00')
+    await screen.findByDisplayValue('SPEAKER_00')
 
     // Duration should be based on segment max end (20.5s) formatted as 00:00:20:12 instead of hardcoded 60s (00:01:00:00)
     const timecodeDisplay = container.querySelector('.timecode-display')

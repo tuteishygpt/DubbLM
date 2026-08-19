@@ -438,17 +438,27 @@ class DubbingTextService:
     def _apply_edits(
         raw_segments: list[dict[str, Any]], edits: Sequence[DubbingTextSegment]
     ) -> None:
-        if len(edits) != len(raw_segments):
+        if len(edits) > len(raw_segments):
             raise DubbingTextValidationError(
-                f"Edited row count ({len(edits)}) does not match cached segment row count "
+                f"Edited row count ({len(edits)}) exceeds cached segment row count "
                 f"({len(raw_segments)})."
             )
         raw_by_id = {
             str(segment.get("segment_id") or ""): segment for segment in raw_segments
         }
         edit_ids = [str(edit.segment_id or "") for edit in edits]
-        if len(set(edit_ids)) != len(edit_ids) or set(edit_ids) != set(raw_by_id):
-            raise DubbingTextValidationError("Edited segments do not match the persisted segment IDs.")
+        if len(set(edit_ids)) != len(edit_ids):
+            raise DubbingTextValidationError("Duplicate segment IDs in edited payload.")
+        unknown_ids = set(edit_ids) - set(raw_by_id)
+        if unknown_ids:
+            raise DubbingTextValidationError(
+                f"Edited segments contain unknown IDs: {unknown_ids}"
+            )
+        # Remove segments that are not in the edit list (i.e. deleted by the user)
+        deleted_ids = set(raw_by_id) - set(edit_ids)
+        if deleted_ids:
+            raw_segments[:] = [s for s in raw_segments if str(s.get("segment_id") or "") not in deleted_ids]
+            raw_by_id = {str(s.get("segment_id") or ""): s for s in raw_segments}
         for edit in edits:
             translation = str(edit.translation or "").strip()
             if not translation:

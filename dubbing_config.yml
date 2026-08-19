@@ -27,8 +27,8 @@ refinement_temperature: 1
 remove_pauses: false
 save_original_subtitles: false
 save_translated_subtitles: true
-segment_reference_min_duration: 1.3
-semantic_split_enabled: false
+segment_reference_min_duration: 1.2
+semantic_split_enabled: true
 semantic_split_search_window: 10
 source_language: en
 start_time: 0

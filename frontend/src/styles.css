@@ -2102,6 +2102,62 @@ ol {
   font-size: 0.75rem;
 }
 
+/* ── Editable speaker select dropdown ───────────────────────────────────── */
+.speaker-name-select {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  font-family: 'Geist', monospace;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  max-width: 150px;
+}
+.speaker-name-select:hover,
+.speaker-name-select:focus {
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.08);
+  outline: none;
+}
+.speaker-name-select option {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+/* ── Editable time inputs inside time badge ─────────────────────────────── */
+.editable-time-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
+.time-input {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  font-family: 'Geist', monospace;
+  font-size: 0.75rem;
+  width: 42px;
+  text-align: center;
+  padding: 1px 2px;
+  border-radius: 3px;
+}
+.time-input:hover,
+.time-input:focus {
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.08);
+  outline: none;
+}
+.time-separator {
+  color: var(--text-muted);
+  font-family: 'Geist', monospace;
+  font-size: 0.75rem;
+}
+
 .segment-stepper-label {
   font-family: 'Geist', monospace;
   font-size: 0.6875rem;
@@ -2245,6 +2301,26 @@ ol {
 .source-text-2 { color: #ffb2b7; }
 .source-text-3 { color: #aef0b7; }
 
+/* ── Editable source text textarea in drawer ────────────────────────────── */
+.source-text-textarea {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  font-family: 'Inter', sans-serif;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  resize: vertical;
+  box-sizing: border-box;
+}
+.source-text-textarea:focus {
+  border-color: rgba(130, 200, 255, 0.5);
+  background: rgba(255, 255, 255, 0.08);
+  outline: none;
+}
+
 .dubbed-tag {
   font-family: 'Geist', monospace;
   font-size: 0.625rem;
@@ -2309,6 +2385,30 @@ ol {
   background-color: var(--bg-highest);
 }
 .regenerate-btn.spinning span { animation: spin 1s linear infinite; }
+
+/* ── Delete segment button ──────────────────────────────────────────────── */
+.delete-segment-btn {
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  padding: 0.125rem 0.35rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  opacity: 0.5;
+}
+.delete-segment-btn .material-symbols-outlined {
+  font-size: 14px;
+}
+.delete-segment-btn:hover {
+  opacity: 1;
+  color: #ff6b6b;
+  border-color: #ff6b6b;
+  background-color: rgba(255, 107, 107, 0.1);
+}
 
 /* ── Right Pane: Video Player ────────────────────────────────────────────── */
 .studio-right-pane {

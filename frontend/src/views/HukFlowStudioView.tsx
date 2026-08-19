@@ -176,6 +176,12 @@ function formatTimecode(seconds: number): string {
   return `00:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`
 }
 
+function parseTimeInput(value: string): number | null {
+  const match = value.match(/^(\d{1,2}):(\d{2})$/)
+  if (!match) return null
+  return parseInt(match[1], 10) * 60 + parseInt(match[2], 10)
+}
+
 function normalizeOptions(value: unknown): SelectOption[] {
   return Array.isArray(value) ? value.map((item) => typeof item === 'string' ? { value: item, label: item } : item as SelectOption) : []
 }
@@ -551,6 +557,37 @@ export function HukFlowStudioView({
   const handleTranslationChange = (id: string, value: string) => {
     setSegments((prev) => prev.map((s) => s.segment_id === id ? { ...s, translation: value, synthesized_text: value } : s))
     setDirty(true)
+  }
+
+  // ── edit speaker ──────────────────────────────────────────────────────────
+  const handleSpeakerChange = (id: string, value: string) => {
+    setSegments((prev) => prev.map((s) => s.segment_id === id ? { ...s, speaker: value } : s))
+    setDirty(true)
+  }
+
+  // ── edit timestamps ───────────────────────────────────────────────────────
+  const handleTimestampChange = (id: string, field: 'start' | 'end', value: number) => {
+    setSegments((prev) => prev.map((s) => s.segment_id === id ? { ...s, [field]: value } : s))
+    setDirty(true)
+  }
+
+  // ── edit original (source) text ───────────────────────────────────────────
+  const handleSourceTextChange = (id: string, value: string) => {
+    setSegments((prev) => prev.map((s) => s.segment_id === id ? { ...s, text: value } : s))
+    setDirty(true)
+  }
+
+  // ── delete a single segment ───────────────────────────────────────────────
+  const handleDeleteSegment = (id: string) => {
+    const seg = segments.find((s) => s.segment_id === id)
+    if (!seg) return
+    const label = `${seg.speaker} [${formatTime(seg.start)} – ${formatTime(seg.end)}]`
+    if (!window.confirm(`Delete segment?\n\n${label}\n"${seg.translation.slice(0, 80)}…"\n\nThis will be applied after saving.`)) return
+    setSegments((prev) => prev.filter((s) => s.segment_id !== id))
+    if (activeSegmentId === id) setActiveSegmentId('')
+    setDirty(true)
+    setStatusMessage('Segment deleted. Save to apply.')
+    setTimeout(() => setStatusMessage(''), 4000)
   }
 
   // ── open ready project from prj/ ───────────────────────────────────────────
@@ -1082,9 +1119,43 @@ export function HukFlowStudioView({
                     <div className="card-header">
                       <div className="speaker-info">
                         <span className={`speaker-dot speaker-dot-${speakerIdx % 4}`}></span>
-                        <span className="speaker-name">{seg.speaker}</span>
-                        <span className="time-badge">
-                          {formatTime(seg.start)} – {formatTime(seg.end)}
+                        <select
+                          className="speaker-name-select"
+                          value={seg.speaker}
+                          onChange={(e) => { e.stopPropagation(); handleSpeakerChange(seg.segment_id, e.target.value) }}
+                          onClick={(e) => e.stopPropagation()}
+                          title="Change speaker"
+                        >
+                          {displaySpeakers.map((sp) => (
+                            <option key={sp} value={sp}>{sp}</option>
+                          ))}
+                        </select>
+                        <span className="time-badge editable-time-badge" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            className="time-input"
+                            defaultValue={formatTime(seg.start)}
+                            key={`start-${seg.segment_id}-${seg.start}`}
+                            onBlur={(e) => {
+                              const v = parseTimeInput(e.target.value)
+                              if (v !== null) handleTimestampChange(seg.segment_id, 'start', v)
+                              else e.target.value = formatTime(seg.start)
+                            }}
+                            onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+                            title="Start time (MM:SS)"
+                          />
+                          <span className="time-separator"> – </span>
+                          <input
+                            className="time-input"
+                            defaultValue={formatTime(seg.end)}
+                            key={`end-${seg.segment_id}-${seg.end}`}
+                            onBlur={(e) => {
+                              const v = parseTimeInput(e.target.value)
+                              if (v !== null) handleTimestampChange(seg.segment_id, 'end', v)
+                              else e.target.value = formatTime(seg.end)
+                            }}
+                            onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+                            title="End time (MM:SS)"
+                          />
                         </span>
                         {visibleSegments.length > 1 && (
                           <span className="segment-stepper-label">
@@ -1149,6 +1220,20 @@ export function HukFlowStudioView({
                         >
                           <span className="material-symbols-outlined">autorenew</span>
                         </button>
+
+                        <button
+                          type="button"
+                          className="delete-segment-btn"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            handleDeleteSegment(seg.segment_id)
+                          }}
+                          title={`Delete segment ${seg.speaker}`}
+                          data-testid={`delete-btn-${seg.segment_id}`}
+                          aria-label={`Delete segment ${seg.speaker}`}
+                        >
+                          <span className="material-symbols-outlined">delete</span>
+                        </button>
                       </div>
                     </div>
 
@@ -1166,9 +1251,13 @@ export function HukFlowStudioView({
                             <span className="material-symbols-outlined">close</span>
                           </button>
                         </div>
-                        <p className={`source-text source-text-${speakerSlot.replace('speaker-', '')}`}>
-                          {seg.text}
-                        </p>
+                        <textarea
+                          className={`source-text-textarea source-text-${speakerSlot.replace('speaker-', '')}`}
+                          value={seg.text}
+                          onChange={(e) => handleSourceTextChange(seg.segment_id, e.target.value)}
+                          rows={2}
+                          aria-label={`Source text for ${seg.speaker}`}
+                        />
                       </div>
                     )}
 
