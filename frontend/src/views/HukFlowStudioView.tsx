@@ -720,9 +720,11 @@ export function HukFlowStudioView({
       return
     }
     // Pause main video if it's playing so audios don't overlap
+    if (isPlaying) {
+      setIsPlaying(false)
+    }
     if (videoRef.current && !videoRef.current.paused) {
       videoRef.current.pause()
-      setIsPlaying(false)
     }
     try {
       // Append a cache-buster so that if the audio was regenerated, we don't play the cached version
@@ -731,18 +733,24 @@ export function HukFlowStudioView({
       previewAudioRef.current = audio
       setPlayingAudioSegmentId(segmentId)
       audio.onended = () => {
-        setPlayingAudioSegmentId(null)
-        previewAudioRef.current = null
+        if (previewAudioRef.current === audio) {
+          setPlayingAudioSegmentId(null)
+          previewAudioRef.current = null
+        }
       }
       audio.onerror = () => {
-        setPlayingAudioSegmentId(null)
-        previewAudioRef.current = null
+        if (previewAudioRef.current === audio) {
+          setPlayingAudioSegmentId(null)
+          previewAudioRef.current = null
+        }
       }
       const playPromise = audio.play()
       if (playPromise !== undefined) {
         playPromise.catch(() => {
-          setPlayingAudioSegmentId(null)
-          previewAudioRef.current = null
+          if (previewAudioRef.current === audio) {
+            setPlayingAudioSegmentId(null)
+            previewAudioRef.current = null
+          }
         })
       }
     } catch {

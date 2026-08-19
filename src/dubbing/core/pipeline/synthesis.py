@@ -736,6 +736,46 @@ def resynthesize_one_segment(
             segment_dict['synthesized_text'] = text_to_synthesize
             if override_text:
                 segment_dict['translation'] = text_to_synthesize
+            
+            # Update cache so synthesize_speech doesn't overwrite it later with a bad hallucinated version
+            if (
+                facade.cache_manager.use_cache
+                and active_context(facade).plan_dependent_cache_allowed
+            ):
+                try:
+                    source_cache_key = facade._source_cache_key()
+                    tts_fingerprint = facade._effective_tts_cache_fingerprint(
+                        facade.config.get("voices", {}),
+                        facade.config.get("project_name", "unknown"),
+                    )
+                    base_cache_prefix = f"{source_cache_key}_{tts_fingerprint}"
+                    
+                    cache_key = facade._raw_tts_segment_cache_key(
+                        base_cache_prefix=base_cache_prefix,
+                        tts_system=tts_system,
+                        segment=segment_dict,
+                        speaker=speaker,
+                        translation=text_to_synthesize,
+                        style_prompt=segment_style_prompt,
+                        reference_audio_path=tts_segment_data_args.get("reference_audio_path"),
+                        reference_mode=tts_segment_data_args.get("reference_mode"),
+                        reference_text=tts_segment_data_args.get("reference_text"),
+                        client_pool_settings=pool_key,
+                        legacy_index=segment_dict.get("_timing_original_index", segment_index),
+                        emotion=segment_dict.get("emotion", "Neutral"),
+                        tts_prompt_prefix=facade.config.get("tts_prompt_prefix"),
+                        voice_prompt=None,
+                    )
+                    segment_cache_dir = facade.cache_manager.get_cache_path("segment_synthesis")
+                    cache_path = segment_cache_dir / f"{cache_key}.wav"
+                    facade._cache_raw_tts_segment(
+                        output_path,
+                        cache_path,
+                        synthesized_text=text_to_synthesize,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to update TTS cache after resynthesis: {e}")
+
             return segment_dict
 
     raise RuntimeError(

@@ -109,9 +109,9 @@ def _concurrent_dubbing_save(
     )
     original = service._apply_edits
 
-    def delayed_apply(raw_segments: object, edits: object) -> None:
+    def delayed_apply(raw_segments: object, edits: object, config: object = None) -> None:
         time.sleep(0.4)
-        original(raw_segments, edits)
+        original(raw_segments, edits, config)
 
     service._apply_edits = delayed_apply
     start.wait()
@@ -340,7 +340,7 @@ def test_save_rejects_row_count_mismatch(text_fixture: Fixture) -> None:
     with pytest.raises(DubbingTextValidationError, match="row count"):
         fixture.service.save(
             owner_id="alice", job_id="job-1", config=fixture.config,
-            segments=loaded.segments[:1], revision=loaded.revision,
+            segments=list(loaded.segments) + [loaded.segments[0]], revision=loaded.revision,
         )
 
 

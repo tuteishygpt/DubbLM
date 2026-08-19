@@ -463,13 +463,22 @@ class DubbingTextService:
             if config:
                 su_chunks_dir = Path(str(DubbingTextService._config_get(config, "su_audio_chunks_dir", "") or ""))
                 chunks_dir = Path(str(DubbingTextService._config_get(config, "audio_chunks_dir", "") or ""))
-                prefixes = [(chunks_dir, ""), (su_chunks_dir, "tempo_"), (su_chunks_dir, "timed_"), (su_chunks_dir, "measure_")]
                 
+                def get_segment_files(idx):
+                    files = []
+                    prefixes = [(chunks_dir, ""), (su_chunks_dir, "tempo_"), (su_chunks_dir, "timed_"), (su_chunks_dir, "measure_"), (su_chunks_dir, "tempo_in_")]
+                    for d, p in prefixes:
+                        files.append((d / f"{p}{idx}.wav", d, f"{p}{{}}.wav"))
+                    if chunks_dir.exists():
+                        for f in chunks_dir.glob(f"candidate_{idx}_*.wav"):
+                            suffix = f.name[len(f"candidate_{idx}_"):-4]
+                            files.append((f, chunks_dir, f"candidate_{{}}_{suffix}.wav"))
+                    return files
+
                 # Delete files for removed segments
                 for idx, sid in enumerate(old_ids):
                     if sid in deleted_ids:
-                        for d, p in prefixes:
-                            f = d / f"{p}{idx}.wav"
+                        for f, _, _ in get_segment_files(idx):
                             try:
                                 if f.exists(): f.unlink()
                             except OSError:
@@ -480,9 +489,8 @@ class DubbingTextService:
                 for new_idx, sid in enumerate(new_ids):
                     old_idx = old_ids.index(sid)
                     if old_idx != new_idx:
-                        for d, p in prefixes:
-                            old_f = d / f"{p}{old_idx}.wav"
-                            new_f = d / f"{p}{new_idx}.wav"
+                        for old_f, d, name_template in get_segment_files(old_idx):
+                            new_f = d / name_template.format(new_idx)
                             try:
                                 if old_f.exists(): old_f.rename(new_f)
                             except OSError:
@@ -493,6 +501,7 @@ class DubbingTextService:
                         if segment:
                             segment.pop("synthesized_audio_ref", None)
                             segment.pop("_timing_original_index", None)
+                            segment.pop("synthesized_speech_file", None)
                                 
             raw_segments[:] = [s for s in raw_segments if str(s.get("segment_id") or "") not in deleted_ids]
             for s in raw_segments:
