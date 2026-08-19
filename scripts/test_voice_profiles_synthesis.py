@@ -11,7 +11,6 @@ Run:
 
 from __future__ import annotations
 
-import os
 import sys
 import traceback
 from pathlib import Path
@@ -20,17 +19,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
 load_dotenv(REPO_ROOT / ".env", override=True)
 
-import warnings
+import warnings  # noqa: E402
 warnings.simplefilter("ignore", DeprecationWarning)
 
-import yaml
+import yaml  # noqa: E402
 
-from dubbing.core.voice_profiles import FALLBACK_SPEAKER, normalize_voices, resolve_profile
-from tts.models import TTSSegmentData
-from tts.tts_factory import TTSFactory
+from dubbing.core.voice_profiles import FALLBACK_SPEAKER, normalize_voices, resolve_profile  # noqa: E402
+from tts.models import TTSSegmentData  # noqa: E402
+from tts.tts_factory import TTSFactory  # noqa: E402
 
 
 SAMPLE_SENTENCES: dict[str, str] = {

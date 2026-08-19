@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 

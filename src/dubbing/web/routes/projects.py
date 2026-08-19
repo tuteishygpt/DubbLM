@@ -31,7 +31,7 @@ def get_project(project_name: str, user=Depends(current_user), projects=Depends(
     return _project_detail_public(detail)
 
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 
 
 class ProjectRunRequest(BaseModel):

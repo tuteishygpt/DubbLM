@@ -127,7 +127,8 @@ class OmniVoiceWrapper(TTSInterface):
         self.voice_prompt_mapping = mapping or {}
 
     def initialize(self) -> None:
-        import io, contextlib
+        import io
+        import contextlib
         token = os.getenv(self.hf_token_env)
         buf = io.StringIO()
         try:

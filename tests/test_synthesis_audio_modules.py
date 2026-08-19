@@ -2,7 +2,6 @@ import importlib
 import importlib.util
 import inspect
 from pathlib import Path
-from types import SimpleNamespace
 
 from dubbing.core.smart_dubbing import SmartDubbing
 from dubbing.core.pipeline.context import PipelineRunContext

@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dubbing.web.app import create_app
-from dubbing.web.projects import ProjectNotFoundError, ProjectService, ProjectValidationError
+from dubbing.web.projects import ProjectNotFoundError, ProjectService
 from dubbing.web.storage import FileMediaStore
 from dubbing.web.jobs import FileJobRepository
 

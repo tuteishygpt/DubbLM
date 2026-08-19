@@ -13,6 +13,7 @@ import pytest
 from dubbing.web.dubbing_texts import (
     DubbingTextConflictError,
     DubbingTextContext,
+    DubbingTextSegment,
     DubbingTextService,
     DubbingTextValidationError,
     DubbingTextWriteError,

@@ -35,9 +35,9 @@ def _build_source_fingerprint(
         "duration": duration,
     }
 
-from ..core.cache_manager import CacheManager
-from ..debug.performance_tracker import PerformanceTracker
-from ..core.log_config import get_logger
+from ..core.cache_manager import CacheManager  # noqa: E402
+from ..debug.performance_tracker import PerformanceTracker  # noqa: E402
+from ..core.log_config import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
 

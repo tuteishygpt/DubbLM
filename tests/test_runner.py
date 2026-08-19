@@ -687,18 +687,6 @@ def test_translate_segments_passes_project_debug_paths_to_translator(tmp_path, m
         def write_performance_summary(self, *_args, **_kwargs):
             return None
 
-        def record_metric(self, *_args, **_kwargs):
-            return None
-
-        def record_metric(self, *_args, **_kwargs):
-            return None
-
-        def record_metric(self, *_args, **_kwargs):
-            return None
-
-        def record_metric(self, *_args, **_kwargs):
-            return None
-
     class CacheStub:
         def generate_cache_key(self, *_args, **_kwargs):
             return "cache-key"

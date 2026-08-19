@@ -480,7 +480,8 @@ class DubbingTextService:
                     if sid in deleted_ids:
                         for f, _, _ in get_segment_files(idx):
                             try:
-                                if f.exists(): f.unlink()
+                                if f.exists():
+                                    f.unlink()
                             except OSError:
                                 pass
                 
@@ -492,7 +493,8 @@ class DubbingTextService:
                         for old_f, d, name_template in get_segment_files(old_idx):
                             new_f = d / name_template.format(new_idx)
                             try:
-                                if old_f.exists(): old_f.rename(new_f)
+                                if old_f.exists():
+                                    old_f.rename(new_f)
                             except OSError:
                                 pass
                         
@@ -973,7 +975,8 @@ class DubbingTextService:
             metadata_path = artifacts_dir / "project_metadata.json"
             if metadata_path.is_file():
                 try:
-                    import json, yaml
+                    import json
+                    import yaml
                     meta = json.loads(metadata_path.read_text(encoding="utf-8"))
                     saved_cfg = meta.get("config") if isinstance(meta.get("config"), dict) else {}
                     speaker_map = saved_cfg.get("speaker_map") if isinstance(saved_cfg.get("speaker_map"), dict) else None

@@ -15,11 +15,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
 load_dotenv(REPO_ROOT / ".env", override=True)
 
-from google import genai
-from google.genai import types as genai_types
+from google import genai  # noqa: E402
+from google.genai import types as genai_types  # noqa: E402
 
 
 MODEL = "gemini-3.1-flash-tts-preview"

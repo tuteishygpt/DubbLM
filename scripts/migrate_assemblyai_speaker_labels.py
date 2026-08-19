@@ -30,7 +30,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 CANONICAL_RE = re.compile(r"^SPEAKER_\d{2}$")
 

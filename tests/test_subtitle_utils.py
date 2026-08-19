@@ -1,4 +1,3 @@
-from pathlib import Path
 
 
 def test_save_subtitles_works_without_nltk(tmp_path):

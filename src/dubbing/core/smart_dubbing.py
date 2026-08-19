@@ -11,51 +11,41 @@ os.environ['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES', '0')
 # --- End of suppression block ---
 
 import time
-import hashlib
-import csv
-import json
-import math
 import torch
 import warnings
-import shutil
-import subprocess
 from functools import wraps
-from typing import Dict, Iterable, List, Tuple, Optional, Any, Literal, Union
+from typing import Dict, Iterable, List, Tuple, Optional, Any
 from pathlib import Path
-from urllib.parse import quote
-from dotenv import load_dotenv
 from pydub import AudioSegment
 
 # Disable all warnings for a cleaner output.
 warnings.filterwarnings("ignore")
 
 # Import our components
-from .config import DubbingConfig
-from .cache_manager import CacheManager
-from .voice_profiles import (
-    FALLBACK_SPEAKER,
+from .config import DubbingConfig  # noqa: E402
+from .cache_manager import CacheManager  # noqa: E402
+from .voice_profiles import (  # noqa: E402
     VoiceProfile,
     normalize_voices,
     reject_legacy_voice_config,
-    resolve_profile,
 )
-from ..audio.audio_processor import AudioProcessor
-from ..audio.speaker_processor import SpeakerProcessor
-from ..video.video_processor import VideoProcessor
-from ..debug.performance_tracker import PerformanceTracker
-from ..debug.debug_generator import DebugGenerator
-from ..debug.reporter import SpeakerReporter
-from ..utils.subtitle_utils import SubtitleManager
-from .log_config import get_logger
-from .pipeline import artifacts as artifact_helpers
-from .pipeline import audio_assembly as audio_assembly_helpers
-from .pipeline import synthesis as synthesis_helpers
-from .pipeline import cache_keys as cache_key_helpers
-from .pipeline import emotions as emotion_helpers
-from .pipeline import references as reference_helpers
-from .pipeline import transcription as transcription_helpers
-from .pipeline import translation as translation_helpers
-from .pipeline.context import (
+from ..audio.audio_processor import AudioProcessor  # noqa: E402
+from ..audio.speaker_processor import SpeakerProcessor  # noqa: E402
+from ..video.video_processor import VideoProcessor  # noqa: E402
+from ..debug.performance_tracker import PerformanceTracker  # noqa: E402
+from ..debug.debug_generator import DebugGenerator  # noqa: E402
+from ..debug.reporter import SpeakerReporter  # noqa: E402
+from ..utils.subtitle_utils import SubtitleManager  # noqa: E402
+from .log_config import get_logger  # noqa: E402
+from .pipeline import artifacts as artifact_helpers  # noqa: E402
+from .pipeline import audio_assembly as audio_assembly_helpers  # noqa: E402
+from .pipeline import synthesis as synthesis_helpers  # noqa: E402
+from .pipeline import cache_keys as cache_key_helpers  # noqa: E402
+from .pipeline import emotions as emotion_helpers  # noqa: E402
+from .pipeline import references as reference_helpers  # noqa: E402
+from .pipeline import transcription as transcription_helpers  # noqa: E402
+from .pipeline import translation as translation_helpers  # noqa: E402
+from .pipeline.context import (  # noqa: E402
     active_context,
     commit_context,
     snapshot_context,
@@ -63,9 +53,7 @@ from .pipeline.context import (
 )
 
 # Import existing factories and interfaces
-from tts.tts_factory import TTSFactory
-from translation.llm_translator import DEFAULT_LLM_MODELS
-from translation.translator_factory import TranslatorFactory
+from translation.llm_translator import DEFAULT_LLM_MODELS  # noqa: E402
 
 # Get logger
 logger = get_logger(__name__)

@@ -1,6 +1,5 @@
 import json
 import math
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -580,7 +579,8 @@ def test_ffmpeg_failure_uses_unmodified_duration_in_diagnostics(tmp_path, monkey
         returncode = 1
         stderr = b"tempo failed"
 
-    monkeypatch.setattr(smart_dubbing_module.subprocess, "run", lambda *args, **kwargs: FailedProcess())
+    import dubbing.core.pipeline.audio_assembly as audio_assembly_module
+    monkeypatch.setattr(audio_assembly_module.subprocess, "run", lambda *args, **kwargs: FailedProcess())
 
     _, positions = dubber._adjust_and_combine_audio_grouped(segments)
 
@@ -983,6 +983,7 @@ def test_single_row_resynthesis_generates_only_selected_text(tmp_path):
     dubber.speakers_audio_dir = tmp_path / "speakers"
     dubber.su_audio_chunks_dir.mkdir()
     dubber.speakers_audio_dir.mkdir()
+    dubber.cache_manager = SimpleNamespace(use_cache=False)
     dubber._resolve_voice_profile = lambda _speaker: profile
     dubber._profile_pool_key = lambda _profile: ("fake",)
     dubber._default_tts_system = lambda: "fake"
