@@ -83,3 +83,20 @@ def update_speaker_map(
     """Save a SPEAKER_XX → profile-name mapping into the project's metadata."""
     projects.update_speaker_map(project_name, user.id, payload.speaker_map)
     return {"ok": True}
+
+
+class ProjectConfigUpdateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    values: dict[str, Any]
+
+
+@router.put("/{project_name}/config", status_code=status.HTTP_200_OK)
+def update_project_config(
+    project_name: str,
+    payload: ProjectConfigUpdateBody,
+    user=Depends(current_user),
+    projects=Depends(get_project_service),
+):
+    """Merge new config values into the active project's metadata."""
+    projects.update_project_config(project_name, user.id, payload.values)
+    return {"ok": True}

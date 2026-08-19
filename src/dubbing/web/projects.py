@@ -229,6 +229,51 @@ class ProjectService:
                 except OSError:
                     pass
 
+    def update_project_config(
+        self, project_name: str, owner_id: str, values: dict[str, Any]
+    ) -> None:
+        """Merge new config values into project_metadata.json for the active project."""
+        project_dir = self._validate_project_dir(project_name)
+        artifacts_dir = project_dir / "artifacts"
+        if not artifacts_dir.is_dir():
+            return
+        
+        metadata_path = artifacts_dir / "project_metadata.json"
+        if not metadata_path.is_file():
+            return
+
+        metadata = self._read_project_metadata(artifacts_dir)
+        cfg = metadata.get("config") if isinstance(metadata.get("config"), dict) else {}
+        
+        for k, v in values.items():
+            cfg[k] = v
+            
+        metadata["config"] = cfg
+        import tempfile
+        content = json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8")
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=artifacts_dir,
+                prefix=".project_metadata.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp:
+                tmp_path = tmp.name
+                tmp.write(content)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_path, metadata_path)
+        except OSError as exc:
+            raise ProjectError(f"Could not update project configuration: {exc}") from exc
+        finally:
+            if tmp_path:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
     def _load_global_settings(self) -> dict[str, Any]:
         """Read and parse dubbing_config.yml as a plain dict."""
         import yaml

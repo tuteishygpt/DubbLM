@@ -872,6 +872,123 @@ main section {
   gap: 0.75rem;
 }
 
+.settings-field-flow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem 1.5rem;
+  align-items: flex-end;
+}
+.settings-field-flow > label {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.settings-field-flow > label.field-code {
+  flex: 1 1 100%;
+}
+.settings-group-card {
+  background: var(--bg-card, #201f1f);
+  border: 1px solid var(--border-color, #494454);
+  border-radius: var(--radius-lg, 12px);
+  padding: 1.25rem 1.5rem;
+  box-shadow: var(--shadow-sm, 0 2px 6px rgba(0,0,0,0.4));
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.settings-group-card:hover {
+  border-color: rgba(208, 188, 255, 0.4);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+
+.settings-group-card--llm { border-left: 3px solid var(--primary, #d0bcff); }
+.settings-group-card--transcription { border-left: 3px solid var(--secondary, #4cd7f6); }
+.settings-group-card--voice { border-left: 3px solid var(--tertiary, #ffb2b7); }
+.settings-group-card--timing { border-left: 3px solid #aef0b7; }
+.settings-group-card--emotion { border-left: 3px solid #ffd180; }
+.settings-group-card--debug { border-left: 3px solid #ff80ab; }
+.settings-group-card--general { border-left: 3px solid var(--border-focus, #a078ff); }
+
+.settings-group-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--primary, #d0bcff);
+  margin-bottom: 1.25rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  padding-bottom: 0.75rem;
+}
+.settings-group-title .material-symbols-outlined {
+  font-size: 20px;
+  background: rgba(208,188,255,0.15);
+  padding: 0.3rem;
+  border-radius: 6px;
+  color: var(--primary);
+}
+
+/* Settings Modal Tabs */
+.settings-modal-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1.25rem 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border-color, rgba(255,255,255,0.08));
+  background: var(--bg-subtle, #1c1b1b);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.settings-modal-tabs::-webkit-scrollbar {
+  display: none;
+}
+.settings-tab-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted, #cbc3d7);
+  padding: 0.35rem 0.75rem;
+  border-radius: var(--radius-sm, 6px);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.settings-tab-btn:hover {
+  color: var(--text-main, #e5e2e1);
+  background: var(--bg-highest, #353534);
+}
+.settings-tab-btn.active {
+  color: var(--primary, #d0bcff);
+  background: rgba(208, 188, 255, 0.12);
+  border-color: rgba(208, 188, 255, 0.3);
+  font-weight: 600;
+}
+
+/* Settings Modal Sticky Footer */
+.settings-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.5rem;
+  border-top: 1px solid var(--border-color, rgba(255,255,255,0.08));
+  background: var(--bg-subtle, #1c1b1b);
+  flex-shrink: 0;
+  z-index: 10;
+}
+.settings-modal-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-left: auto;
+}
+
 label {
   display: flex;
   flex-direction: column;
@@ -4216,7 +4333,7 @@ ol {
   top: 0;
   right: 0;
   height: 100dvh;
-  width: 360px;
+  width: 900px;
   max-width: 92vw;
   background: var(--bg-surface, #1e1a2e);
   border-left: 1px solid var(--border, rgba(255,255,255,0.08));
