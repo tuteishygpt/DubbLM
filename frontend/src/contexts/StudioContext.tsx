@@ -76,7 +76,6 @@ export interface StudioState {
   onActiveMediaChange?: (info: StudioMediaInfo) => void
   showSettingsPanel?: boolean
   onCloseSettingsPanel?: () => void
-  [key: string]: any // Temporarily allow any for remaining context values
   displaySpeakers: string[]
   displaySegments: Segment[]
   visibleSegments: Segment[]

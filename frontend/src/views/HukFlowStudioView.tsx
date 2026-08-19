@@ -113,7 +113,7 @@ function StudioLayout() {
                   }}
                 >
                   <option value="">📁 Open Project (prj/)...</option>
-                  {projects.map((p: any) => (
+                  {projects.map((p) => (
                     <option key={p.name} value={p.name}>
                       📁 {p.display_name ?? p.name} {p.segment_count > 0 ? `(${p.segment_count} segments)` : ''}
                     </option>
@@ -130,7 +130,7 @@ function StudioLayout() {
                     setSelectedProjectName('')
                   }}
                 >
-                  {jobs.map((j: any) => (
+                  {jobs.map((j) => (
                     <option key={j.id} value={j.id}>
                       {j.id} ({j.status})
                     </option>
@@ -188,7 +188,7 @@ function StudioLayout() {
             )}
 
             {!isLoading &&
-              visibleSegments.map((seg: any, idx: number) => {
+              visibleSegments.map((seg, idx: number) => {
                 const isActive = seg.segment_id === (currentActive?.segment_id ?? '')
                 const speakerIdx = displaySpeakers.indexOf(seg.speaker)
                 const isSourceExpanded = Boolean(expandedSources[seg.segment_id])
