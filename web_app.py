@@ -18,7 +18,7 @@ if str(SRC_PATH) not in sys.path:
 
 load_dotenv(override=True)
 
-from dubbing.web.app import main
+from dubbing.web.app import main  # noqa: E402
 
 
 if __name__ == "__main__":

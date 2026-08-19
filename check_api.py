@@ -5,7 +5,7 @@ import json
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-from gradio_client import Client
+from gradio_client import Client  # noqa: E402
 
 c = Client('k2-fsa/OmniVoice')
 d = c.view_api(return_format='dict')

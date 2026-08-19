@@ -1,7 +1,4 @@
-﻿import sys
-import os
-from pathlib import Path
-from dubbing.core.runner import run_dubbing_job
+﻿from dubbing.core.runner import run_dubbing_job
 
 def main():
     try:

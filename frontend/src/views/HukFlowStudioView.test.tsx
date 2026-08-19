@@ -277,7 +277,7 @@ describe('HukFlowStudioView', () => {
         if (path === '/api/jobs/job-1/dubbing-texts') {
           return textDocument
         }
-        return []
+        return {}
       }) as ApiClient['get'],
     })
 

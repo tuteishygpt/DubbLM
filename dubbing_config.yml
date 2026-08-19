@@ -1,7 +1,7 @@
 background_volume: 0.762341
 debug_diarize_only: false
 debug_info: false
-debug_tts: true
+debug_tts: false
 dubbed_volume: 1
 duration: 600
 emotion_model: gemini-3.1-flash-lite
