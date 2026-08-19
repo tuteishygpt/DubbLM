@@ -165,7 +165,7 @@ class DubbingTextService:
                 state = self._load_state(context, persist_ids=True)
                 self._ensure_audio_refs(owner, job, state)
                 self._ensure_revision(revision, state.revision)
-                self._apply_edits(state.segments, segments)
+                self._apply_edits(state.segments, segments, config)
                 state.revision = self._persist_state(state)
                 state.source = "snapshot"
                 return self._public_snapshot(owner, job, state)
@@ -436,7 +436,7 @@ class DubbingTextService:
 
     @staticmethod
     def _apply_edits(
-        raw_segments: list[dict[str, Any]], edits: Sequence[DubbingTextSegment]
+        raw_segments: list[dict[str, Any]], edits: Sequence[DubbingTextSegment], config: object = None
     ) -> None:
         if len(edits) > len(raw_segments):
             raise DubbingTextValidationError(
@@ -457,7 +457,46 @@ class DubbingTextService:
         # Remove segments that are not in the edit list (i.e. deleted by the user)
         deleted_ids = set(raw_by_id) - set(edit_ids)
         if deleted_ids:
+            old_ids = [str(s.get("segment_id") or "") for s in raw_segments]
+            
+            # Delete and shift audio files on disk to match new indices
+            if config:
+                su_chunks_dir = Path(str(DubbingTextService._config_get(config, "su_audio_chunks_dir", "") or ""))
+                chunks_dir = Path(str(DubbingTextService._config_get(config, "audio_chunks_dir", "") or ""))
+                prefixes = [(chunks_dir, ""), (su_chunks_dir, "tempo_"), (su_chunks_dir, "timed_"), (su_chunks_dir, "measure_")]
+                
+                # Delete files for removed segments
+                for idx, sid in enumerate(old_ids):
+                    if sid in deleted_ids:
+                        for d, p in prefixes:
+                            f = d / f"{p}{idx}.wav"
+                            try:
+                                if f.exists(): f.unlink()
+                            except OSError:
+                                pass
+                
+                # Shift remaining files
+                new_ids = [sid for sid in old_ids if sid not in deleted_ids]
+                for new_idx, sid in enumerate(new_ids):
+                    old_idx = old_ids.index(sid)
+                    if old_idx != new_idx:
+                        for d, p in prefixes:
+                            old_f = d / f"{p}{old_idx}.wav"
+                            new_f = d / f"{p}{new_idx}.wav"
+                            try:
+                                if old_f.exists(): old_f.rename(new_f)
+                            except OSError:
+                                pass
+                        
+                        # Clear the media ref so the backend re-registers the file at its new path
+                        segment = raw_by_id.get(sid)
+                        if segment:
+                            segment.pop("synthesized_audio_ref", None)
+                            segment.pop("_timing_original_index", None)
+                                
             raw_segments[:] = [s for s in raw_segments if str(s.get("segment_id") or "") not in deleted_ids]
+            for s in raw_segments:
+                s.pop("_timing_original_index", None)
             raw_by_id = {str(s.get("segment_id") or ""): s for s in raw_segments}
         for edit in edits:
             translation = str(edit.translation or "").strip()
