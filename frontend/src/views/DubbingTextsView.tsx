@@ -1,14 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ApiClient } from '../api/types'
 
-interface Job { id: string; status: string }
-interface ProjectSummary { name: string; display_name?: string; segment_count: number; job_id: string | null }
-interface SegmentAudio { id: string; name: string; url: string }
-interface Segment {
-  segment_id: string; speaker: string; start: number; end: number; text: string; translation: string
-  synthesized_text: string; style_prompt: string; audio: SegmentAudio | null
-}
-interface TextDocument { revision: string; source: string; segments: Segment[] }
+import type { Job, TextDocument, Segment, ProjectSummary, SegmentAudio } from '../types/models'
 type EditableText = 'speaker' | 'text' | 'translation' | 'synthesized_text' | 'style_prompt'
 
 export function DubbingTextsView({ client }: { client: ApiClient }) {

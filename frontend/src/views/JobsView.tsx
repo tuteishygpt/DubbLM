@@ -1,21 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ApiClient, ConnectionState, JsonValue, SseEvent } from '../api/types'
 
-interface JobFile { id: string; name: string; kind: string; size: number }
-interface Job { id: string; status: string; files: JobFile[] }
-interface ProjectSummary {
-  name: string
-  display_name?: string
-  relative_path: string
-  has_video: boolean
-  has_subtitles: boolean
-  has_artifacts: boolean
-  has_transcription: boolean
-  segment_count: number
-  video_files: string[]
-  audio_files: string[]
-  job_id: string | null
-}
+import type { JobFile, Job, ProjectSummary } from '../types/models'
 
 export function JobsView({ client }: { client: ApiClient }) {
   const [jobs, setJobs] = useState<Job[]>([])

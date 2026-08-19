@@ -1,28 +1,8 @@
 import { FormEvent, useEffect, useState } from 'react'
 import type { ApiClient, ConfigResponse, JsonValue, OptionsResponse, SchemaFieldDefinition, SelectOption } from '../api/types'
 
-export interface VoiceProfile {
-  tts_system: string
-  model?: string
-  voice_name?: string
-  style_prompt?: string
-  reference_mode?: string
-  reference_audio?: string
-  reference_text?: string
-  params?: Record<string, unknown>
-}
+import type { VoiceProfile, ProfilesSnapshot, ReferenceEntry, ReferencesSnapshot, ExtendedOptions } from '../types/models'
 
-interface ProfilesSnapshot { revision: string; profiles: Record<string, VoiceProfile> }
-interface ReferenceEntry { speaker_id: string; reference_text: string; audio: { id: string; name: string; url: string } }
-interface ReferencesSnapshot { revision: string; entries: ReferenceEntry[] }
-
-type ExtendedOptions = OptionsResponse & {
-  tts_providers?: string[]
-  tts_models?: Record<string, string[]>
-  tts_voices?: Record<string, string[]>
-  tts_reference_capabilities?: Record<string, string>
-  reference_modes?: string[]
-}
 
 const DEFAULT_PROFILE: VoiceProfile = {
   tts_system: 'gemini',

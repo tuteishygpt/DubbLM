@@ -12,17 +12,7 @@ import { ExportDropdown } from './components/ExportDropdown'
 
 const views = ['HukFlow Studio', 'Workflow', 'Jobs', 'Settings', 'Voice Profiles', 'Dubbing Texts'] as const
 type View = (typeof views)[number]
-
-interface ProjectSummary {
-  name: string
-  display_name?: string
-  segment_count: number
-  has_video: boolean
-  has_transcription: boolean
-  job_id: string | null
-}
-
-interface Job { id: string; status: string }
+import type { ProjectSummary, Job } from './types/models'
 
 export default function App({ client = apiClient }: { client?: ApiClient }) {
   const [view, setView] = useState<View>('Workflow')

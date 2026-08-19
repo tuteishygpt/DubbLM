@@ -1,24 +1,8 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import type { ApiClient } from '../api/types'
 
-interface VoiceProfile {
-  tts_system: string
-  model?: string
-  voice_name?: string
-  reference_mode?: string
-  reference_audio?: string
-  reference_text?: string
-}
-interface ProfilesSnapshot { revision: string; profiles: Record<string, VoiceProfile> }
-interface ReferenceEntry { speaker_id: string; reference_text: string; audio: { id: string; name: string; url: string } }
-interface ReferencesSnapshot { revision: string; entries: ReferenceEntry[] }
-interface VoiceOptions {
-  tts_providers: string[]
-  tts_models: Record<string, string[]>
-  tts_voices: Record<string, string[]>
-  tts_reference_capabilities?: Record<string, string>
-  reference_modes?: string[]
-}
+import type { VoiceProfile, ProfilesSnapshot, ReferenceEntry, ReferencesSnapshot, ExtendedOptions as VoiceOptions } from '../types/models'
+
 
 const emptyProfile: VoiceProfile = { tts_system: '' }
 
