@@ -1032,13 +1032,7 @@
           "component": "Textbox"
         }
       ],
-      "api_visibility": "public",
-      "description": "",
-      "code_snippets": {
-        "python": "from gradio_client import Client, handle_file\n\nclient = Client(\"k2-fsa/OmniVoice\")\nresult = client.predict(\n\ttext=\"Hello!!\",\n\tlang=\"Auto\",\n\tref_aud=handle_file('https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav'),\n\tref_text=\"Hello!!\",\n\tinstruct=\"Hello!!\",\n\tns=32,\n\tgs=2.0,\n\tdn=True,\n\tsp=1.0,\n\tdu=3,\n\tpp=True,\n\tpo=True,\n\tapi_name=\"/_clone_fn\",\n)\nprint(result)",
-        "javascript": "import { Client } from \"@gradio/client\";\n\nconst response_0 = await fetch(\"https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav\");\nconst exampleAudio = await response_0.blob();\n\nconst client = await Client.connect(\"k2-fsa/OmniVoice\");\nconst result = await client.predict(\"/_clone_fn\", {\n\t\ttext: \"Hello!!\",\n\t\tlang: \"Auto\",\n\t\tref_aud: exampleAudio,\n\t\tref_text: \"Hello!!\",\n\t\tinstruct: \"Hello!!\",\n\t\tns: 32,\n\t\tgs: 2.0,\n\t\tdn: true,\n\t\tsp: 1.0,\n\t\tdu: 3,\n\t\tpp: true,\n\t\tpo: true,\n});\n\nconsole.log(result.data);",
-        "bash": "curl -X POST http://localhost:7860/gradio_api/call/_clone_fn -s -H \"Content-Type: application/json\" -d '{\"data\": [\"Hello!!\", \"Auto\", {\"path\": \"https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav\", \"meta\": {\"_type\": \"gradio.FileData\"}}, \"Hello!!\", \"Hello!!\", 32, 2.0, true, 1.0, 3, true, true]}' \\\n  | awk -F'\"' '{ print $4}' \\\n  | read EVENT_ID; curl -N http://localhost:7860/gradio_api/call/_clone_fn/$EVENT_ID"
-      }
+      "description": ""
     },
     "/_design_fn": {
       "parameters": [
@@ -2080,13 +2074,7 @@
           "component": "Textbox"
         }
       ],
-      "api_visibility": "public",
-      "description": "",
-      "code_snippets": {
-        "python": "from gradio_client import Client\n\nclient = Client(\"k2-fsa/OmniVoice\")\nresult = client.predict(\n\ttext=\"Hello!!\",\n\tlang=\"Auto\",\n\tns=32,\n\tgs=2.0,\n\tdn=True,\n\tsp=1.0,\n\tdu=3,\n\tpp=True,\n\tpo=True,\n\tparam_9=\"Auto\",\n\tparam_10=\"Auto\",\n\tparam_11=\"Auto\",\n\tparam_12=\"Auto\",\n\tparam_13=\"Auto\",\n\tparam_14=\"Auto\",\n\tapi_name=\"/_design_fn\",\n)\nprint(result)",
-        "javascript": "import { Client } from \"@gradio/client\";\n\nconst client = await Client.connect(\"k2-fsa/OmniVoice\");\nconst result = await client.predict(\"/_design_fn\", {\n\t\ttext: \"Hello!!\",\n\t\tlang: \"Auto\",\n\t\tns: 32,\n\t\tgs: 2.0,\n\t\tdn: true,\n\t\tsp: 1.0,\n\t\tdu: 3,\n\t\tpp: true,\n\t\tpo: true,\n\t\tparam_9: \"Auto\",\n\t\tparam_10: \"Auto\",\n\t\tparam_11: \"Auto\",\n\t\tparam_12: \"Auto\",\n\t\tparam_13: \"Auto\",\n\t\tparam_14: \"Auto\",\n});\n\nconsole.log(result.data);",
-        "bash": "curl -X POST http://localhost:7860/gradio_api/call/_design_fn -s -H \"Content-Type: application/json\" -d '{\"data\": [\"Hello!!\", \"Auto\", 32, 2.0, true, 1.0, 3, true, true, \"Auto\", \"Auto\", \"Auto\", \"Auto\", \"Auto\", \"Auto\"]}' \\\n  | awk -F'\"' '{ print $4}' \\\n  | read EVENT_ID; curl -N http://localhost:7860/gradio_api/call/_design_fn/$EVENT_ID"
-      }
+      "description": ""
     }
   },
   "unnamed_endpoints": {}

@@ -581,8 +581,6 @@ export function HukFlowStudioView({
   const handleDeleteSegment = (id: string) => {
     const seg = segments.find((s) => s.segment_id === id)
     if (!seg) return
-    const label = `${seg.speaker} [${formatTime(seg.start)} – ${formatTime(seg.end)}]`
-    if (!window.confirm(`Delete segment?\n\n${label}\n"${seg.translation.slice(0, 80)}…"\n\nThis will be applied after saving.`)) return
     setSegments((prev) => prev.filter((s) => s.segment_id !== id))
     if (activeSegmentId === id) setActiveSegmentId('')
     setDirty(true)
