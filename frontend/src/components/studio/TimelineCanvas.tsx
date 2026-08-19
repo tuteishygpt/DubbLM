@@ -1,41 +1,27 @@
 import { useEffect, useRef } from 'react'
-import type { Segment, JobFile } from '../../types/models'
+import type { Segment } from '../../types/models'
 import { formatTime } from '../../utils/time'
 import { SegmentWaveform } from './SegmentWaveform'
+import { useStudio } from '../../contexts/StudioContext'
 
-export interface TimelineCanvasProps {
-  displaySpeakers: string[]
-  displaySegments: Segment[]
-  currentActive: Segment | null
-  musicFiles: JobFile[]
-  backgroundDurations: Record<string, number>
-  audioDurations: Record<string, number>
-  mutedTracks: Record<string, boolean>
-  onToggleTrackMute: (track: string) => void
-  zoomLevel: number
-  currentTime: number
-  duration: number
-  isPlaying: boolean
-  onSeek: (time: number) => void
-  onSelectSegment: (seg: Segment) => void
-}
+export function TimelineCanvas() {
+  const {
+    displaySpeakers,
+    displaySegments,
+    currentActive,
+    musicFiles,
+    backgroundDurations,
+    audioDurations,
+    mutedTracks,
+    toggleTrackMute: onToggleTrackMute,
+    zoomLevel,
+    currentTime,
+    duration,
+    isPlaying,
+    seekToTime: onSeek,
+    handleSelectSegment: onSelectSegment,
+  } = useStudio()
 
-export function TimelineCanvas({
-  displaySpeakers,
-  displaySegments,
-  currentActive,
-  musicFiles,
-  backgroundDurations,
-  audioDurations,
-  mutedTracks,
-  onToggleTrackMute,
-  zoomLevel,
-  currentTime,
-  duration,
-  isPlaying,
-  onSeek,
-  onSelectSegment,
-}: TimelineCanvasProps) {
   const timelineCanvasRef = useRef<HTMLDivElement>(null)
 
   // Zoom scale for voice and audio tracks (100% to 460% width)

@@ -2,41 +2,27 @@ import { RefObject } from 'react'
 import { formatTimecode } from '../../utils/time'
 import type { Segment } from '../../types/models'
 
-export interface VideoPlayerCanvasProps {
-  videoRef: RefObject<HTMLVideoElement>
-  videoSrc: string
-  currentTime: number
-  setCurrentTime: (time: number) => void
-  duration: number
-  videoDuration: number
-  setVideoDuration: (time: number) => void
-  isPlaying: boolean
-  setIsPlaying: (playing: boolean) => void
-  togglePlayPause: () => void
-  liveSubSegment: Segment | undefined
-  handleScrubberClick: (e: React.MouseEvent<HTMLDivElement>) => void
-  displaySegments: Segment[]
-  currentActive: Segment | null
-  handleSelectSegment: (seg: Segment) => void
-}
+import { useStudio } from '../../contexts/StudioContext'
 
-export function VideoPlayerCanvas({
-  videoRef,
-  videoSrc,
-  currentTime,
-  setCurrentTime,
-  duration,
-  videoDuration,
-  setVideoDuration,
-  isPlaying,
-  setIsPlaying,
-  togglePlayPause,
-  liveSubSegment,
-  handleScrubberClick,
-  displaySegments,
-  currentActive,
-  handleSelectSegment,
-}: VideoPlayerCanvasProps) {
+export function VideoPlayerCanvas() {
+  const {
+    videoRef,
+    videoSrc,
+    currentTime,
+    setCurrentTime,
+    duration,
+    videoDuration,
+    setVideoDuration,
+    isPlaying,
+    setIsPlaying,
+    togglePlayPause,
+    liveSubSegment,
+    handleScrubberClick,
+    displaySegments,
+    currentActive,
+    handleSelectSegment,
+  } = useStudio()
+
   return (
     <div className="video-preview-wrapper">
       <div className="video-canvas">

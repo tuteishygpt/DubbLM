@@ -3,27 +3,6 @@ import type { ConfigResponse, JsonValue, OptionsResponse, SchemaFieldDefinition 
 import { SchemaField } from '../SchemaField'
 import type { ApiClient } from '../../api/types'
 
-export interface SettingsModalProps {
-  show: boolean
-  onClose: () => void
-  activeTab: string
-  onTabChange: (tabId: string) => void
-  displaySpeakers: string[]
-  voiceProfiles: Record<string, VoiceProfile>
-  speakerMap: Record<string, string>
-  onSpeakerMapChange: (map: Record<string, string>) => void
-  speakerMapStatus: string
-  globalConfig: ConfigResponse | null
-  globalOptions: OptionsResponse
-  globalSettingsValues: Record<string, JsonValue>
-  onGlobalSettingsValuesChange: (values: Record<string, JsonValue>) => void
-  globalSettingsSaving: boolean
-  globalSettingsStatus: string
-  onSaveSpeakerMap: () => void
-  onSaveGlobalSettings: () => void
-  speakerMapSaving: boolean
-}
-
 function normalizeOptions(value: unknown): any[] {
   return Array.isArray(value) ? value.map((item) => typeof item === 'string' ? { value: item, label: item } : item) : []
 }
@@ -38,27 +17,71 @@ function getFieldSection(fieldName: string): string {
   return 'General Execution';
 }
 
-export function SettingsModal({
-  show,
-  onClose,
-  activeTab,
-  onTabChange,
-  displaySpeakers,
-  voiceProfiles,
-  speakerMap,
-  onSpeakerMapChange,
-  speakerMapStatus,
-  globalConfig,
-  globalOptions,
-  globalSettingsValues,
-  onGlobalSettingsValuesChange,
-  globalSettingsSaving,
-  globalSettingsStatus,
-  onSaveSpeakerMap,
-  onSaveGlobalSettings,
-  speakerMapSaving,
-}: SettingsModalProps) {
+import { useStudio } from '../../contexts/StudioContext'
+
+export function SettingsModal() {
+  const {
+    showSettingsPanel: show,
+    onCloseSettingsPanel: onClose,
+    activeSettingsTab: activeTab,
+    setActiveSettingsTab: onTabChange,
+    displaySpeakers,
+    voiceProfiles,
+    speakerMap,
+    setSpeakerMap: onSpeakerMapChange,
+    speakerMapStatus,
+    globalConfig,
+    globalOptions,
+    globalSettingsValues,
+    setGlobalSettingsValues: onGlobalSettingsValuesChange,
+    globalSettingsSaving,
+    globalSettingsStatus,
+    handleSaveSpeakerMap: onSaveSpeakerMap,
+    client,
+    projects,
+    jobs,
+    selectedJobId,
+    selectedProjectName,
+    setGlobalSettingsStatus,
+    setGlobalConfig,
+    setGlobalSettingsSaving,
+    speakerMapSaving,
+  } = useStudio()
+
   if (!show) return null
+
+  // Define the save handler locally in SettingsModal since it needs specific fields
+  const onSaveGlobalSettings = async () => {
+    if (!client || !globalConfig) return
+    setGlobalSettingsSaving(true)
+    try {
+      const normalized = { ...globalSettingsValues }
+      for (const field of globalConfig.schema.fields) {
+        if (['list', 'object', 'structured'].includes(field.type) && typeof normalized[field.name] === 'string') {
+          try { normalized[field.name] = JSON.parse(normalized[field.name] as string) as JsonValue } catch (e) {}
+        }
+      }
+      const updated = await client.put<ConfigResponse>('/api/config', { revision: globalConfig.revision, values: normalized })
+      
+      const projectName = selectedProjectName || projects.find((p: any) => p.job_id === selectedJobId)?.name || jobs.find((j: any) => j.id === selectedJobId)?.project_name
+      if (projectName) {
+        try {
+          await client.put(`/api/projects/${encodeURIComponent(projectName)}/config`, { values: normalized })
+        } catch (err) {
+          console.warn('Failed to sync settings to project metadata:', err)
+        }
+      }
+
+      setGlobalConfig(updated)
+      onGlobalSettingsValuesChange(updated.values)
+      setGlobalSettingsStatus(projectName ? 'Settings saved to global and active project.' : 'Settings applied & saved.')
+    } catch (e) {
+      setGlobalSettingsStatus(e instanceof Error ? e.message : 'Failed to save.')
+    } finally {
+      setGlobalSettingsSaving(false)
+      setTimeout(() => setGlobalSettingsStatus(''), 3500)
+    }
+  }
 
   return (
     <>

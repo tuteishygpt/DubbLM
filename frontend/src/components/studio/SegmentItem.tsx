@@ -3,25 +3,15 @@ import type { Segment } from '../../types/models'
 
 const SPEAKER_COLOURS = ['speaker-0', 'speaker-1', 'speaker-2', 'speaker-3'] as const
 
+import { useStudio } from '../../contexts/StudioContext'
+
 export interface SegmentItemProps {
   segment: Segment
   isActive: boolean
   speakerIdx: number
   isSourceExpanded: boolean
-  displaySpeakers: string[]
-  playingAudioSegmentId: string | null
-  regeneratingId: string | null
   segmentIndex: number
   totalSegments: number
-  onSelect: (seg: Segment) => void
-  onSpeakerChange: (id: string, val: string) => void
-  onTimestampChange: (id: string, field: 'start' | 'end', val: number) => void
-  onSourceTextChange: (id: string, val: string) => void
-  onTranslationChange: (id: string, val: string) => void
-  onToggleSource: (id: string) => void
-  onPlayAudio: (id: string, url: string) => void
-  onRegenerateAudio: (id: string) => void
-  onDelete: (id: string) => void
 }
 
 export function SegmentItem({
@@ -29,21 +19,24 @@ export function SegmentItem({
   isActive,
   speakerIdx,
   isSourceExpanded,
-  displaySpeakers,
-  playingAudioSegmentId,
-  regeneratingId,
   segmentIndex,
   totalSegments,
-  onSelect,
-  onSpeakerChange,
-  onTimestampChange,
-  onSourceTextChange,
-  onTranslationChange,
-  onToggleSource,
-  onPlayAudio,
-  onRegenerateAudio,
-  onDelete,
 }: SegmentItemProps) {
+  const {
+    displaySpeakers,
+    playingAudioSegmentId,
+    regeneratingId,
+    handleSelectSegment: onSelect,
+    handleSpeakerChange: onSpeakerChange,
+    handleTimestampChange: onTimestampChange,
+    handleSourceTextChange: onSourceTextChange,
+    handleTranslationChange: onTranslationChange,
+    toggleSource: onToggleSource,
+    handlePlaySegmentAudio: onPlayAudio,
+    handleRegenerateAudio: onRegenerateAudio,
+    handleDeleteSegment: onDelete,
+  } = useStudio()
+
   const hasAudio = seg.audio !== null
   const speakerSlot = SPEAKER_COLOURS[speakerIdx % 4]
 
