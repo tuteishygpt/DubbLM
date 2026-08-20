@@ -844,6 +844,13 @@ export function StudioProvider({
 
   const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null)
 
+  useEffect(() => {
+    const target = window.document.getElementById('studio-header-run-slot')
+    if (target) {
+      setPortalTarget(target)
+    }
+  }, [])
+
   // ── context value ────────────────────────────────────────────────────────
   const value = {
     client,
